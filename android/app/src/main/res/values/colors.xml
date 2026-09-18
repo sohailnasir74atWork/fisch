@@ -1,0 +1,10 @@
+<resources>
+    <!--
+      Light-mode values. values-night/colors.xml defines the same names for dark
+      mode, so the boot splash and the window behind React Native both follow the
+      system theme. The colours mirror LIGHT.bg / DARK.bg in Code/Design/tokens.js
+      so the splash hands over to the first screen without a colour step.
+    -->
+    <color name="bootsplash_background">#F4F9FB</color>
+    <color name="app_window_background">#F4F9FB</color>
+</resources>

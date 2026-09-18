@@ -1,0 +1,2721 @@
+import React, { useCallback, useEffect, useMemo, useState, useRef } from 'react';
+import {
+  View, FlatList, Text, TouchableOpacity, StyleSheet, Image, ActivityIndicator, TextInput, Alert, Platform, Animated, Linking } from 'react-native';
+import Icon from 'react-native-vector-icons/Ionicons';
+import dayjs from 'dayjs';
+import relativeTime from 'dayjs/plugin/relativeTime';
+import { useGlobalState } from '../GlobelStats';
+import config from '../Helper/Environment';
+import { useNavigation } from '@react-navigation/native';
+
+import ReportTradePopup from './ReportTradePopUp';
+import SignInDrawer from '../Firebase/SigninDrawer';
+import { useLocalState } from '../LocalGlobelStats';
+import { ABOVE_BANNER, FLOATING_BUTTON_ICON_SIZE, FLOATING_BUTTON_RIGHT } from '../Helper/floatingButtonLayout';
+import Clipboard from '@react-native-clipboard/clipboard';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
+import { useTranslation } from 'react-i18next';
+import { showSuccessMessage, showErrorMessage } from '../Helper/MessageHelper';
+import SubscriptionScreen from '../SettingScreen/OfferWall';
+import { mixpanel } from '../AppHelper/MixPenel';
+import InterstitialAdManager from '../Ads/IntAd';
+import RewardedAdManager from '../Ads/RewardedAdManager';
+import BannerAdComponent from '../Ads/bannerAds';
+import NativeAdCard from '../Ads/NativeAdCard';
+import { releaseByPrefix as releaseNativeAds } from '../Ads/NativeAdManager';
+import FontAwesome from 'react-native-vector-icons/FontAwesome6';
+import ProfileBottomDrawer from '../ChatScreen/GroupChat/BottomDrawer';
+import FramedAvatar from '../ChatScreen/GroupChat/FramedAvatar';
+import { getCachedProfile, warmProfileCache } from '../Helper/profileCache';
+import { normalizeSearchTerm, tradeMatchesLocally } from './tradeSearchIndex';
+import UserBadgePill, { getFirstBadgeType } from '../Helper/UserBadgePill';
+import { isUserOnline } from '../ChatScreen/utils';
+import { useHaptic } from '../Helper/HepticFeedBack';
+
+// ── Boost limits ───────────────────────────────────────────────────────────
+// Free users can feature one trade per 24h by watching a rewarded ad. Pro keeps
+// its two instant boosts, so paying still buys both quantity and the
+// convenience of skipping the ad — the ad path must not undercut the
+// subscription.
+const AD_BOOST_DAILY_LIMIT = 1;
+const PRO_BOOST_DAILY_LIMIT = 2;
+
+// How long a boost keeps a trade at the top.
+const FEATURE_DURATION_MS = 24 * 60 * 60 * 1000;
+
+// The rolling window the per-user boost limits are counted over. Deliberately
+// SEPARATE from FEATURE_DURATION_MS even though both are 24h today: if they
+// were one constant, shortening the boost would silently multiply everyone's
+// daily allowance.
+const BOOST_LIMIT_WINDOW_MS = 24 * 60 * 60 * 1000;
+
+// Trades carry featuredUntil, not a boostedAt stamp, and
+// featuredUntil = boostedAt + FEATURE_DURATION_MS. So "boosted inside the limit
+// window" is featuredUntil > now - (WINDOW - DURATION). Querying `now - WINDOW`
+// directly — what the Pro path did — counts a boost as recent for
+// WINDOW + DURATION, i.e. 48h here, so the "2 per 24 hours" limit was really
+// two per two days.
+const BOOST_WINDOW_START_OFFSET_MS = BOOST_LIMIT_WINDOW_MS - FEATURE_DURATION_MS;
+import {
+  collection,
+  deleteDoc,
+  doc,
+  getDoc,
+  getDocs,
+  limit,
+  orderBy,
+  Timestamp,
+  where,
+  query,
+  startAfter,
+  updateDoc,
+} from '@react-native-firebase/firestore';
+import { saveTrade, unsaveTrade, fetchSavedTradeRefs } from './tradeHelpers';
+import { resolveItemImage, VALUE_SOURCE, sourceLabel,
+} from '../Helper/valueSources';
+import { GAME } from '../config/game';
+import { STATUS } from '../Design/tokens';
+import { getThemeColors } from '../Helper/themeColors';
+import { SIZE } from '../Design/tokens';
+import { SPACE } from '../Design/tokens';
+import { FONT } from '../Design/tokens';
+
+// Initialize dayjs plugins
+dayjs.extend(relativeTime);
+
+
+const TradeList = ({ route }) => {
+  const [searchQuery, setSearchQuery] = useState('');
+  const [searchInHas, setSearchInHas] = useState(true); // ✅ Search in "ME" side (hasItems)
+  const [searchInWants, setSearchInWants] = useState(true); // ✅ Search in "YOU" side (wantsItems)
+  const [isSearching, setIsSearching] = useState(false); // ✅ Loading state for search
+  const [isSearchMode, setIsSearchMode] = useState(false); // ✅ Track if we're in search mode
+  // One cursor PER SIDE. A single shared cursor was passed as startAfter to
+  // both queries, and a document's position is only meaningful within the
+  // query that produced it.
+  const [searchCursors, setSearchCursors] = useState({ has: null, wants: null });
+  const [searchHasMore, setSearchHasMore] = useState(true); // ✅ More results available for search
+  const SEARCH_PAGE_SIZE = 5; // ✅ Fetch 5 items at a time for search
+  // const [isAdVisible, setIsAdVisible] = useState(true);
+  const { selectedTheme, showMyTradesOnly = false } = route.params || {}
+  const { user, analytics, updateLocalStateAndDatabase, appdatabase } = useGlobalState()
+  const [trades, setTrades] = useState([]);
+  const [filteredTrades, setFilteredTrades] = useState([]);
+  // Read inside handleSearchTrades for the instant local pass. A ref, not a
+  // dependency, so typing does not rebuild the callback on every keystroke.
+  const tradesRef = useRef([]);
+  // fetchInitialTrades is defined below this callback; going through a ref
+  // avoids both the use-before-define and the stale closure.
+  const fetchInitialTradesRef = useRef(null);
+  const [loading, setLoading] = useState(false);
+  const [refreshing, setRefreshing] = useState(false);
+  const [lastDoc, setLastDoc] = useState(null);
+  const [hasMore, setHasMore] = useState(true);
+  const [showofferwall, setShowofferwall] = useState(false);
+  const [remainingFeaturedTrades, setRemainingFeaturedTrades] = useState([]);
+  // const [openShareModel, setOpenShareModel] = useState(false);
+  const [isDrawerVisible, setIsDrawerVisible] = useState(false);
+  const [bannedUsers, setBannedUsers] = useState([]);
+  const [isOnline, setIsOnline] = useState(false);
+  const insets = useSafeAreaInsets();
+  const bannerBottomPos = 0; // tab bar is docked (in layout flow), so screen bottom == tab bar top; banner sits flush above it
+  const [isAdLoaded, setIsAdLoaded] = useState(false);
+  const [isReportPopupVisible, setReportPopupVisible] = useState(false);
+  const PAGE_SIZE = 20;
+  const [isSigninDrawerVisible, setIsSigninDrawerVisible] = useState(false);
+  const [selectedTrade, setSelectedTrade] = useState(null);
+  const { localState, updateLocalState } = useLocalState()
+  const navigation = useNavigation()
+  const { theme, firestoreDB } = useGlobalState()
+  const [isProStatus, setIsProStatus] = useState(localState.isPro);
+  const { t } = useTranslation();
+  const platform = Platform.OS.toLowerCase();
+  const isDarkMode = theme === 'dark'
+  const c = getThemeColors(isDarkMode);
+  const isInitialMountRef = useRef(true); // ✅ Track initial mount to prevent double fetch
+  const flatListRef = useRef(null);
+  const scrollButtonOpacity = useMemo(() => new Animated.Value(0), []);
+  const { triggerHapticFeedback } = useHaptic();
+  const [isAtTop, setIsAtTop] = useState(true);
+  const formatName = (name) => {
+    let formattedName = name.replace(/^\+/, '');
+    formattedName = formattedName.replace(/\s+/g, '-');
+    return formattedName;
+  };
+
+
+  // console.log(trades, 'trades')
+
+  const [selectedFilters, setSelectedFilters] = useState([]); // ✅ Default: no filters (show all)
+  const isMyTradesActive = selectedFilters.includes('myTrades');
+  const isSavedActive = selectedFilters.includes('saved');
+  // { [tradeId]: { type: 'saved', ... } } — mirrors savedTrades/<uid> in RTDB
+  const [savedTradeRefs, setSavedTradeRefs] = useState({});
+  // Firestore docs already fetched for the Saved tab, keyed by the id-set they
+  // were built from, so re-opening the tab costs nothing.
+  const savedCacheRef = useRef({ sig: '', rows: [] });
+
+  // ── Load the user's saved-trade pointers once ──
+  useEffect(() => {
+    if (!user?.id || !appdatabase) return;
+    fetchSavedTradeRefs(appdatabase, user.id).then(refs => setSavedTradeRefs(refs || {}));
+  }, [user?.id, appdatabase]);
+
+  // ── "My Trades" / "Saved" filter buttons in the navigation header ──
+  useEffect(() => {
+    // Mode filters are mutually exclusive — turning one on clears the other.
+    const MODE_KEYS = ['myTrades', 'saved'];
+    const toggleFilter = (key) => {
+      triggerHapticFeedback('impactLight');
+      if (!user?.id) {
+        setIsSigninDrawerVisible(true);
+        return;
+      }
+      setSelectedFilters(prev =>
+        prev.includes(key)
+          ? prev.filter(f => f !== key)
+          : [...prev.filter(f => !MODE_KEYS.includes(f)), key]
+      );
+    };
+    const pillStyle = (active, color) => ({
+      flexDirection: 'row',
+      alignItems: 'center',
+      paddingHorizontal: SPACE.lg,
+      paddingVertical: SPACE.sm,
+      borderRadius: 14,
+      backgroundColor: active ? color : (isDarkMode ? config.colors.surfaceDark : '#f1f5f9'),
+      borderWidth: 1.5,
+      borderColor: active ? color : (isDarkMode ? '#334155' : '#e2e8f0'),
+      gap: SPACE.xs,
+    });
+    const pillFg = (active) => active ? '#fff' : (isDarkMode ? '#94a3b8' : '#64748b');
+
+    navigation.setOptions({
+      // Title reflects the active filter
+      title: isMyTradesActive
+        ? t('trade.my_trades_title', { defaultValue: 'My Trades' })
+        : isSavedActive
+          ? t('trade.saved_trades_title', { defaultValue: 'Saved Trades' })
+          : t('tabs.trade', { defaultValue: 'Trades' }),
+      headerRight: () => (
+        <View style={{ flexDirection: 'row', alignItems: 'center', gap: 5, marginRight: SPACE.xs }}>
+          <TouchableOpacity
+            onPress={() => toggleFilter('myTrades')}
+            activeOpacity={0.75}
+            style={pillStyle(isMyTradesActive, config.colors.primary)}
+          >
+            <Icon name={isMyTradesActive ? 'person' : 'person-outline'} size={14} color={pillFg(isMyTradesActive)} />
+            <Text style={{ fontSize: SIZE.small, fontFamily: FONT.bold, color: pillFg(isMyTradesActive) }}>
+              {t("trade.my_trades") || "My Trades"}
+            </Text>
+          </TouchableOpacity>
+
+          {/* Saved — icon only, keeps the header from overflowing */}
+          <TouchableOpacity
+            onPress={() => toggleFilter('saved')}
+            activeOpacity={0.75}
+            style={[pillStyle(isSavedActive, STATUS.warning), { paddingHorizontal: SPACE.md }]}
+          >
+            <Icon name={isSavedActive ? 'bookmark' : 'bookmark-outline'} size={15} color={pillFg(isSavedActive)} />
+          </TouchableOpacity>
+        </View>
+      ),
+    });
+  }, [navigation, isMyTradesActive, isSavedActive, isDarkMode, user?.id, t, triggerHapticFeedback]);
+
+  useEffect(() => {
+    // console.log(localState.isPro, 'from trade model'); // ✅ Check if isPro is updated
+    setIsProStatus(localState.isPro); // ✅ Force update state and trigger re-render
+  }, [localState.isPro]);
+
+  // Mirror `trades` into a ref for the search callback's instant local pass.
+  useEffect(() => { tradesRef.current = trades; }, [trades]);
+
+  // ✅ Client-side filtering for non-search scenarios (banned users, my trades)
+  useEffect(() => {
+    const bannedUsersList = Array.isArray(bannedUsers) ? bannedUsers : [];
+
+    setFilteredTrades(
+      trades.filter((trade) => {
+        // ✅ Filter out trades from blocked users
+        if (bannedUsersList.includes(trade.userId)) {
+          return false;
+        }
+
+        // ✅ Check "My Trades" filter
+        if ((showMyTradesOnly || isMyTradesActive) && trade.userId !== user?.id) {
+          return false;
+        }
+
+        // ✅ Check "Saved" filter — masks locally so an unsave drops the card
+        // immediately without waiting for a refetch.
+        if (isSavedActive && !savedTradeRefs[trade.id]) {
+          return false;
+        }
+
+        return true;
+      })
+    );
+  }, [trades, showMyTradesOnly, isMyTradesActive, isSavedActive, savedTradeRefs, user?.id, bannedUsers]);
+
+  useEffect(() => {
+    if (!user?.id) return;
+    setBannedUsers(localState.bannedUsers)
+
+  }, [user?.id, localState.bannedUsers]);
+
+  // Free this list's native ad handles on unmount (keys prefixed 'trade-ad-').
+  useEffect(() => {
+    return () => releaseNativeAds('trade-ad-');
+  }, []);
+
+  // Interleave a native ad every TRADE_AD_FREQUENCY trades (non-Pro only).
+  // Unfilled slots collapse to nothing via NativeAdCard, so the list never
+  // shows a blank gap.
+  const TRADE_AD_FREQUENCY = 8;
+  const tradesWithAds = useMemo(() => {
+    if (isProStatus || !Array.isArray(filteredTrades)) return filteredTrades;
+    const out = [];
+    let real = 0;
+    for (let i = 0; i < filteredTrades.length; i++) {
+      out.push(filteredTrades[i]);
+      real++;
+      if (real % TRADE_AD_FREQUENCY === 0) {
+        out.push({ __type: 'ad', id: `trade-ad-${i}` });
+      }
+    }
+    return out;
+  }, [filteredTrades, isProStatus]);
+
+  // const getTradeDeal = (hasTotal, wantsTotal) => {
+  //   if (hasTotal.value <= 0) {
+  //     return { label: "trade.unknown_deal", color: c.textSecondary }; // ⚠️ Unknown deal (invalid input)
+  //   }
+
+  //   const tradeRatio = wantsTotal.value / hasTotal.value;
+  //   let deal;
+
+  //   if (tradeRatio >= 0.05 && tradeRatio <= 0.6) {
+  //     deal = { label: "trade.best_deal", color: STATUS.success }; // ✅ Best Deal
+  //   } else if (tradeRatio > 0.6 && tradeRatio <= 0.75) {
+  //     deal = { label: "trade.great_deal", color: "#32D74B" }; // 🟢 Great Deal
+  //   } else if (tradeRatio > 0.75 && tradeRatio <= 1.25) {
+  //     deal = { label: "trade.fair_deal", color: "#FFCC00" }; // ⚖️ Fair Deal
+  //   } else if (tradeRatio > 1.25 && tradeRatio <= 1.4) {
+  //     deal = { label: "trade.decent_deal", color: "#FF9F0A" }; // 🟠 Decent Deal
+  //   } else if (tradeRatio > 1.4 && tradeRatio <= 1.55) {
+  //     deal = { label: "trade.weak_deal", color: "#D65A31" }; // 🔴 Weak Deal
+  //   } else {
+  //     deal = { label: "trade.risky_deal", color: "#7D1128" }; // ❌ Risky Deal (Missing in your original code)
+  //   }
+
+  //   return { deal, tradeRatio };
+  // };
+  // console.log(localState.featuredCount, 'featu')
+  const handleDelete = useCallback((item) => {
+    Alert.alert(
+      t("trade.delete_confirmation_title"),
+      t("trade.delete_confirmation_message"),
+      [
+        { text: t("trade.cancel"), style: "cancel" },
+        {
+          text: t("trade.delete"),
+          style: "destructive",
+          onPress: async () => {
+            try {
+              // Ids are no longer prefixed, but a list rendered before this
+              // build's fix may still hold one. Cheap to stay defensive.
+              const tradeId = item.id.startsWith("featured-") ? item.id.replace("featured-", "") : item.id;
+
+              await deleteDoc(doc(firestoreDB, "trades_new", tradeId));
+
+
+              if (item.isFeatured) {
+                const currentFeaturedData = localState.featuredCount || { count: 0, time: null };
+                const newFeaturedCount = Math.max(0, currentFeaturedData.count - 1);
+
+                await updateLocalState("featuredCount", {
+                  count: newFeaturedCount,
+                  time: currentFeaturedData.time,
+                });
+              }
+
+              setTrades((prev) => prev.filter((trade) => trade.id !== item.id));
+              setFilteredTrades((prev) => prev.filter((trade) => trade.id !== item.id));
+
+              showSuccessMessage(t("trade.delete_success"), t("trade.delete_success_message"));
+
+            } catch (error) {
+              console.error("🔥 [handleDelete] Error deleting trade:", error);
+              showErrorMessage(t("trade.delete_error"), t("trade.delete_error_message"));
+            }
+          },
+        },
+      ]
+    );
+  }, [t, localState.featuredCount, firestoreDB]);
+
+
+
+
+
+
+
+  // console.log(isProStatus, 'from trade model')
+
+  // Shared by both paths so the Pro boost and the ad boost can never drift
+  // into writing different shapes for the same "featured" state.
+  const applyFeaturedToTrade = useCallback(async (item) => {
+    await updateDoc(doc(firestoreDB, "trades_new", item.id), {
+      isFeatured: true,
+      featuredUntil: Timestamp.fromDate(new Date(Date.now() + FEATURE_DURATION_MS)),
+    });
+    const markFeatured = (prev) =>
+      prev.map((trade) => (trade.id === item.id ? { ...trade, isFeatured: true } : trade));
+    setTrades(markFeatured);
+    setFilteredTrades(markFeatured);
+  }, [firestoreDB]);
+
+  // How many of this user's trades were boosted inside the current limit
+  // window. Both paths read the same number, so a free user cannot stack an
+  // ad boost on top of a Pro boost by switching plans mid-day.
+  const countFeaturedInWindow = useCallback(async () => {
+    const windowStart = Timestamp.fromMillis(Date.now() - BOOST_WINDOW_START_OFFSET_MS);
+    const snapshot = await getDocs(
+      query(
+        collection(firestoreDB, "trades_new"),
+        where("userId", "==", user.id),
+        where("isFeatured", "==", true),
+        where("featuredUntil", ">", windowStart)
+      )
+    );
+    return snapshot.size;
+  }, [firestoreDB, user?.id]);
+
+  // ── Watch an ad → feature the trade ──────────────────────────────────────
+  const handleFreeBoostTrade = useCallback(async (item) => {
+    if (!user?.id || !firestoreDB) return;
+
+    let alreadyFeatured;
+    try {
+      alreadyFeatured = await countFeaturedInWindow();
+    } catch (err) {
+      console.error("Error checking featured trades:", err);
+      Alert.alert(
+        t("home.alert.error"),
+        t("trade.verify_error_message", {
+          defaultValue: "Couldn't check your boosts right now. Please try again.",
+        })
+      );
+      return;
+    }
+
+    // Out of free boosts → this is the moment they actually want more, which
+    // makes it a better Pro pitch than a button that nags before they care.
+    if (alreadyFeatured >= AD_BOOST_DAILY_LIMIT) {
+      Alert.alert(
+        t("trade.limit_reached_title", { defaultValue: "Limit Reached" }),
+        t("trade.ad_boost_limit_message", {
+          defaultValue: "You've used your free boost for today. Pro members boost 2 trades a day, instantly and with no ads.",
+        }),
+        [
+          { text: t("trade.cancel"), style: "cancel" },
+          { text: t("trade.upgrade"), onPress: () => setShowofferwall(true) },
+        ]
+      );
+      return;
+    }
+
+    Alert.alert(
+      t("trade.ad_boost_title", { defaultValue: "Feature this trade free" }),
+      t("trade.ad_boost_message", {
+        defaultValue: "Watch a short video and your trade is featured at the top for 24 hours.",
+      }),
+      [
+        { text: t("trade.cancel"), style: "cancel" },
+        {
+          text: t("trade.ad_boost_watch", { defaultValue: "Watch" }),
+          onPress: () => {
+            RewardedAdManager.showWithCallback(
+              // Earned — only now does the trade get featured.
+              async () => {
+                try {
+                  await applyFeaturedToTrade(item);
+                  mixpanel.track("Trade Boosted", { method: "rewarded_ad", user: user?.id });
+                  showSuccessMessage(t("trade.feature_success"), t("trade.feature_success_message"));
+                } catch (error) {
+                  console.error("Error featuring trade after ad:", error);
+                  showErrorMessage(t("trade.feature_error"), t("trade.feature_error_message"));
+                }
+              },
+              // Closed early — no reward. Say so plainly rather than failing silently.
+              () => {
+                showErrorMessage(
+                  t("trade.ad_boost_incomplete_title", { defaultValue: "Not featured" }),
+                  t("trade.ad_boost_incomplete_message", {
+                    defaultValue: "You need to watch the whole video to feature your trade.",
+                  })
+                );
+              },
+              // No fill / cooling down. Not the user's fault — don't blame them.
+              () => {
+                showErrorMessage(
+                  t("trade.ad_boost_unavailable_title", { defaultValue: "No video right now" }),
+                  t("trade.ad_boost_unavailable_message", {
+                    defaultValue: "No video is available at the moment. Please try again in a few minutes.",
+                  })
+                );
+              }
+            );
+          },
+        },
+      ]
+    );
+  }, [user?.id, firestoreDB, countFeaturedInWindow, applyFeaturedToTrade, t]);
+
+  // Warm the rewarded ad while the user is browsing, so the first tap on FREE
+  // BOOST doesn't spend 12s on a cold load and end in "no video". Pro members
+  // never see the button, so never pay for the preload.
+  useEffect(() => {
+    if (isProStatus) return;
+    try { RewardedAdManager.prepare(); } catch (_) {}
+  }, [isProStatus]);
+
+  const handleMakeFeatureTrade = async (item) => {
+    if (!isProStatus) {
+      Alert.alert(
+        t("trade.feature_pro_only_title"),
+        t("trade.feature_pro_only_message"),
+        [
+          { text: t("trade.cancel"), style: "cancel" },
+          {
+            text: t("trade.upgrade"),
+            onPress: () => setShowofferwall(true),
+          },
+        ]
+      );
+      return;
+    }
+
+    try {
+      // 🔐 Check from Firestore how many featured trades user already has
+      const oneDayAgo = Timestamp.fromMillis(Date.now() - BOOST_WINDOW_START_OFFSET_MS);
+      
+      let featuredSnapshot;
+      let limitChecked = false;
+      
+      try {
+        featuredSnapshot = await getDocs(
+        query(
+          collection(firestoreDB, "trades_new"),
+          where("userId", "==", user.id),
+          where("isFeatured", "==", true),
+          where("featuredUntil", ">", oneDayAgo)
+        )
+      );
+      } catch (queryError) {
+        // Handle missing Firestore index error
+        if (queryError?.code === 'failed-precondition' || queryError?.message?.includes('index')) {
+          // ✅ Extract index URL from error message
+          let indexUrl = null;
+          const errorMessage = queryError?.message || '';
+          
+          const urlPatterns = [
+            /https:\/\/console\.firebase\.google\.com[^\s\)]+/,
+            /https:\/\/[^\s\)]*firebase[^\s\)]*index[^\s\)]*/,
+            /https?:\/\/[^\s\)]+/,
+          ];
+          
+          for (const pattern of urlPatterns) {
+            const match = errorMessage.match(pattern);
+            if (match) {
+              indexUrl = match[0];
+              console.log('🔗 INDEX CREATION URL:', indexUrl);
+              break;
+            }
+          }
+          
+          const alertMessage = indexUrl 
+            ? 'A Firestore index is required to boost trades. Click "Open Link" to create it automatically.\n\nError: ' + (queryError?.message || 'Index missing')
+            : 'A Firestore index is required to boost trades.\n\nError: ' + (queryError?.message || 'Index missing') + '\n\nPlease check the console for the index creation URL.';
+          
+          Alert.alert(
+            'Index Required - Boost Trade',
+            alertMessage,
+            [
+              { text: 'OK', style: 'cancel' },
+              ...(indexUrl ? [{
+                text: 'Open Link',
+                onPress: () => {
+                  Linking.openURL(indexUrl).catch(err => {
+                    Clipboard.setString(indexUrl);
+                    showSuccessMessage('Link Copied', 'Index creation link copied to clipboard');
+                  });
+                }
+              }] : [{
+                text: 'Copy Error',
+                onPress: () => {
+                  Clipboard.setString(errorMessage);
+                  showSuccessMessage('Copied', 'Error message copied to clipboard');
+                }
+              }])
+            ]
+          );
+          
+          return;
+        }
+        // For other query errors, try a simpler query without the date filter
+        try {
+          featuredSnapshot = await getDocs(
+            query(
+              collection(firestoreDB, "trades_new"),
+              where("userId", "==", user.id),
+              where("isFeatured", "==", true)
+            )
+          );
+          
+          // Filter client-side for featuredUntil > oneDayAgo
+          const now = Date.now();
+          const oneDayAgoMs = now - BOOST_WINDOW_START_OFFSET_MS;
+          const validFeaturedTrades = featuredSnapshot.docs.filter(doc => {
+            const data = doc.data();
+            if (!data.featuredUntil) return false;
+            const featuredUntilMs = data.featuredUntil.toMillis ? data.featuredUntil.toMillis() : data.featuredUntil;
+            return featuredUntilMs > oneDayAgoMs;
+          });
+          
+          if (validFeaturedTrades.length >= PRO_BOOST_DAILY_LIMIT) {
+            Alert.alert(
+              "Limit Reached",
+              "You can only feature 2 trades every 24 hours."
+            );
+            return;
+          }
+          limitChecked = true; // Mark that we already checked the limit
+        } catch (fallbackError) {
+          throw queryError; // Throw original error if fallback also fails
+        }
+      }
+  
+      // Check limit only if we didn't already check in fallback
+      if (!limitChecked && featuredSnapshot && featuredSnapshot.size >= PRO_BOOST_DAILY_LIMIT) {
+        Alert.alert(
+          "Limit Reached",
+          "You can only feature 2 trades every 24 hours."
+        );
+        return;
+      }
+
+      // ✅ Proceed with confirmation
+      Alert.alert(
+        t("trade.feature_confirmation_title"),
+        t("trade.feature_confirmation_message"),
+        [
+          { text: t("trade.cancel"), style: "cancel" },
+          {
+            text: t("trade.feature") || "Feature",
+            onPress: async () => {
+              try {
+                // Same writer as the ad path, so the two can't drift.
+                await applyFeaturedToTrade(item);
+
+                const newFeaturedCount = (localState.featuredCount?.count || 0) + 1;
+                updateLocalState("featuredCount", {
+                  count: newFeaturedCount,
+                  time: new Date().toISOString(),
+                });
+
+                // (applyFeaturedToTrade already marked both lists.)
+                showSuccessMessage(t("trade.feature_success"), t("trade.feature_success_message"));
+              } catch (error) {
+                // Error handling for making trade featured
+                const errorMessage = error?.message || t("trade.feature_error_message");
+                console.error('❌ Error updating trade:', errorMessage);
+                Alert.alert(
+                  t("trade.feature_error"),
+                  errorMessage
+                );
+              }
+            },
+          },
+        ]
+      );
+    } catch (err) {
+      // Error handling for checking featured trades
+      const errorMessage = err?.message || "Unable to verify your featured trades. Try again later.";
+      const errorCode = err?.code || "";
+      
+      if (errorCode === 'failed-precondition' || errorMessage.includes('index')) {
+        // ✅ Extract index URL from error message
+        let indexUrl = null;
+        const errMessage = err?.message || '';
+        
+        const urlPatterns = [
+          /https:\/\/console\.firebase\.google\.com[^\s\)]+/,
+          /https:\/\/[^\s\)]*firebase[^\s\)]*index[^\s\)]*/,
+        ];
+        
+        for (const pattern of urlPatterns) {
+          const match = errMessage.match(pattern);
+          if (match) {
+            indexUrl = match[0];
+            console.log('🔗 INDEX CREATION URL:', indexUrl);
+            break;
+          }
+        }
+        
+        const alertMsg = indexUrl 
+          ? 'A Firestore index is required to boost trades. Click "Open Link" to create it.\n\nError: ' + errorMessage
+          : 'A Firestore index is required to boost trades. Please check the console for error details.\n\nError: ' + errorMessage;
+        
+        Alert.alert(
+          'Index Required',
+          alertMsg,
+          [
+            { text: 'OK', style: 'cancel' },
+            ...(indexUrl ? [{
+              text: 'Open Link',
+              onPress: () => {
+                Linking.openURL(indexUrl).catch(linkErr => {
+                  Clipboard.setString(indexUrl);
+                  showSuccessMessage('Link Copied', 'Index creation link copied to clipboard');
+                });
+              }
+            }] : [])
+          ]
+        );
+      } else if (errorCode === 'permission-denied') {
+        Alert.alert(
+          "Permission Denied",
+          "You don't have permission to feature trades. Please check your account status."
+        );
+      } else {
+        Alert.alert(t("home.alert.error") || "Error", errorMessage);
+      }
+    }
+  };
+
+
+
+
+
+  const formatValue = (value) => {
+    if (value >= 1_000_000_000) {
+      return `${(value / 1_000_000_000).toFixed(1)}B`; // Billions
+    } else if (value >= 1_000_000) {
+      return `${(value / 1_000_000).toFixed(1)}M`; // Millions
+    } else if (value >= 1_000) {
+      return `${(value / 1_000).toFixed(1)}K`; // Thousands
+    } else {
+      return value?.toLocaleString(); // Default formatting
+    }
+  };
+  const fetchMoreTrades = useCallback(async () => {
+    if (!hasMore || !lastDoc) return;
+
+    try {
+      // ✅ Build query for more normal trades
+      const normalQuery = query(
+        collection(firestoreDB, 'trades_new'),
+        where('isFeatured', '==', false),
+        orderBy('timestamp', 'desc'),
+        startAfter(lastDoc),
+        limit(PAGE_SIZE)
+      );
+
+      const normalTradesQuerySnap = await getDocs(normalQuery);
+  
+      const newNormalTrades = normalTradesQuerySnap.docs.map((docSnap) => ({
+        id: docSnap.id,
+        ...docSnap.data(),
+      }));
+  
+      if (newNormalTrades.length === 0) {
+        setHasMore(false);
+        return;
+      }
+      // ✅ Get **2 more** featured trades if available
+      const newFeaturedTrades = remainingFeaturedTrades.splice(0, 3);
+      setRemainingFeaturedTrades([...remainingFeaturedTrades]); // ✅ Update remaining featured
+
+      // ✅ Merge & maintain balance
+      const mergedTrades = mergeFeaturedWithNormal(newFeaturedTrades, newNormalTrades);
+
+      setTrades((prevTrades) => [...prevTrades, ...mergedTrades]);
+      setLastDoc(
+        normalTradesQuerySnap.docs[normalTradesQuerySnap.docs.length - 1]
+      );      
+      setHasMore(newNormalTrades.length === PAGE_SIZE);
+    } catch (error) {
+      console.error('❌ Error fetching more trades:', error);
+      if (error.code === 'failed-precondition') {
+        console.warn('⚠️ Firestore index required.');
+      }
+    }
+  }, [lastDoc, hasMore, remainingFeaturedTrades, firestoreDB]);
+
+
+
+  useEffect(() => {
+    const resetFeaturedDataIfExpired = async () => {
+      const currentFeaturedData = localState.featuredCount || { count: 0, time: null };
+
+      if (!currentFeaturedData.time) return; // ✅ If no time exists, do nothing
+
+      const featuredTime = new Date(currentFeaturedData.time).getTime();
+      const currentTime = Date.now();
+      const TWENTY_FOUR_HOURS = 24 * 60 * 60 * 1000; // 24 hours in milliseconds
+      // console.log(currentTime, featuredTime, TWENTY_FOUR_HOURS);
+
+      if (currentTime - featuredTime >= TWENTY_FOUR_HOURS) {
+        // console.log("⏳ 24 hours passed! Resetting featuredCount and time...");
+
+        await updateLocalState("featuredCount", { count: 0, time: null });
+
+        // console.log("✅ Featured data reset successfully.");
+      }
+    };
+
+    resetFeaturedDataIfExpired(); // ✅ Runs once on app load
+
+  }, []); // ✅ Runs only on app load
+
+  const selectedUser = {
+    senderId: selectedTrade?.userId,
+    sender: selectedTrade?.traderName,
+    avatar: selectedTrade?.avatar,
+    flage: selectedTrade?.flage ? selectedTrade.flage : null,
+    robloxUsername: selectedTrade?.robloxUsername || null,
+    robloxUsernameVerified: selectedTrade?.robloxUsernameVerified || false,
+  }
+  const handleChatNavigation2 = async () => {
+    // Close drawer first (iOS doesn't auto-dismiss modals on navigation)
+    setIsDrawerVisible(false);
+    setTimeout(() => {
+      mixpanel.track("Inbox Trade");
+      navigation.navigate('PrivateChatTrade', {
+        selectedUser: selectedUser,
+        item: selectedTrade,
+      });
+    }, 300);
+  };
+
+
+
+
+
+  const handleEndReached = () => {
+    if (loading || isSearching) return; // ✅ Prevents unnecessary calls
+
+    // ✅ Handle search pagination
+    if (isSearchMode && searchHasMore) {
+      if (!user?.id) {
+        setIsSigninDrawerVisible(true);
+      } else {
+        handleSearchTrades(true); // Load more search results
+      }
+      return;
+    }
+
+    // ✅ Handle normal pagination
+    if (!hasMore || loading) return;
+    if (!user?.id) {
+      setIsSigninDrawerVisible(true);
+    } else {
+      fetchMoreTrades();
+    }
+  };
+
+  // console.log(trades)
+
+  // import firestore from '@react-native-firebase/firestore'; // Ensure this import
+
+  // ── Trade search ─────────────────────────────────────────────────────
+  //
+  // Rewritten 2026-09-06. Four separate bugs, which together made search look
+  // like it simply found nothing:
+  //
+  //  1. `hasItemNames` / `wantsItemNames` were queried but NEVER written by
+  //     any code path. Verified against production: zero documents had them.
+  //     Fixed at the write site (HomeScreen) and by the backfill script in
+  //     scripts/backfill-trade-search-index.js.
+  //  2. ONE cursor was shared by two different queries. A document from the
+  //     hasItemNames query was passed as startAfter to the wantsItemNames
+  //     query, where its ordering is meaningless, so page two was wrong.
+  //     Each side now keeps its own cursor.
+  //  3. Both catch blocks swallowed the error, so a missing composite index —
+  //     which is real, `wantsItemNames` had no index — was indistinguishable
+  //     from an empty result set.
+  //  4. searchHasMore compared the MERGED count against the page size, so
+  //     with both sides on it could never settle correctly.
+  //
+  // The local pass over already-loaded trades is new. It costs no reads, it
+  // answers instantly, and it is the only thing here that can match a partial
+  // word, because array-contains is exact-match per element.
+  const handleSearchTrades = useCallback(async (isLoadMore = false) => {
+    const searchTerm = searchQuery.trim();
+    if (!searchTerm) {
+      setIsSearchMode(false);
+      setSearchCursors({ has: null, wants: null });
+      setSearchHasMore(true);
+      fetchInitialTradesRef.current?.();
+      return;
+    }
+
+    if (!searchInHas && !searchInWants) {
+      Alert.alert(
+        t('trade.search_error_title') || 'Search Error',
+        t('trade.search_error_no_side') || 'Pick at least one side to search.',
+      );
+      return;
+    }
+
+    setIsSearching(true);
+
+    // Instant local matches from what is already on screen, so the first page
+    // is never blank while the query is in flight. These are kept and merged
+    // with the server results below rather than replaced: they are the only
+    // thing that can match a PARTIAL word, and on trades that predate the
+    // backfill they may be the only match at all.
+    let localMatches = [];
+    if (!isLoadMore) {
+      localMatches = tradesRef.current.filter((tr) =>
+        tr && !tr.__type && tradeMatchesLocally(tr, searchTerm, { searchInHas, searchInWants }),
+      );
+      if (localMatches.length > 0) {
+        setTrades(localMatches);
+        setIsSearchMode(true);
+      }
+    }
+
+    try {
+      const needle = normalizeSearchTerm(searchTerm);
+      const cursors = isLoadMore ? searchCursors : { has: null, wants: null };
+
+      // One query per side, each with its OWN cursor.
+      const runSide = async (field, cursor) => {
+        const clauses = [
+          collection(firestoreDB, 'trades_new'),
+          where(field, 'array-contains', needle),
+          orderBy('timestamp', 'desc'),
+        ];
+        if (cursor) clauses.push(startAfter(cursor));
+        clauses.push(limit(SEARCH_PAGE_SIZE));
+
+        const snap = await getDocs(query(...clauses));
+        return {
+          docs: snap.docs || [],
+          // The cursor for the NEXT page of this side specifically.
+          next: snap.docs?.length ? snap.docs[snap.docs.length - 1] : null,
+          exhausted: (snap.docs?.length || 0) < SEARCH_PAGE_SIZE,
+        };
+      };
+
+      const sides = [];
+      if (searchInHas) sides.push(['hasItemNames', 'has']);
+      if (searchInWants) sides.push(['wantsItemNames', 'wants']);
+
+      const settled = await Promise.allSettled(
+        sides.map(([field, key]) => runSide(field, cursors[key])),
+      );
+
+      const nextCursors = { ...cursors };
+      const merged = new Map();
+      let anySucceeded = false;
+      let allExhausted = true;
+      let indexError = null;
+
+      settled.forEach((result, i) => {
+        const [field, key] = sides[i];
+
+        if (result.status === 'rejected') {
+          const err = result.reason;
+          console.error(`[TradeSearch] ${field} query failed:`, err?.message);
+          // A missing composite index is a deployment problem, not an empty
+          // result. Surfacing it is the whole point — this is what hid the
+          // wantsItemNames index being absent.
+          if (err?.code === 'firestore/failed-precondition' || err?.code === 'failed-precondition') {
+            indexError = field;
+          }
+          return;
+        }
+
+        anySucceeded = true;
+        const { docs, next, exhausted } = result.value;
+        if (!exhausted) allExhausted = false;
+        if (next) nextCursors[key] = next;
+
+        docs.forEach((docSnap) => {
+          if (!merged.has(docSnap.id)) {
+            merged.set(docSnap.id, { id: docSnap.id, ...docSnap.data() });
+          }
+        });
+      });
+
+      if (indexError) {
+        Alert.alert(
+          t('trade.search_error_title') || 'Search Error',
+          `Search is missing a database index for "${indexError}". Deploy firestore.indexes.json.`,
+        );
+      }
+
+      if (!anySucceeded) {
+        // Every side errored. Keep whatever matched locally rather than
+        // blanking the list, and stop paginating into a broken query.
+        setSearchHasMore(false);
+        return;
+      }
+
+      const byNewest = (x, y) => (y.timestamp?.toMillis?.() || 0) - (x.timestamp?.toMillis?.() || 0);
+
+      // Union, server results winning on id collisions since they are fresher.
+      localMatches.forEach((tr) => { if (!merged.has(tr.id)) merged.set(tr.id, tr); });
+      const searchedTrades = Array.from(merged.values()).sort(byNewest);
+
+      if (isLoadMore) {
+        setTrades((prev) => {
+          const combined = new Map(prev.filter((tr) => tr && !tr.__type).map((tr) => [tr.id, tr]));
+          searchedTrades.forEach((tr) => combined.set(tr.id, tr));
+          return Array.from(combined.values()).sort(byNewest);
+        });
+      } else {
+        setTrades(searchedTrades);
+        setIsSearchMode(true);
+      }
+
+      setSearchCursors(nextCursors);
+      // "More pages" means at least one side returned a full page — not the
+      // merged total, which can be up to two full pages.
+      setSearchHasMore(!allExhausted);
+    } catch (error) {
+      console.error('[TradeSearch] unexpected failure:', error);
+      Alert.alert(
+        t('trade.search_error_title') || 'Search Error',
+        t('trade.search_failed') || 'Could not complete the search. Try again.',
+      );
+    } finally {
+      setIsSearching(false);
+    }
+  }, [searchQuery, searchInHas, searchInWants, firestoreDB, searchCursors, t]);
+
+  const fetchInitialTrades = useCallback(async () => {
+    setLoading(true);
+    try {
+      // ✅ Build query for normal trades
+      const normalQuery = query(
+        collection(firestoreDB, 'trades_new'),
+        where('isFeatured', '==', false),
+        orderBy('timestamp', 'desc'),
+        limit(PAGE_SIZE)
+      );
+
+      const normalTradesQuerySnap = await getDocs(normalQuery);
+  
+      const normalTrades = normalTradesQuerySnap.docs.map((docSnap) => ({
+        id: docSnap.id,
+        ...docSnap.data(),
+      }));
+  
+
+      // ✅ Build query for featured trades
+      const featuredQuery = query(
+        collection(firestoreDB, 'trades_new'),
+        where('isFeatured', '==', true),
+        where('featuredUntil', '>', Timestamp.now()),
+        orderBy('featuredUntil', 'desc'),
+        limit(12) // UI shows only a few; cap reads (this runs on every load/refresh)
+      );
+
+      let featuredTrades = [];
+      try {
+      const featuredQuerySnapshot = await getDocs(featuredQuery);
+  
+      if (!featuredQuerySnapshot.empty) {
+        // Real document id. The list key is prefixed in keyExtractor instead —
+        // see the note there. A featured trade cannot collide with the normal
+        // list because that query filters isFeatured == false.
+        featuredTrades = featuredQuerySnapshot.docs.map((docSnap) => ({
+          id: docSnap.id,
+          ...docSnap.data(),
+        }));
+        }
+      } catch (featuredError) {
+        // ✅ Handle missing index error for featured trades
+        if (featuredError?.code === 'failed-precondition' || featuredError?.message?.includes('index')) {
+          console.log('⚠️ Index error:', featuredError?.message);
+          
+          // ✅ Extract index URL from error message if available (try multiple patterns)
+          let indexUrl = null;
+          const errorMessage = featuredError?.message || '';
+          
+          // Try different URL patterns
+          const urlPatterns = [
+            /https:\/\/console\.firebase\.google\.com[^\s\)]+/,
+            /https:\/\/[^\s\)]*firebase[^\s\)]*index[^\s\)]*/,
+            /https?:\/\/[^\s\)]+/,
+          ];
+          
+          for (const pattern of urlPatterns) {
+            const match = errorMessage.match(pattern);
+            if (match) {
+              indexUrl = match[0];
+              console.log('✅ Found index URL:', indexUrl);
+              break;
+            }
+          }
+          
+          // ✅ Try fallback query without orderBy (client-side sorting)
+          try {
+            const fallbackQuery = query(
+                  collection(firestoreDB, 'trades_new'),
+                  where('isFeatured', '==', true),
+                  limit(50) // bound the no-index fallback so it can't read every ever-featured trade
+                );
+            
+            const fallbackSnapshot = await getDocs(fallbackQuery);
+            
+            // ✅ Filter client-side for featuredUntil > now and sort
+            const now = Timestamp.now();
+            featuredTrades = fallbackSnapshot.docs
+              .filter(doc => {
+                const data = doc.data();
+                if (!data.featuredUntil) return false;
+                return data.featuredUntil > now;
+              })
+              .sort((a, b) => {
+                const aTime = a.data().featuredUntil?.toMillis?.() || 0;
+                const bTime = b.data().featuredUntil?.toMillis?.() || 0;
+                return bTime - aTime; // Descending order
+              })
+              .map((docSnap) => ({
+                id: docSnap.id,
+                ...docSnap.data(),
+              }));
+            
+            // ✅ Always show alert with error details and index creation link
+            const alertMessage = indexUrl 
+              ? 'A Firestore index is required for featured trades. Click "Open Link" to create it automatically.\n\nError: ' + (featuredError?.message || 'Index missing')
+              : 'A Firestore index is required for featured trades.\n\nError: ' + (featuredError?.message || 'Index missing') + '\n\nPlease check the console for the index creation URL.';
+            
+            if (indexUrl) {
+              console.log('🔗 INDEX CREATION URL:', indexUrl);
+            }
+            
+            Alert.alert(
+              'Index Required - Featured Trades',
+              alertMessage,
+              [
+                { text: 'OK', style: 'cancel' },
+                ...(indexUrl ? [{
+                  text: 'Open Link',
+                  onPress: () => {
+                    console.log('🔗 [USER ACTION] Opening index URL:', indexUrl);
+                    Linking.openURL(indexUrl).catch(err => {
+                      console.log('❌ Error opening index URL:', err);
+                      Clipboard.setString(indexUrl);
+                      showSuccessMessage('Link Copied', 'Index creation link copied to clipboard. Check console for details.');
+                    });
+                  }
+                }] : [{
+                  text: 'Copy Error',
+                  onPress: () => {
+                    Clipboard.setString(errorMessage);
+                    console.log('📋 [USER ACTION] Error message copied to clipboard');
+                    showSuccessMessage('Copied', 'Error message copied to clipboard');
+                  }
+                }])
+              ]
+            );
+          } catch (fallbackError) {
+            console.error('❌ Fallback query failed:', fallbackError?.message);
+            // Continue with empty featured trades array
+            featuredTrades = [];
+          }
+        } else {
+          // ✅ Re-throw if it's not an index error
+          console.error('❌ Non-index error in featured trades query, re-throwing:', featuredError);
+          throw featuredError;
+        }
+      }
+      // console.log('✅ Featured trades:', featuredTrades[0]);
+
+      // ✅ Keep some featured trades aside for future loadMore()
+      setRemainingFeaturedTrades(featuredTrades);
+
+      // ✅ Merge trades but **reserve** featured trades for later
+      const mergedTrades = mergeFeaturedWithNormal(
+        featuredTrades.splice(0, 3), // ✅ Only use first 2 featured
+        normalTrades
+      );
+
+      // ✅ Update state
+      setTrades(mergedTrades);
+
+      // Warm the profile cache for these posters so their equipped frames can
+      // render on the cards. Fire-and-forget — cards fall back to a plain
+      // avatar until it lands.
+      const posterIds = [...new Set(mergedTrades.map(t => t.userId).filter(Boolean))];
+      if (appdatabase && posterIds.length > 0) {
+        warmProfileCache(appdatabase, posterIds);
+      }
+
+      setLastDoc(
+        normalTradesQuerySnap.docs[normalTradesQuerySnap.docs.length - 1]
+      );
+      setHasMore(normalTrades.length === PAGE_SIZE);
+    } catch (error) {
+      console.error('❌ Error fetching trades:', error?.message);
+      
+      // ✅ If error is about missing index, log helpful message and extract URL
+      if (error?.code === 'failed-precondition' || error?.message?.includes('index')) {
+        console.warn('⚠️ Firestore index required. Please create composite index for: status + timestamp');
+        
+        // Try to extract index URL
+        const errorMessage = error?.message || '';
+        const urlPatterns = [
+          /https:\/\/console\.firebase\.google\.com[^\s\)]+/,
+          /https:\/\/[^\s\)]*firebase[^\s\)]*index[^\s\)]*/,
+        ];
+        
+        let indexUrl = null;
+        for (const pattern of urlPatterns) {
+          const match = errorMessage.match(pattern);
+          if (match) {
+            indexUrl = match[0];
+            console.log('🔗 INDEX CREATION URL:', indexUrl);
+            break;
+          }
+        }
+        
+        // Show alert with index URL if found
+        if (indexUrl) {
+          Alert.alert(
+            'Index Required',
+            'A Firestore index is required. Click "Open Link" to create it.\n\nError: ' + (error?.message || 'Index missing'),
+            [
+              { text: 'OK', style: 'cancel' },
+              {
+                text: 'Open Link',
+                onPress: () => {
+                  Linking.openURL(indexUrl).catch(err => {
+                    console.error('Error opening index URL:', err);
+                    Clipboard.setString(indexUrl);
+                    showSuccessMessage('Link Copied', 'Index creation link copied to clipboard');
+                  });
+                }
+              }
+            ]
+          );
+        } else {
+          Alert.alert(
+            'Index Required',
+            'A Firestore index is required. Please check the console for error details.\n\nError: ' + (error?.message || 'Index missing'),
+            [{ text: 'OK' }]
+          );
+        }
+      } else {
+        // For other errors, show a generic alert
+        Alert.alert(
+          'Error Loading Trades',
+          'Unable to load trades. Please check the console for error details.\n\nError: ' + (error?.message || 'Unknown error'),
+          [{ text: 'OK' }]
+        );
+      }
+    } finally {
+      setLoading(false);
+    }
+  }, [firestoreDB, appdatabase]);
+
+  // handleSearchTrades is defined ABOVE this function and needs to call it
+  // when the query is cleared. Going through a ref avoids both the
+  // use-before-define and the stale closure a direct reference would create.
+  useEffect(() => { fetchInitialTradesRef.current = fetchInitialTrades; }, [fetchInitialTrades]);
+
+
+  // const captureAndSave = async () => {
+  //   if (!viewRef.current) {
+  //     console.error('View reference is undefined.');
+  //     return;
+  //   }
+
+  //   try {
+  //     // Capture the view as an image
+  //     const uri = await captureRef(viewRef.current, {
+  //       format: 'png',
+  //       quality: 0.8,
+  //     });
+
+  //     // Generate a unique file name
+  //     const timestamp = new Date().getTime(); // Use the current timestamp
+  //     const uniqueFileName = `screenshot_${timestamp}.png`;
+
+  //     // Determine the path to save the screenshot
+  //     const downloadDest = Platform.OS === 'android'
+  //       ? `${RNFS.ExternalDirectoryPath}/${uniqueFileName}`
+  //       : `${RNFS.DocumentDirectoryPath}/${uniqueFileName}`;
+
+  //     // Save the captured image to the determined path
+  //     await RNFS.copyFile(uri, downloadDest);
+
+  //     // console.log(`Screenshot saved to: ${downloadDest}`);
+
+  //     return downloadDest;
+  //   } catch (error) {
+  //     console.error('Error capturing screenshot:', error);
+  //     // Alert.alert(t("home.alert.error"), t("home.screenshot_error"));
+  //     showMessage({
+  //       message: t("home.alert.error"),
+  //       description: t("home.screenshot_error"),
+  //       type: "danger",
+  //     });
+  //   }
+  // };
+
+  // const proceedWithScreenshotShare = async () => {
+  //   triggerHapticFeedback('impactLight');
+  //   try {
+  //     const filePath = await captureAndSave();
+
+  //     if (filePath) {
+  //       const shareOptions = {
+  //         title: t("home.screenshot_title"),
+  //         url: `file://${filePath}`,
+  //         type: 'image/png',
+  //       };
+
+  //       Share.open(shareOptions)
+  //         .then((res) => console.log('Share Response:', res))
+  //         .catch((err) => console.log('Share Error:', err));
+  //     }
+  //   } catch (error) {
+  //     // console.log('Error sharing screenshot:', error);
+  //   }
+  // };
+
+  const mergeFeaturedWithNormal = (featuredTrades, normalTrades) => {
+    // Input validation
+    if (!Array.isArray(featuredTrades) || !Array.isArray(normalTrades)) {
+      console.warn('⚠️ Invalid input: featuredTrades or normalTrades is not an array');
+      return [];
+    }
+
+    let result = [];
+    let featuredIndex = 0;
+    let normalIndex = 0;
+    const featuredCount = featuredTrades.length;
+    const normalCount = normalTrades.length;
+    const MAX_ITERATIONS = 1000; // Safety limit
+    let iterationCount = 0;
+
+    // Add first 4 featured trades (if available)
+    for (let i = 0; i < 4 && featuredIndex < featuredCount; i++) {
+      result.push(featuredTrades[featuredIndex]);
+      featuredIndex++;
+    }
+
+    // Merge in the format of 4 normal trades, then 4 featured trades
+    while (normalIndex < normalCount && iterationCount < MAX_ITERATIONS) {
+      iterationCount++;
+
+      // Insert up to 4 normal trades
+      for (let i = 0; i < 4 && normalIndex < normalCount; i++) {
+        result.push(normalTrades[normalIndex]);
+        normalIndex++;
+      }
+
+      // Insert up to 4 featured trades (if available)
+      for (let i = 0; i < 4 && featuredIndex < featuredCount; i++) {
+        result.push(featuredTrades[featuredIndex]);
+        featuredIndex++;
+      }
+    }
+
+    if (iterationCount >= MAX_ITERATIONS) {
+      console.warn('⚠️ Maximum iterations reached in mergeFeaturedWithNormal');
+    }
+
+    return result;
+  };
+
+  // useEffect(() => {
+  //   const unsubscribe = firestore()
+  //     .collection('trades_new')
+  //     .orderBy('timestamp', 'desc')
+  //     .limit(PAGE_SIZE)
+  //     .onSnapshot(snapshot => {
+  //       const newTrades = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+  //       setTrades(newTrades);
+  //       setLastDoc(snapshot.docs[snapshot.docs.length - 1]);
+  //       setHasMore(snapshot.docs.length === PAGE_SIZE);
+  //     }, error => console.error('🔥 Firestore error:', error));
+
+  //   return () => unsubscribe(); // ✅ Unsubscribing on unmount
+  // }, []);
+
+
+
+  // ── Saved tab: RTDB pointers → Firestore trade docs ──
+  // Fixed list (capped at MAX_SAVED), so no pagination. Trades the owner has
+  // since deleted simply drop out.
+  const fetchSavedTrades = useCallback(async (refreshRefs = true) => {
+    if (!user?.id || !appdatabase || !firestoreDB) return;
+    setLoading(true);
+    try {
+      // The feed already mirrors savedTrades/<uid> in state and keeps it in
+      // step optimistically, so a plain tab toggle can skip re-reading it.
+      // Empty state may just mean the mount read hasn't landed yet, so fall
+      // back to a read rather than wrongly showing "nothing saved".
+      const canReuse = !refreshRefs && Object.keys(savedTradeRefs).length > 0;
+      const refs = canReuse
+        ? savedTradeRefs
+        : await fetchSavedTradeRefs(appdatabase, user.id);
+      if (!canReuse) setSavedTradeRefs(refs || {});
+      const ids = Object.keys(refs || {});
+      if (ids.length === 0) {
+        setTrades([]);
+        setHasMore(false);
+        return;
+      }
+
+      // Reuse the docs already fetched for this exact id set — toggling the
+      // Saved filter on/off would otherwise cost one Firestore read per saved
+      // trade every single time.
+      const sig = ids.slice().sort().join(',');
+      if (sig === savedCacheRef.current.sig && savedCacheRef.current.rows.length) {
+        setTrades(savedCacheRef.current.rows);
+        setHasMore(false);
+        return;
+      }
+      const results = await Promise.all(ids.map(async (tradeId) => {
+        try {
+          const snap = await getDoc(doc(firestoreDB, 'trades_new', tradeId));
+          return snap.exists() ? { id: tradeId, ...snap.data() } : null;
+        } catch {
+          return null;
+        }
+      }));
+      const toMillis = (ts) => ts?.toMillis ? ts.toMillis() : (ts?.seconds ? ts.seconds * 1000 : 0);
+      const rows = results.filter(Boolean).sort((a, b) => toMillis(b.timestamp) - toMillis(a.timestamp));
+      savedCacheRef.current = { sig, rows };
+      setTrades(rows);
+      setHasMore(false);
+    } catch (e) {
+      console.warn('[Trades] fetchSavedTrades error:', e?.message);
+    } finally {
+      setLoading(false);
+    }
+  }, [user?.id, appdatabase, firestoreDB, savedTradeRefs]);
+
+  // ✅ Refetch when user changes
+  useEffect(() => {
+    fetchInitialTrades();
+    isInitialMountRef.current = false; // ✅ Mark initial mount as complete
+
+    if (!user?.id) {
+      setTrades((prev) => prev.slice(0, PAGE_SIZE)); // Keep only 20 trades for logged-out users
+    }
+  }, [user?.id]);
+
+  // ✅ Swap the data source when the Saved filter is toggled
+  useEffect(() => {
+    if (isInitialMountRef.current || !user?.id) return;
+    if (isSavedActive) {
+      fetchSavedTrades(false); // reuse in-memory refs + cached docs
+    } else {
+      fetchInitialTrades();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isSavedActive]);
+
+  const closeProfileDrawer = async () => {
+    setIsDrawerVisible(false);
+  };
+  const handleOpenProfile = async(item)=>{
+    if (!user?.id) {
+      setIsSigninDrawerVisible(true);
+      return;
+    }
+    setSelectedTrade(item)
+    setIsOnline(false); // Reset online status before checking to prevent stale state
+    // console.log(item, selectedTrade)
+    try {
+      const online = await isUserOnline(item?.userId);
+      setIsOnline(online);
+    } catch (error) {
+      console.error('🔥 Error checking online status:', error);
+      setIsOnline(false);
+    }
+    setIsDrawerVisible(true);
+  }
+  
+  const renderTextWithUsername = (description) => {
+    const parts = description.split(/(@\w+)/g); // Split text by @username pattern
+
+    return parts.map((part, index) => {
+      if (part.startsWith('@')) {
+        const username = part.slice(1); // Remove @
+        return (
+          <TouchableOpacity
+            style={styles.descriptionclick}
+            key={index}
+            onPress={() => {
+              Clipboard.setString(username);
+              // Alert.alert("Copied!", `Username "${username}" copied.`);
+            }}
+          >
+            <Text style={styles.descriptionclick}>{part}</Text>
+          </TouchableOpacity>
+        );
+      } else {
+        return <Text key={index} style={styles.description}>{part}</Text>;
+      }
+    });
+  };
+
+
+  const styles = useMemo(() => getStyles(isDarkMode), [isDarkMode]);
+
+  // ✅ Migration helper: Normalize hasTotal/wantsTotal to handle both old (object.value) and new (number) formats
+  const normalizeTotal = (total) => {
+    if (total === null || total === undefined) return 0;
+    // Old format: { value: number }
+    if (typeof total === 'object' && total !== null && 'value' in total) {
+      return total.value || 0;
+    }
+    // New format: number
+    if (typeof total === 'number') {
+      return total;
+    }
+    return 0;
+  };
+
+  // Image URL generation. Absolute URLs (every saved trade) pass through
+  // untouched; a Supreme item's /media/ path resolves via the MM2 catalogue.
+  // See Code/Helper/valueSources.js.
+  const getImageUrl = resolveItemImage;
+
+
+
+  const handleRefresh = async () => {
+    setRefreshing(true);
+    // Refreshing during a search used to run fetchInitialTrades while leaving
+    // isSearchMode true: the list filled with unfiltered trades, and scrolling
+    // to the end then ran "load more search results" and replaced them again.
+    if (isSearchMode) {
+      setSearchCursors({ has: null, wants: null });
+      setSearchHasMore(true);
+      await handleSearchTrades(false);
+      setRefreshing(false);
+      return;
+    }
+    // ✅ Respect the active filter mode when refreshing
+    if (isSavedActive) {
+      savedCacheRef.current = { sig: '', rows: [] }; // pull-to-refresh must hit the server
+      await fetchSavedTrades(true);
+    } else {
+      await fetchInitialTrades();
+    }
+    setRefreshing(false);
+  };
+
+  // ✅ Scroll to top handler
+  const handleScrollToTop = useCallback(() => {
+    if (!flatListRef?.current) return;
+    
+    triggerHapticFeedback('impactLight');
+    
+    try {
+      // Scroll to index 0 (top of list)
+      flatListRef.current.scrollToIndex({
+        index: 0,
+        animated: true,
+        viewPosition: 0,
+      });
+      setIsAtTop(true);
+    } catch (error) {
+      // Fallback: scroll to offset 0
+      flatListRef.current.scrollToOffset({ offset: 0, animated: true });
+      setIsAtTop(true);
+    }
+  }, [flatListRef, triggerHapticFeedback]);
+
+  // ✅ Animate scroll button visibility
+  useEffect(() => {
+    Animated.timing(scrollButtonOpacity, {
+      toValue: isAtTop ? 0 : 1,
+      duration: 200,
+      useNativeDriver: true,
+    }).start();
+  }, [isAtTop, scrollButtonOpacity]);
+
+  const handleLoginSuccess = () => {
+    setIsSigninDrawerVisible(false);
+  };
+
+
+  const renderTrade = ({ item, index }) => {
+    // Native ad slot interleaved into the list (collapses when unfilled / Pro).
+    if (item?.__type === 'ad') {
+      return <NativeAdCard adKey={item.id} isDarkMode={isDarkMode} />;
+    }
+
+    // ✅ Migration: Normalize totals to handle both old (object.value) and new (number) formats
+    const hasTotalValue = normalizeTotal(item.hasTotal);
+    const wantsTotalValue = normalizeTotal(item.wantsTotal);
+
+    const isProfit = hasTotalValue > wantsTotalValue; // Profit if trade ratio > 1
+    const neutral = hasTotalValue === wantsTotalValue; // Exactly 1:1 trade
+    // Guard against non-Timestamp values: some docs store a numeric Date.now()
+    // (or migrated/optimistic rows) which have no .toDate() and would crash render.
+    const formattedTime = item.timestamp
+      ? dayjs(typeof item.timestamp?.toDate === 'function' ? item.timestamp.toDate() : item.timestamp).fromNow()
+      : "Anonymous";
+    // ✅ Migration helper: Group items and count duplicates - handles both old and new structures
+    const groupItems = (items) => {
+      const grouped = {};
+      items.forEach((item) => {
+        if (!item) return;
+        
+        // ✅ Handle both old format: { name, image, value } and new format: { name, type, value, image }
+        const name = item.name || item.Name || '';
+        const type = item.type || item.Type || item.Category || '';
+        const image = item.image || item.Image || '';
+        
+        // ✅ Use name+type as key (fallback to name+image for old format)
+        const key = type ? `${name}-${type}` : `${name}-${image}`;
+        
+        if (grouped[key]) {
+          grouped[key].count += 1;
+        } else {
+          grouped[key] = { 
+            name, 
+            type: type || '', 
+            image: image || '',
+            count: 1 
+          };
+        }
+      });
+      return Object.values(grouped);
+    };
+
+    // Group and count duplicate items
+    const groupedHasItems = groupItems(item.hasItems || []);
+    const groupedWantsItems = groupItems(item.wantsItems || []);
+    const selectedUser = {
+      senderId: item.userId,
+      sender: item.traderName,
+      avatar: item.avatar,
+      flage: item.flage ? item.flage : null,
+      robloxUsername: item?.robloxUsername || null,
+      robloxUsernameVerified: item?.robloxUsernameVerified || false,
+    }
+    const handleChatNavigation = async () => {
+
+      const callbackfunction = () => {
+        if (!user?.id) {
+          setIsSigninDrawerVisible(true);
+          return;
+        }
+        mixpanel.track("Inbox Trade");
+        navigation.navigate('PrivateChatTrade', {
+          selectedUser: selectedUser,
+          item,
+        });
+      };
+
+      callbackfunction();
+    };
+    return (
+      <View style={[styles.tradeItem, item.isFeatured && styles.featuredTradeItem]}>
+
+        {/* ── Card Header ── */}
+        <View style={styles.cardHeader}>
+          <TouchableOpacity style={{ flexDirection: 'row', alignItems: 'center', flex: 1 }} onPress={() => handleOpenProfile(item)}>
+            {/* Frame belongs to the trade's poster, not the viewer — read it
+                from the shared profile cache. Falls back to a plain circular
+                avatar when they have none equipped. */}
+            <View style={styles.avatarWrapper}>
+              <FramedAvatar
+                avatarUri={item.avatar || GAME.defaultAvatar}
+                frame={getCachedProfile(item.userId)?.profileFrame || null}
+                isDarkMode={isDarkMode}
+                avatarSize={28}
+                forceDetail
+              />
+            </View>
+            <View style={{ marginLeft: SPACE.lg, flex: 1 }}>
+              <View style={{ flexDirection: 'row', alignItems: 'center', gap: SPACE.xs, flexWrap: 'wrap' }}>
+                <Text style={styles.cardName} numberOfLines={1}>{item.traderName}</Text>
+                {item.isPro && (
+                  <Image source={require('../../assets/pro.png')} style={{ width: 11, height: 11 }} />
+                )}
+                {item.robloxUsernameVerified && (
+                  <Image source={require('../../assets/verification.png')} style={{ width: 11, height: 11 }} />
+                )}
+
+            {/* Role pills, resolved from the profile cache — trade and post
+                documents predate the role fields, so stamping them on the
+                document would leave older rows badge-less. */}
+            {(() => {
+              const rp = getCachedProfile(item.userId) || {};
+              const firstBadge = getFirstBadgeType(rp);
+              return (
+                <>
+                  {rp.isAdmin && <UserBadgePill type="admin" size="sm" isDarkMode={isDarkMode} glow={firstBadge === 'admin'} />}
+                  {!rp.isAdmin && rp.isModerator && <UserBadgePill type="mod" size="sm" isDarkMode={isDarkMode} glow={firstBadge === 'mod'} />}
+                  {!rp.isAdmin && !rp.isModerator && rp.isBabyMod && <UserBadgePill type="jmd" size="sm" isDarkMode={isDarkMode} glow={firstBadge === 'jmd'} />}
+                  {rp.isTrusted && <UserBadgePill type="trusted" size="sm" isDarkMode={isDarkMode} glow={firstBadge === 'trusted'} />}
+                  {rp.isCMSR && <UserBadgePill type="cmsr" size="sm" isDarkMode={isDarkMode} glow={firstBadge === 'cmsr'} />}
+                  {rp.isHelper && <UserBadgePill type="helper" size="sm" isDarkMode={isDarkMode} glow={firstBadge === 'helper'} />}
+                </>
+              );
+            })()}
+                {(() => {
+                  const hasRecentWin =
+                    !!item?.hasRecentGameWin ||
+                    (typeof item?.lastGameWinAt === 'number' &&
+                      Date.now() - item.lastGameWinAt <= 24 * 60 * 60 * 1000);
+                  return hasRecentWin ? (
+                    <Image source={require('../../assets/trophy.webp')} style={{ width: 11, height: 11 }} />
+                  ) : null;
+                })()}
+                {item.rating ? (
+                  <View style={{ flexDirection: 'row', alignItems: 'center', backgroundColor: '#ffb700be', borderRadius: 5, paddingHorizontal: SPACE.xs, paddingVertical: 1 }}>
+                    <Icon name="star" size={8} color="white" style={{ marginRight: SPACE.hair }} />
+                    <Text style={{ fontSize: SIZE.label, color: 'white', fontFamily: FONT.bold }}>{parseFloat(item.rating).toFixed(1)}({item.ratingCount})</Text>
+                  </View>
+                ) : (
+                  <View style={{ flexDirection: 'row', alignItems: 'center', backgroundColor: '#888', borderRadius: 5, paddingHorizontal: 3, paddingVertical: 1 }}>
+                    <Icon name="star-outline" size={8} color="white" style={{ marginRight: SPACE.hair }} />
+                    <Text style={{ fontSize: SIZE.label, color: 'white' }}>N/A</Text>
+                  </View>
+                )}
+              </View>
+              <Text style={styles.cardTime}>{formattedTime}</Text>
+            </View>
+          </TouchableOpacity>
+
+          {/* Badges: Featured + Win/Lose/Fair */}
+          <View style={{ flexDirection: 'row', alignItems: 'center', gap: SPACE.xs }}>
+            {item.isFeatured && (
+              <View style={[styles.statusBadge, { backgroundColor: STATUS.warning }]}>
+                <Text style={styles.statusBadgeText}>⭐ FEATURED</Text>
+              </View>
+            )}
+            {item.status && (
+              <View style={[
+                styles.statusBadge,
+                {
+                  backgroundColor:
+                    item.status === 'w' ? STATUS.success :
+                    item.status === 'f' ? config.colors.primary :
+                    STATUS.danger,
+                }
+              ]}>
+                <Text style={styles.statusBadgeText}>
+                  {item.status === 'w' ? 'Win' : item.status === 'f' ? 'Fair' : 'Lose'}
+                </Text>
+              </View>
+            )}
+            {/* Which catalogue priced this trade. Win/Fair/Lose is a verdict on
+                the totals, and the totals depend entirely on the source: the
+                two disagree on 70% of the items they share, and Supreme does
+                not price leaderboard awards at all. Without this badge a
+                viewer cannot tell what "Win" was measured against.
+
+                Which SCALE the trade was priced on. Absent on older trades,
+                where S$ is the honest answer — Proto pricing predates them. */}
+            <View style={[
+              styles.statusBadge,
+              styles.sourceBadge,
+              item.valueSource === VALUE_SOURCE.PROTO && styles.sourceBadgeSupreme,
+            ]}>
+              <Text style={styles.statusBadgeText}>
+                {sourceLabel(item.valueSource)}
+              </Text>
+            </View>
+          </View>
+        </View>
+
+        {/* Trade Items */}
+        <View style={styles.tradeDetails}>
+          {/* Has Items Grid or Give Offer */}
+          {item.hasItems && item.hasItems.length > 0 ? (
+            <View style={styles.itemGrid}>
+              {/* Only the items the trade actually has. This used to pad the
+                  count up to a multiple of four and render the remainder as
+                  empty cells -- each one a 40px-tall, 10px-margined box of
+                  nothing. A one-item trade drew three of them, and whenever a
+                  filler wrapped past the row it added a whole blank row under
+                  the items. The cells are fixed-width, so the grid lines up
+                  without placeholders. */}
+              {item.hasItems.map((tradeItem, idx) => {
+                return (
+                  <View key={idx} style={styles.gridCell}>
+                    {tradeItem ? (
+                      <>
+                        <Image
+                          source={{ uri: getImageUrl(tradeItem) }}
+                          style={styles.gridItemImage}
+                          onError={(e) => {
+                            console.warn('Image load error for item:', tradeItem);
+                          }}
+                        />
+                        <View style={{ alignItems: 'center', marginTop: SPACE.hair }}>
+                          {/* Full name, wrapped over up to two lines. The old
+                              hard slice at 7 characters cut real names ("Umbral
+                              Shark" -> "Umbral ...") and still broke mid-word,
+                              because the cell was narrower than the 8 characters
+                              it allowed through -- "Anchovy" rendered as
+                              "Anchov / y". Letting RN wrap and ellipsize does
+                              the job at any name length. */}
+                          <Text
+                            style={styles.itemName}
+                            numberOfLines={2}
+                            ellipsizeMode="tail"
+                          >
+                            {tradeItem.name}
+                          </Text>
+                          {tradeItem.deprecatedNames && Array.isArray(tradeItem.deprecatedNames) && tradeItem.deprecatedNames.length > 0 && (
+                            <Text style={styles.deprecatedName}>
+                              {tradeItem.deprecatedNames[0]?.length > 8 ? tradeItem.deprecatedNames[0].slice(0, 7) + '...' : tradeItem.deprecatedNames[0]}
+                            </Text>
+                          )}
+                          {!tradeItem.deprecatedNames && (tradeItem.deprecatedName || tradeItem.deprecated_name) && (
+                            <Text style={styles.deprecatedName}>
+                              {(tradeItem.deprecatedName || tradeItem.deprecated_name)?.length > 8
+                                ? (tradeItem.deprecatedName || tradeItem.deprecated_name).slice(0, 7) + '...'
+                                : (tradeItem.deprecatedName || tradeItem.deprecated_name)}
+                            </Text>
+                          )}
+                          {/* The source that priced this trade had no real value
+                              for this item, so it is not in the ME/YOU totals.
+                              Its own words ("Priceless", "Award only") say why.
+                              Absent on trades made before 2026-09, which render
+                              exactly as they always did. */}
+                          {tradeItem.valueConfidence && tradeItem.valueConfidence !== 'observed' ? (
+                            <Text style={styles.unpricedItemNote} numberOfLines={1}>
+                              {tradeItem.valueText || 'not in total'}
+                            </Text>
+                          ) : null}
+                        </View>
+                      </>
+                    ) : null}
+                  </View>
+                );
+              })}
+            </View>
+          ) : (
+            <TouchableOpacity style={styles.dealContainerSingle} onPress={() => handleOpenProfile(item)}>
+              <Text style={styles.dealText}>Give offer</Text>
+            </TouchableOpacity>
+          )}
+          {/* Transfer Icon */}
+          <View style={styles.transfer}>
+            <Image source={require('../../assets/left-right.png')} style={styles.transferImage} />
+          </View>
+          {/* Wants Items Grid or Give Offer */}
+          {item.wantsItems && item.wantsItems.length > 0 ? (
+            <View style={styles.itemGrid}>
+              {/* Only the items the trade actually has. This used to pad the
+                  count up to a multiple of four and render the remainder as
+                  empty cells -- each one a 40px-tall, 10px-margined box of
+                  nothing. A one-item trade drew three of them, and whenever a
+                  filler wrapped past the row it added a whole blank row under
+                  the items. The cells are fixed-width, so the grid lines up
+                  without placeholders. */}
+              {item.wantsItems.map((tradeItem, idx) => {
+                return (
+                  <View key={idx} style={styles.gridCell}>
+                    {tradeItem ? (
+                      <>
+                        <Image
+                          source={{ uri: getImageUrl(tradeItem) }}
+                          style={styles.gridItemImage}
+                          onError={(e) => {
+                            console.warn('Image load error for item:', tradeItem);
+                          }}
+                        />
+                        <View style={{ alignItems: 'center', marginTop: SPACE.hair }}>
+                          {/* Full name, wrapped over up to two lines. The old
+                              hard slice at 7 characters cut real names ("Umbral
+                              Shark" -> "Umbral ...") and still broke mid-word,
+                              because the cell was narrower than the 8 characters
+                              it allowed through -- "Anchovy" rendered as
+                              "Anchov / y". Letting RN wrap and ellipsize does
+                              the job at any name length. */}
+                          <Text
+                            style={styles.itemName}
+                            numberOfLines={2}
+                            ellipsizeMode="tail"
+                          >
+                            {tradeItem.name}
+                          </Text>
+                          {tradeItem.deprecatedNames && Array.isArray(tradeItem.deprecatedNames) && tradeItem.deprecatedNames.length > 0 && (
+                            <Text style={styles.deprecatedName}>
+                              {tradeItem.deprecatedNames[0]?.length > 8 ? tradeItem.deprecatedNames[0].slice(0, 7) + '...' : tradeItem.deprecatedNames[0]}
+                            </Text>
+                          )}
+                          {!tradeItem.deprecatedNames && (tradeItem.deprecatedName || tradeItem.deprecated_name) && (
+                            <Text style={styles.deprecatedName}>
+                              {(tradeItem.deprecatedName || tradeItem.deprecated_name)?.length > 8
+                                ? (tradeItem.deprecatedName || tradeItem.deprecated_name).slice(0, 7) + '...'
+                                : (tradeItem.deprecatedName || tradeItem.deprecated_name)}
+                            </Text>
+                          )}
+                          {/* The source that priced this trade had no real value
+                              for this item, so it is not in the ME/YOU totals.
+                              Its own words ("Priceless", "Award only") say why.
+                              Absent on trades made before 2026-09, which render
+                              exactly as they always did. */}
+                          {tradeItem.valueConfidence && tradeItem.valueConfidence !== 'observed' ? (
+                            <Text style={styles.unpricedItemNote} numberOfLines={1}>
+                              {tradeItem.valueText || 'not in total'}
+                            </Text>
+                          ) : null}
+                        </View>
+                      </>
+                    ) : null}
+                  </View>
+                );
+              })}
+            </View>
+          ) : (
+            <TouchableOpacity style={styles.dealContainerSingle} onPress={() => handleOpenProfile(item)}>
+              <Text style={styles.dealText}>Give offer</Text>
+            </TouchableOpacity>
+          )}
+        </View>
+
+        {/* Trade Totals */}
+        <View style={styles.tradeTotals}>
+          {item.hasItems && item.hasItems.length > 0 && (
+            <Text style={[styles.priceText, styles.hasBackground]}>
+              ME: {formatValue(hasTotalValue)}
+            </Text>
+          )}
+          <View style={styles.transfer}>
+            {(item.hasItems && item.hasItems.length > 0 && item.wantsItems && item.wantsItems.length > 0) && (
+              <>
+                {hasTotalValue > wantsTotalValue && (
+                  <View style={{ flexDirection: 'row', alignItems: 'center', gap: 3 }}>
+                    <View style={{ width: 6, height: 6, borderRadius: 3, backgroundColor: STATUS.success }} />
+                    <Text style={[styles.priceText, { color: STATUS.success, backgroundColor: 'transparent' }]}>
+                      +{formatValue(hasTotalValue - wantsTotalValue)}
+                    </Text>
+                  </View>
+                )}
+                {hasTotalValue < wantsTotalValue && (
+                  <View style={{ flexDirection: 'row', alignItems: 'center', gap: 3 }}>
+                    <View style={{ width: 6, height: 6, borderRadius: 3, backgroundColor: STATUS.danger }} />
+                    <Text style={[styles.priceText, { color: STATUS.danger, backgroundColor: 'transparent' }]}>
+                      -{formatValue(wantsTotalValue - hasTotalValue)}
+                    </Text>
+                  </View>
+                )}
+                {hasTotalValue === wantsTotalValue && (
+                  <Text style={{ fontSize: SIZE.label }}>⚖️</Text>
+                )}
+              </>
+            )}
+          </View>
+          {item.wantsItems && item.wantsItems.length > 0 && (
+            <Text style={[styles.priceText, styles.wantBackground]}>
+              YOU: {formatValue(wantsTotalValue)}
+            </Text>
+          )}
+        </View>
+
+        {/* Description */}
+        {item.description && <Text style={styles.description}>{renderTextWithUsername(item.description)}</Text>}
+
+        {/* Owner actions (Boost / Delete) */}
+        {item.userId === user.id && (
+          <View style={styles.ownerActions}>
+            {!item.isFeatured && (
+              <TouchableOpacity onPress={() => handleMakeFeatureTrade(item)} style={[styles.ownerBtn, { backgroundColor: '#8B5CF6' }]}>
+                <Icon name="rocket-outline" size={12} color="white" />
+                <Text style={styles.ownerBtnText}>BOOST IT</Text>
+              </TouchableOpacity>
+            )}
+            {/* Watch-an-ad boost. Hidden from Pro members on purpose: they
+                already get two instant boosts a day, and part of what they paid
+                for is not being shown ads. */}
+            {!item.isFeatured && !isProStatus && (
+              <TouchableOpacity onPress={() => handleFreeBoostTrade(item)} style={[styles.ownerBtn, { backgroundColor: '#F59E0B' }]}>
+                <Icon name="play-circle-outline" size={12} color="white" />
+                <Text style={styles.ownerBtnText}>
+                  {t('trade.free_boost', { defaultValue: 'FREE BOOST' })}
+                </Text>
+              </TouchableOpacity>
+            )}
+            <TouchableOpacity onPress={() => handleDelete(item)} style={[styles.ownerBtn, { backgroundColor: STATUS.danger }]}>
+              <Icon name="trash-outline" size={12} color="white" />
+              <Text style={styles.ownerBtnText}>DELETE IT</Text>
+            </TouchableOpacity>
+          </View>
+        )}
+
+        {/* Social Actions Row */}
+        <View style={styles.socialActionsRow}>
+          <View style={{ flex: 1 }} />
+
+          {/* Save — only on other people's trades */}
+          {item.userId !== user?.id && (
+            <TouchableOpacity
+              onPress={async () => {
+                if (!user?.id) { setIsSigninDrawerVisible(true); return; }
+                triggerHapticFeedback('impactLight');
+                const tradeId = item.id;
+                // Keep the Saved-tab doc cache in step with the toggle. We
+                // already hold the full trade here, so opening the Saved tab
+                // afterwards needs no Firestore reads at all.
+                const reseed = (nextRefs, rows) => {
+                  savedCacheRef.current = {
+                    sig: Object.keys(nextRefs).sort().join(','),
+                    rows,
+                  };
+                };
+                try {
+                  if (savedTradeRefs[tradeId]) {
+                    await unsaveTrade(appdatabase, user.id, tradeId);
+                    const next = { ...savedTradeRefs };
+                    delete next[tradeId];
+                    setSavedTradeRefs(next);
+                    reseed(next, savedCacheRef.current.rows.filter(r => r.id !== tradeId));
+                    showSuccessMessage(
+                      t('trade.removed', { defaultValue: 'Removed' }),
+                      t('trade.trade_unsaved', { defaultValue: 'Trade removed from saved' })
+                    );
+                  } else {
+                    await saveTrade(appdatabase, user.id, item, Object.keys(savedTradeRefs).length);
+                    const next = { ...savedTradeRefs, [tradeId]: { type: 'saved' } };
+                    setSavedTradeRefs(next);
+                    // Only extend a cache that's already complete; otherwise
+                    // leave it empty so the tab does a proper first load.
+                    if (savedCacheRef.current.rows.length === Object.keys(savedTradeRefs).length) {
+                      reseed(next, [item, ...savedCacheRef.current.rows]);
+                    }
+                    showSuccessMessage(
+                      '🔖 ' + t('trade.saved', { defaultValue: 'Trade Saved!' }),
+                      t('trade.saved_guide', { defaultValue: 'Tap the bookmark at the top to view your saved trades anytime.' })
+                    );
+                  }
+                } catch (e) {
+                  showErrorMessage(t('home.alert.error'), e?.message || 'Error');
+                }
+              }}
+              style={[styles.socialBtn, !!savedTradeRefs[item.id] && { backgroundColor: '#F59E0B20' }]}
+              activeOpacity={0.7}
+            >
+              <Icon name={savedTradeRefs[item.id] ? 'bookmark' : 'bookmark-outline'} size={16} color={STATUS.warning} />
+            </TouchableOpacity>
+          )}
+
+          <TouchableOpacity style={styles.chatBtn} onPress={() => handleOpenProfile(item)} activeOpacity={0.8}>
+            <Icon name="chatbubble" size={13} color="#fff" />
+            <Text style={styles.chatBtnText}>Chat</Text>
+          </TouchableOpacity>
+        </View>
+
+      </View>
+    );
+  };
+
+
+
+
+  if (loading) {
+    return <ActivityIndicator style={styles.loader} size="large" color={config.colors.primary} />;
+  }
+
+
+  return (
+    <View style={styles.container}>
+      {/* ✅ Modern Search Container (Compact) */}
+      <View style={{ flexDirection: 'row', marginBottom: SPACE.lg, marginTop: SPACE.lg, paddingHorizontal: SPACE.xxl }}>
+        <TextInput
+          style={{
+            flex: 1,
+            height: 44,
+            borderRadius: 10,
+            paddingHorizontal: SPACE.xl,
+            fontSize: SIZE.body,
+            backgroundColor: isDarkMode ? config.colors.surfaceDark : '#FFF',
+            color: c.text,
+            borderWidth: 1,
+            borderColor: c.border
+          }}
+          placeholder={t("trade.search_placeholder") || "Search items..."}
+          placeholderTextColor={isDarkMode ? '#888' : '#666'}
+          value={searchQuery}
+          onChangeText={setSearchQuery}
+          onSubmitEditing={() => {
+            setSearchCursors({ has: null, wants: null });
+            setSearchHasMore(true);
+            if (searchQuery.trim()) {
+              handleSearchTrades(false);
+            }
+          }}
+          returnKeyType="search"
+        />
+        <TouchableOpacity
+          style={{
+            width: 44,
+            height: 44,
+            backgroundColor: config.colors.primary,
+            borderRadius: 10,
+            marginLeft: SPACE.md,
+            justifyContent: 'center',
+            alignItems: 'center'
+          }}
+          onPress={() => {
+            setSearchCursors({ has: null, wants: null });
+            setSearchHasMore(true);
+            if (searchQuery.trim()) {
+              handleSearchTrades(false);
+            }
+          }}
+          disabled={isSearching}
+        >
+          {isSearching ? (
+            <ActivityIndicator size="small" color="#fff" />
+          ) : (
+            <Icon name="search" size={20} color="#fff" />
+          )}
+        </TouchableOpacity>
+      </View>
+
+      {/* ✅ Search Options — Compact single row */}
+      {(searchQuery.length > 0) && (
+        <View style={{ flexDirection: 'row', alignItems: 'center', paddingHorizontal: SPACE.xxl, marginBottom: SPACE.md, gap: SPACE.sm }}>
+          <TouchableOpacity
+            style={[{
+              flexDirection: 'row', alignItems: 'center', gap: SPACE.sm,
+              paddingVertical: SPACE.sm, paddingHorizontal: SPACE.xl,
+              borderRadius: 20, borderWidth: 1,
+              borderColor: searchInHas ? config.colors.primary : (isDarkMode ? '#475569' : '#E5E5EA'),
+              backgroundColor: searchInHas ? config.colors.primary : 'transparent'
+            }]}
+            onPress={() => {
+              triggerHapticFeedback('impactLight');
+              // Refuse to switch off the last active side. The old guard tested
+              // the state BEFORE the toggle, so turning off the only enabled
+              // side left both false and every later search was rejected with
+              // "You must select at least one side to search".
+              if (searchInHas && !searchInWants) return;
+              setSearchInHas(!searchInHas);
+            }}
+            activeOpacity={0.7}
+          >
+            {searchInHas && <Icon name="checkmark" size={14} color="#fff" />}
+            <Text style={[{ fontSize: SIZE.caption, fontFamily: FONT.bold }, { color: searchInHas ? '#fff' : (isDarkMode ? '#cbd5e1' : '#64748b') }]}>
+              {t("trade.search_in_me") || "Me"}
+            </Text>
+          </TouchableOpacity>
+
+          <TouchableOpacity
+            style={[{
+              flexDirection: 'row', alignItems: 'center', gap: SPACE.sm,
+              paddingVertical: SPACE.sm, paddingHorizontal: SPACE.xl,
+              borderRadius: 20, borderWidth: 1,
+              borderColor: searchInWants ? config.colors.primary : (isDarkMode ? '#475569' : '#E5E5EA'),
+              backgroundColor: searchInWants ? config.colors.primary : 'transparent'
+            }]}
+            onPress={() => {
+              triggerHapticFeedback('impactLight');
+              if (searchInWants && !searchInHas) return;
+              setSearchInWants(!searchInWants);
+            }}
+            activeOpacity={0.7}
+          >
+            {searchInWants && <Icon name="checkmark" size={14} color="#fff" />}
+            <Text style={[{ fontSize: SIZE.caption, fontFamily: FONT.bold }, { color: searchInWants ? '#fff' : (isDarkMode ? '#cbd5e1' : '#64748b') }]}>
+              {t("trade.search_in_you") || "You"}
+            </Text>
+          </TouchableOpacity>
+
+          <TouchableOpacity
+            onPress={() => {
+              setSearchQuery('');
+              setIsSearchMode(false);
+              setSearchCursors({ has: null, wants: null });
+              setSearchHasMore(true);
+              fetchInitialTrades();
+            }}
+            style={{
+              flexDirection: 'row',
+              alignItems: 'center',
+              justifyContent: 'center',
+              marginLeft: 'auto',
+              paddingVertical: 5,
+              paddingHorizontal: SPACE.lg,
+              borderRadius: 8,
+              backgroundColor: isDarkMode ? config.colors.surfaceDark : '#f1f5f9',
+            }}
+          >
+            <Icon name="close-circle" size={14} color={config.colors.primary} style={{ marginRight: SPACE.xs }} />
+            <Text style={{ color: config.colors.primary, fontSize: SIZE.small, fontFamily: FONT.regular }}>{t("trade.clear") || "Clear"}</Text>
+          </TouchableOpacity>
+        </View>
+      )}
+      <FlatList
+        ref={flatListRef}
+        data={tradesWithAds}
+        renderItem={renderTrade}
+        // The `featured-` prefix exists ONLY to key the list. It is deliberately
+        // not part of item.id, which must stay the real Firestore document id
+        // so save, delete and open all address the right document.
+        keyExtractor={(item) => item?.__type === 'ad' ? item.id : (item.isFeatured ? `featured-${item.id}` : item.id)}
+        showsVerticalScrollIndicator={false}
+        contentContainerStyle={{ paddingBottom: 180 }}
+        onEndReached={handleEndReached}
+        onEndReachedThreshold={0.2}
+        removeClippedSubviews={true} // 🚀 Reduce memory usage
+        initialNumToRender={10} // 🔹 Render fewer items at start
+        maxToRenderPerBatch={10} // 🔹 Load smaller batches
+        updateCellsBatchingPeriod={50} // 🔹 Reduce updates per frame
+        windowSize={5} // 🔹 Keep only 5 screens worth in memory
+        refreshing={refreshing} // Add Pull-to-Refresh
+        onRefresh={handleRefresh} // Attach Refresh Handler
+        onScroll={({ nativeEvent }) => {
+          const { contentOffset } = nativeEvent;
+          // ✅ Check if user is at top (within 60px from top). Only update state
+          // when the boolean actually flips — otherwise setIsAtTop fires on every
+          // scroll frame (~60/s) and re-renders the entire list.
+          const atTop = contentOffset.y <= 60;
+          setIsAtTop((prev) => (prev === atTop ? prev : atTop));
+        }}
+        scrollEventThrottle={16}
+      />
+
+
+
+
+      <ReportTradePopup
+        visible={isReportPopupVisible}
+        trade={selectedTrade}
+        onClose={() => setReportPopupVisible(false)}
+      />
+
+      <SignInDrawer
+        visible={isSigninDrawerVisible}
+        onClose={handleLoginSuccess}
+        selectedTheme={selectedTheme}
+        message={t("trade.signin_required_message")}
+        screen='Trade'
+
+      />
+
+      {!localState.isPro && (
+        <View style={{
+          position: 'absolute',
+          bottom: bannerBottomPos,
+          left: 0,
+          right: 0,
+          alignItems: 'center',
+          zIndex: 5,
+        }}>
+          <BannerAdComponent collapsible />
+        </View>
+      )}
+
+      <SubscriptionScreen visible={showofferwall} onClose={() => setShowofferwall(false)} track='Trade' />
+     
+      <ProfileBottomDrawer
+          isVisible={isDrawerVisible}
+          toggleModal={closeProfileDrawer}  
+          startChat={handleChatNavigation2}
+          selectedUser={selectedUser}
+          isOnline={isOnline}
+          bannedUsers={bannedUsers}
+        />
+
+      {/* ✅ Scroll to Top Button */}
+      {!isAtTop && (
+        <Animated.View
+          style={[
+            styles.scrollToTopButton,
+            {
+              opacity: scrollButtonOpacity,
+              transform: [
+                {
+                  scale: scrollButtonOpacity.interpolate({
+                    inputRange: [0, 1],
+                    outputRange: [0.8, 1],
+                  }),
+                },
+              ],
+            },
+          ]}
+        >
+          <TouchableOpacity
+            onPress={handleScrollToTop}
+            activeOpacity={0.8}
+            style={styles.scrollToTopTouchable}
+          >
+            <Icon
+              name="chevron-up-circle"
+              size={FLOATING_BUTTON_ICON_SIZE}
+              color={config.colors.primary}
+            />
+          </TouchableOpacity>
+        </Animated.View>
+      )}
+    </View>
+  );
+};
+const getStyles = (isDarkMode, c = getThemeColors(isDarkMode)) =>
+  StyleSheet.create({
+    container: {
+      paddingHorizontal: SPACE.md,
+      backgroundColor: isDarkMode ? config.colors.backgroundDark : config.colors.backgroundLight,
+      flex: 1,
+    },
+    tradeItem: {
+      paddingHorizontal: 14,
+      paddingVertical: SPACE.xl,
+      marginHorizontal: SPACE.xs,
+      marginBottom: SPACE.lg,
+      backgroundColor: isDarkMode ? config.colors.surfaceDark : '#ffffff',
+      borderRadius: 18,
+      borderWidth: 1,
+      borderColor: c.border,
+      shadowColor: c.shadow,
+      shadowOffset: { width: 0, height: 4 },
+      shadowOpacity: isDarkMode ? 0.3 : 0.07,
+      shadowRadius: 10,
+      elevation: isDarkMode ? 5 : 3,
+    },
+    featuredTradeItem: {
+      backgroundColor: c.card,
+      borderColor: STATUS.warning,
+      borderWidth: 1.5,
+      shadowColor: STATUS.warning,
+      shadowOffset: { width: 0, height: 3 },
+      shadowOpacity: 0.25,
+      shadowRadius: 8,
+      elevation: 5,
+    },
+
+    searchInput: {
+      height: 40,
+      borderColor: isDarkMode ? config.colors.primary : config.colors.borderLight,
+      backgroundColor: isDarkMode ? config.colors.surfaceDark : config.colors.surfaceLight,
+
+      borderWidth: 1,
+      marginVertical: SPACE.md,
+      paddingHorizontal: SPACE.lg,
+      color: isDarkMode ? config.colors.textDark : config.colors.textLight,
+      flex: 1,
+      borderRadius: 10, // Ensure smooth corners
+      // shadowColor: config.colors.shadowDark, // Shadow color for iOS
+      // shadowOffset: { width: 0, height: 0 }, // Positioning of the shadow
+      // shadowOpacity: 0.2, // Opacity for iOS shadow
+      // shadowRadius: 2, // Spread of the shadow
+      // elevation: 2, // Elevation for Android (4-sided shadow)
+    },
+    tradeHeader: {
+      flexDirection: 'row',
+      justifyContent: 'space-between',
+      alignItems: 'center',
+      borderColor: isDarkMode ? config.colors.borderDark : config.colors.borderLight,
+      color: isDarkMode ? config.colors.textDark : config.colors.textLight,
+    },
+    // ── New feed-style card header ──
+    cardHeader: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      marginBottom: SPACE.lg,
+    },
+    avatarWrapper: {
+      shadowColor: config.colors.primary,
+      shadowOffset: { width: 0, height: 2 },
+      shadowOpacity: 0.3,
+      shadowRadius: 6,
+    },
+    cardAvatar: {
+      width: 42,
+      height: 42,
+      borderRadius: 21,
+      borderWidth: 2.5,
+      borderColor: config.colors.primary,
+    },
+    cardName: {
+      fontFamily: FONT.bold,
+      fontSize: SIZE.caption,
+      color: isDarkMode ? '#e2e8f0' : config.colors.backgroundDark,
+      letterSpacing: 0.1,
+      flexShrink: 1,
+    },
+    cardTime: {
+      fontSize: SIZE.small,
+      color: c.textMuted,
+      marginTop: SPACE.hair,
+    },
+    statusBadge: {
+      paddingVertical: 3,
+      paddingHorizontal: SPACE.md,
+      borderRadius: 8,
+    },
+    statusBadgeText: {
+      color: 'white',
+      fontFamily: FONT.bold,
+      fontSize: SIZE.label,
+    },
+    // Deliberately muted next to Win/Fair/Lose: it is provenance, not a verdict.
+    unpricedItemNote: {
+      fontSize: SIZE.label,
+      textAlign: 'center',
+      opacity: 0.65,
+      color: isDarkMode ? config.colors.textDark : config.colors.textLight,
+    },
+    sourceBadge: {
+      backgroundColor: isDarkMode ? '#475569' : '#94a3b8',
+    },
+    sourceBadgeSupreme: {
+      backgroundColor: config.colors.secondary,
+    },
+    traderName: {
+      fontFamily: FONT.bold,
+      fontSize: SIZE.label,
+      color: isDarkMode ? config.colors.textDark : config.colors.textLight,
+    },
+    tradeTime: {
+      fontSize: SIZE.label,
+      color: isDarkMode ? config.colors.textSecondaryDark : config.colors.textSecondaryLight,
+    },
+    tradeDetails: {
+      flexDirection: 'row',
+      justifyContent: 'space-between',
+      color: isDarkMode ? config.colors.textDark : config.colors.textLight,
+      marginVertical: SPACE.lg
+
+
+    },
+    itemGrid: {
+      flexDirection: 'row',
+      flexWrap: 'wrap',
+      width: '48%',
+      // Gap BETWEEN rows, rather than a bottom margin on every cell: the old
+      // per-cell margin also applied to the last row, so it padded the card
+      // under the items for no reason.
+      rowGap: SPACE.lg,
+      // alignItems: 'center',
+      // justifyContent: 'center',
+      // marginVertical: SPACE.sm,
+    },
+    gridCell: {
+      // 24%, not 22%: four cells plus their 1px margins still fit the 48%-wide
+      // grid, and the extra ~8px is what lets a 7-character name sit on one
+      // line instead of breaking after "Anchov".
+      width: '24%',
+      minHeight: 40,
+      marginHorizontal: 1,
+      alignItems: 'center',
+      justifyContent: 'flex-start',
+      position: 'relative',
+    },
+    gridItemImage: {
+      width: 30,
+      height: 30,
+      borderRadius: 6,
+    },
+    itemName: {
+      fontSize: SIZE.label,
+      fontFamily: FONT.regular,
+      color: isDarkMode ? config.colors.textDark : config.colors.textLight,
+      textAlign: 'center',
+      marginTop: SPACE.hair,
+    },
+    deprecatedName: {
+      fontSize: SIZE.label,
+      fontFamily: FONT.regular,
+      color: isDarkMode ? config.colors.textTertiaryDark : config.colors.textTertiaryLight,
+      textAlign: 'center',
+      fontStyle: 'italic',
+      marginTop: 1,
+    },
+    itemBadgesContainer: {
+      position: 'absolute',
+      bottom: -5,
+      right: 0,
+      flexDirection: 'row',
+      gap: 1,
+      padding: 1,
+      alignItems: 'center',
+      justifyContent: 'center',
+      //  backgroundColor: config.colors.error
+
+    },
+    itemBadge: {
+      color: config.colors.white,
+      backgroundColor: config.colors.textTertiaryDark,
+      borderRadius: 10, // Make it perfectly round
+      width: 10, // Fixed width
+      height: 10, // Fixed height
+      fontSize: SIZE.label,
+      textAlign: 'center',
+      lineHeight: 10, // Center text vertically
+      fontFamily: FONT.bold,
+      overflow: 'hidden',
+      padding: 0,
+      margin: 0,
+    },
+    itemBadgeFly: {
+      backgroundColor: config.colors.info,
+    },
+    itemBadgeRide: {
+      backgroundColor: config.colors.error,
+    },
+    itemBadgeMega: {
+      backgroundColor: config.colors.secondary,
+    },
+    itemBadgeNeon: {
+      backgroundColor: config.colors.success,
+    },
+    itemImage: {
+      width: 30,
+      height: 30,
+      // marginRight: 5,
+      // borderRadius: 25,
+      marginVertical: 5,
+      borderRadius: 5
+      // padding: SPACE.lg
+
+    },
+    itemImageUser: {
+      width: 20,
+      height: 20,
+      // marginRight: 5,
+      borderRadius: 15,
+      marginRight: 5,
+      backgroundColor: config.colors.white
+    },
+    transferImage: {
+      width: 20,
+      height: 20,
+      // marginRight: 5,
+      borderRadius: 5,
+      // width:'4%',
+    },
+    tradeTotals: {
+      flexDirection: 'row',
+      justifyContent: 'center',
+      // marginTop: SPACE.lg,
+      width: '100%'
+
+    },
+    priceText: {
+      fontSize: SIZE.label,
+      fontFamily: FONT.bold,
+      color: config.colors.white,
+      // width: '40%',
+      textAlign: 'center', // Centers text within its own width
+      alignSelf: 'center', // Centers within the parent container
+      marginHorizontal: 'auto',
+      paddingHorizontal: SPACE.xs,
+      paddingVertical: SPACE.hair,
+      borderRadius: 6
+    },
+    priceTextProfit: {
+      fontSize: SIZE.label,
+      lineHeight: 14,
+      fontFamily: FONT.regular,
+      // color: STATUS.primary,
+      // width: '40%',
+      textAlign: 'center', // Centers text within its own width
+      alignSelf: 'center', // Centers within the parent container
+      // color: isDarkMode ? 'white' : "grey",
+      // marginHorizontal: 'auto',
+      // paddingHorizontal: SPACE.xs,
+      // paddingVertical: SPACE.hair,
+      // borderRadius: 6
+    },
+    hasBackground: {
+      backgroundColor: config.colors.hasBlockGreen,
+    },
+    wantBackground: {
+      backgroundColor: config.colors.wantBlockRed,
+    },
+    tradeActions: {
+      flexDirection: 'row',
+      alignItems: 'center',
+    },
+
+    transfer: {
+      // width: '10%',
+      justifyContent: 'center',
+      alignItems: 'center'
+    },
+    actionButtons: {
+      flexDirection: 'row', alignItems: 'flex-end', justifyContent: 'space-between',
+      borderColor: isDarkMode ? config.colors.borderDark : config.colors.borderLight, marginTop: SPACE.lg, paddingTop: SPACE.lg
+    },
+    description: {
+      color: isDarkMode ? config.colors.textSecondaryDark : config.colors.textSecondaryLight,
+      fontFamily: FONT.regular,
+      fontSize: SIZE.label,
+      marginTop: 5,
+      lineHeight: 12
+    },
+    descriptionclick: {
+      color: config.colors.secondary,
+      fontFamily: FONT.regular,
+      fontSize: SIZE.label,
+      // marginTop: 5,
+      // lineHeight:12
+
+    },
+    loader: {
+      flex: 1
+    },
+    dealContainer: {
+      paddingVertical: 1,
+      paddingHorizontal: SPACE.sm,
+      borderRadius: 6,
+      alignSelf: 'center',
+      marginRight: SPACE.lg
+    },
+    dealContainerSingle: {
+      paddingVertical: 5,
+      paddingHorizontal: SPACE.sm,
+      borderRadius: 6,
+      alignSelf: 'center',
+      // height:30,
+      // marginRight: SPACE.lg,
+      backgroundColor: config.colors.backgroundDark,
+      // justifyContent: 'center',
+      alignItems: 'center',
+      marginHorizontal: 'auto'
+      // flexD1
+    },
+    dealText: {
+      color: config.colors.white,
+      fontFamily: FONT.regular,
+      fontSize: SIZE.label,
+      textAlign: 'center',
+      // alignItems: 'center',
+      // justifyContent: 'center'
+      // backgroundColor: config.colors.backgroundDark
+
+    },
+    names: {
+      fontFamily: FONT.bold,
+      fontSize: SIZE.label,
+      color: isDarkMode ? 'white' : "black",
+      marginTop: -3
+    },
+    tagcount: {
+      position: 'absolute',
+      backgroundColor: 'purple',
+      top: -1,
+      left: -1,
+      borderRadius: 50,
+      paddingHorizontal: 3,
+      paddingBottom: SPACE.hair
+
+    },
+    tagcounttext: {
+      color: 'white',
+      fontFamily: FONT.bold,
+      fontSize: SIZE.label
+    },
+    footer: {
+      flexDirection: 'row',
+      justifyContent: 'flex-start',
+      borderTopWidth: 1,
+      backgroundColor: config.colors.warning,
+      paddingTop: 5,
+      marginTop: SPACE.lg,
+      borderTopColor: config.colors.hasBlockGreen
+    },
+    // ── New premium action styles ──
+    ownerActions: {
+      flexDirection: 'row',
+      // Wraps because a free user sees three buttons here, not two — without
+      // this the third is pushed off the card edge on a narrow screen.
+      flexWrap: 'wrap',
+      gap: SPACE.sm,
+      marginTop: SPACE.md,
+    },
+    ownerBtn: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: SPACE.xs,
+      paddingVertical: 5,
+      paddingHorizontal: SPACE.lg,
+      borderRadius: 8,
+    },
+    ownerBtnText: {
+      color: 'white',
+      fontSize: SIZE.small,
+      fontFamily: FONT.regular,
+    },
+    socialActionsRow: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      justifyContent: 'flex-end',
+      gap: SPACE.md,
+      marginTop: SPACE.md,
+      paddingTop: SPACE.md,
+      borderTopWidth: 1,
+      borderTopColor: c.border,
+    },
+    socialBtn: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      justifyContent: 'center',
+      width: 32,
+      height: 32,
+      borderRadius: 999,
+      backgroundColor: c.bgAlt,
+    },
+    chatBtn: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      paddingHorizontal: 14,
+      paddingVertical: 7,
+      borderRadius: 999,
+      backgroundColor: config.colors.primary,
+      gap: 5,
+      shadowColor: config.colors.primary,
+      shadowOffset: { width: 0, height: 2 },
+      shadowOpacity: 0.3,
+      shadowRadius: 5,
+      elevation: 3,
+    },
+    chatBtnText: {
+      color: c.textInverse,
+      fontFamily: FONT.bold,
+      fontSize: SIZE.small,
+    },
+    boost:{
+      justifyContent:'flex-start', paddingVertical: SPACE.hair, paddingHorizontal:5, borderRadius:3, alignItems:'center', margin: SPACE.xs
+    },
+    scrollToTopButton: {
+      position: 'absolute',
+      // Was a hand-tuned 150, which left it ~90px above the banner — far higher
+      // than the feed's FAB and the chat's button, so it jumped between tabs.
+      bottom: ABOVE_BANNER,
+      right: FLOATING_BUTTON_RIGHT,
+      zIndex: 1000,
+      elevation: 8, // For Android shadow
+      shadowColor: config.colors.shadowDark, // For iOS shadow
+      shadowOffset: { width: 0, height: 2 },
+      shadowOpacity: 0.25,
+      shadowRadius: 3.84,
+    },
+    scrollToTopTouchable: {
+      width: FLOATING_BUTTON_ICON_SIZE,
+      height: FLOATING_BUTTON_ICON_SIZE,
+      borderRadius: FLOATING_BUTTON_ICON_SIZE / 2,
+      // backgroundColor: isDarkMode ? 'rgba(30, 30, 30, 0.9)' : 'rgba(255, 255, 255, 0.9)',
+      // padding: SPACE.xs,
+      justifyContent: 'center',
+      alignItems: 'center',
+    },
+
+  });
+
+export default TradeList;

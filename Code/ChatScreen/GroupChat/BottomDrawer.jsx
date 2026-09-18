@@ -1,0 +1,2463 @@
+import React, { useEffect, useState, useCallback, useMemo, useRef } from 'react';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
+import {
+  Modal,
+  View,
+  Text,
+  TouchableOpacity,
+  Pressable,
+  Image,
+  ActivityIndicator,
+  ScrollView,
+  Alert,
+  Linking,
+  Platform,
+  Dimensions,
+  TextInput,
+  KeyboardAvoidingView,
+  Keyboard,
+} from 'react-native';
+import { useGlobalState } from '../../GlobelStats';
+import config from '../../Helper/Environment';
+import Icon from 'react-native-vector-icons/Ionicons';
+import { getStyles } from '../../SettingScreen/settingstyle';
+import { useLocalState } from '../../LocalGlobelStats';
+import { useTranslation } from 'react-i18next';
+import { showSuccessMessage } from '../../Helper/MessageHelper';
+import { mixpanel } from '../../AppHelper/MixPenel';
+import Clipboard from '@react-native-clipboard/clipboard';
+import { useHaptic } from '../../Helper/HepticFeedBack';
+import SwipeableBottomDrawer from '../../Helper/SwipeableBottomDrawer';
+import ProfileReviewsSection from './ProfileReviewsSection';
+import ProfileTradesSection from './ProfileTradesSection';
+import ProfilePostsSection from './ProfilePostsSection';
+import CompactPortfolio from './CompactPortfolio';
+
+import { getThemeColors } from '../../Helper/themeColors';
+import {
+  collection,
+  doc,
+  getDoc,
+  getDocs,
+  query,
+  where,
+  orderBy,
+  limit,
+  startAfter,           // ✅ moved here
+  setDoc,
+  deleteDoc,
+  serverTimestamp,
+  getCountFromServer, // ✅ Added for follower count
+} from '@react-native-firebase/firestore';
+import { ref, get, set } from '@react-native-firebase/database';
+import { useOnlineStatus, canStaffBanMute, checkBanStatus, setUserStrike, muteUser,
+  unbanUserWithEmail, makeModerator, removeModerator, makeBabyMod, removeBabyMod,
+  makeTrusted, removeTrusted, makeCMSR, removeCMSR, makeHelper, removeHelper } from '../utils';
+import ProfileAdminActions from './ProfileAdminActions';
+import UserBadgePill, { getFirstBadgeType } from '../../Helper/UserBadgePill';
+import dayjs from 'dayjs';
+import relativeTime from 'dayjs/plugin/relativeTime';
+import FramedAvatar from './FramedAvatar';
+import { getCachedProfile, warmProfileCache, invalidateFullProfile, getRoleOverride, getOrFetchFullProfile } from '../../Helper/profileCache';
+import { resolveItemImage } from '../../Helper/valueSources';
+import { GAME } from '../../config/game';
+import { SIZE } from '../../Design/tokens';
+import { SPACE } from '../../Design/tokens';
+import { LIGHT } from '../../Design/tokens';
+import { FONT } from '../../Design/tokens';
+
+dayjs.extend(relativeTime);
+
+const REVIEWS_PAGE_SIZE = 3; // how many reviews per page
+
+// ✅ Helper function to format fruit names for image URLs
+const formatName = (name) => {
+  const insets = useSafeAreaInsets();
+  if (!name || typeof name !== 'string') return '';
+  return name.replace(/^\+/, '').replace(/\s+/g, '-');
+};
+
+// Helper function to format trade item names
+const formatTradeName = (name) => {
+  if (!name || typeof name !== 'string') return '';
+  let formattedName = name.replace(/^\+/, '');
+  formattedName = formattedName.replace(/\s+/g, '-');
+  return formattedName;
+};
+
+// Helper function to format values
+const formatTradeValue = (value) => {
+  if (!value || typeof value !== 'number') return '0';
+  if (value >= 1_000_000_000) {
+    return `${(value / 1_000_000_000).toFixed(1)}B`;
+  } else if (value >= 1_000_000) {
+    return `${(value / 1_000_000).toFixed(1)}M`;
+  } else if (value >= 1_000) {
+    return `${(value / 1_000).toFixed(1)}K`;
+  } else {
+    return value.toLocaleString();
+  }
+};
+
+// Helper function to group items
+const groupTradeItems = (items) => {
+  if (!Array.isArray(items)) return [];
+  const grouped = {};
+  items.forEach(({ name, type }) => {
+    const key = `${name}-${type}`;
+    if (grouped[key]) {
+      grouped[key].count += 1;
+    } else {
+      grouped[key] = { name, type, count: 1 };
+    }
+  });
+  return Object.values(grouped);
+};
+
+// Helper function to get trade deal
+const getTradeDeal = (hasTotal, wantsTotal) => {
+  // Handle both number and object formats
+  const hasValue = typeof hasTotal === 'number' ? hasTotal : hasTotal?.value;
+  const wantsValue = typeof wantsTotal === 'number' ? wantsTotal : wantsTotal?.value;
+  
+  if (!hasValue || hasValue <= 0) {
+    return { deal: { label: "trade.unknown_deal", color: LIGHT.textSecondary }, tradeRatio: 0 };
+  }
+
+  const tradeRatio = wantsValue ? wantsValue / hasValue : 0;
+  let deal;
+
+  if (tradeRatio >= 0.05 && tradeRatio <= 0.6) {
+    deal = { label: "trade.best_deal", color: "#34C759" };
+  } else if (tradeRatio > 0.6 && tradeRatio <= 0.75) {
+    deal = { label: "trade.great_deal", color: "#32D74B" };
+  } else if (tradeRatio > 0.75 && tradeRatio <= 1.25) {
+    deal = { label: "trade.fair_deal", color: "#FFCC00" };
+  } else if (tradeRatio > 1.25 && tradeRatio <= 1.4) {
+    deal = { label: "trade.decent_deal", color: "#FF9F0A" };
+  } else if (tradeRatio > 1.4 && tradeRatio <= 1.55) {
+    deal = { label: "trade.weak_deal", color: "#D65A31" };
+  } else {
+    deal = { label: "trade.risky_deal", color: "#7D1128" };
+  }
+
+  return { deal, tradeRatio };
+};
+
+const ProfileBottomDrawer = ({
+  isVisible,
+  toggleModal,
+  startChat,
+  selectedUser,
+  isOnline: isOnlineProp, // kept for backward compat, overridden by real-time hook
+  bannedUsers,
+  fromPvtChat,
+}) => {
+  const { theme, firestoreDB, appdatabase, user, isAdmin, modControlsEnabled, canGrantJmd } = useGlobalState();
+  const { updateLocalState, localState } = useLocalState();
+  const { t } = useTranslation();
+  const { triggerHapticFeedback } = useHaptic();
+
+  const isDarkMode = theme === 'dark';
+
+  const c = getThemeColors(isDarkMode);
+  // ✅ Memoize styles
+  const styles = useMemo(() => getStyles(isDarkMode), [isDarkMode]);
+
+  const selectedUserId = selectedUser?.senderId || selectedUser?.id || null;
+
+  // ✅ FIXED: Real-time online status listener instead of stale one-shot prop
+  const isOnline = useOnlineStatus(isVisible ? selectedUserId : null);
+  const userName = selectedUser?.sender || null;
+  const avatar = selectedUser?.avatar || null;
+
+  // 🔒 ban state - ✅ Safety check for array
+  const isBlock = Array.isArray(bannedUsers) && bannedUsers.includes(selectedUserId);
+
+  // Cosmetics of the profile being viewed — drives the avatar frame.
+  const [drawerCosmetics, setDrawerCosmetics] = useState(null);
+  useEffect(() => {
+    if (!isVisible || !selectedUserId) return;
+    const cached = getCachedProfile(selectedUserId);
+    if (cached) { setDrawerCosmetics(cached); return; }
+    if (!appdatabase) return;
+    let cancelled = false;
+    warmProfileCache(appdatabase, [selectedUserId])
+      .then(() => { if (!cancelled) setDrawerCosmetics(getCachedProfile(selectedUserId)); })
+      .catch(() => {});
+    return () => { cancelled = true; };
+  }, [isVisible, selectedUserId, appdatabase]);
+
+  // ⭐ rating summary (from Firestore user_ratings_summary - single source of truth)
+  const [ratingSummary, setRatingSummary] = useState(null);
+  const [loadingRating, setLoadingRating] = useState(false);
+  const [userBio, setUserBio] = useState(null);
+
+  // joined text
+  const [createdAtText, setCreatedAtText] = useState(null);
+
+  // 💰 user points and game wins
+  const [userPoints, setUserPoints] = useState(null);
+  const [gameWins, setGameWins] = useState(null);
+
+  // 📝 reviews list (from Firestore /reviews where toUserId == selectedUserId)
+  const [reviews, setReviews] = useState([]);
+  const [loadingReviews, setLoadingReviews] = useState(false);
+  const [lastReviewDoc, setLastReviewDoc] = useState(null);
+  const [hasMoreReviews, setHasMoreReviews] = useState(false);
+  const [starFilter, setStarFilter] = useState(null); // null = All, 1-5 = specific star
+
+  // 🐾 items (owned + wishlist) from Firestore doc /reviews/{userId}
+  const [ownedItems, setOwnedItems] = useState([]);
+  const [wishlistItems, setWishlistItems] = useState([]);
+  const [loadingItems, setLoadingItems] = useState(false);
+
+  // 💼 trades list (from Firestore /trades_new where userId == selectedUserId)
+  const [trades, setTrades] = useState([]);
+  const [loadingTrades, setLoadingTrades] = useState(false);
+  const [lastTradeDoc, setLastTradeDoc] = useState(null);
+  const [hasMoreTrades, setHasMoreTrades] = useState(false);
+
+  // 🖼️ Posts list (from Firestore /designPosts where userId == selectedUserId)
+  const [posts, setPosts] = useState([]);
+  const [loadingPosts, setLoadingPosts] = useState(false);
+  const [lastPostDoc, setLastPostDoc] = useState(null);
+  const [hasMorePosts, setHasMorePosts] = useState(false);
+  const [selectedPost, setSelectedPost] = useState(null);
+
+  // toggle details
+  const [loadDetails, setLoadDetails] = useState(false);
+
+  // 👥 Follower Count
+  const [followersCount, setFollowersCount] = useState(0);
+
+  // ✅ State for fetched user data (roblox username, verified status, etc.)
+  const [userData, setUserData] = useState(null);
+
+  // ── Mod tools (PLAN_2026-09.md P5) ──
+  const [showModTools, setShowModTools] = useState(false);
+  const [isBanned, setIsBanned] = useState(false);
+  // A ban/mute/strike always asks for a reason first. The reason modal is a
+  // SIBLING of the drawer, not a child: opening it closes the drawer, so the
+  // two never fight over the screen or the keyboard.
+  const [showReasonModal, setShowReasonModal] = useState(false);
+  const [reasonActionType, setReasonActionType] = useState(null); // {type, value, email}
+  const [adminReason, setAdminReason] = useState('');
+
+  const [isFollowing, setIsFollowing] = useState(false);
+  const [followLoading, setFollowLoading] = useState(false);
+
+
+  // ✅ Reset all user-specific state when switching profiles to prevent stale data flash
+  useEffect(() => {
+    setRatingSummary(null);
+    setLoadingRating(false);
+    setUserBio(null);
+    setCreatedAtText(null);
+    setUserPoints(null);
+    setGameWins(null);
+    setReviews([]);
+    setLastReviewDoc(null);
+    setHasMoreReviews(false);
+    setStarFilter(null);
+    setOwnedItems([]);
+    setWishlistItems([]);
+    setTrades([]);
+    setLastTradeDoc(null);
+    setHasMoreTrades(false);
+    setPosts([]);
+    setLastPostDoc(null);
+    setHasMorePosts(false);
+    setSelectedPost(null);
+    setLoadDetails(false);
+    setUserData(null);
+    setFollowersCount(0);
+    setIsFollowing(false);
+
+  }, [selectedUserId]);
+
+  // ✅ Fetch user data from Firebase if roblox data is missing
+  useEffect(() => {
+    // isVisible guard: this drawer is MOUNTED by Trades, StatusFeed, PostCard,
+    // the chat screens and the leaderboard, so without it these 5 RTDB reads
+    // fired on every one of those screens even when the drawer was never
+    // opened — which is the common case.
+    if (!isVisible || !selectedUserId || !appdatabase) return;
+
+    // No early return on a known roblox username any more: this effect now
+    // also supplies role flags, the email the mod actions need, and ban
+    // state, none of which selectedUser carries.
+
+    let isMounted = true;
+
+    const fetchUserData = async () => {
+      try {
+        // ONE read of users/{uid}, shared with the chat/online-list cache
+        // (PLAN_2026-09.md F1). This used to be 5 parallel leaf reads, and it
+        // could not see the role flags or the email at all — which is why the
+        // mod tools below need the whole record anyway.
+        const record = await getOrFetchFullProfile(appdatabase, selectedUserId);
+        if (!isMounted) return;
+
+        if (!record) { setUserData(null); return; }
+
+        // Roles we granted seconds ago beat the cached record, so a freshly
+        // awarded badge shows up without waiting out the cache TTL.
+        const roleOv = getRoleOverride(selectedUserId) || {};
+
+        setUserData({
+          robloxUsername: record.robloxUsername ?? null,
+          robloxUserId: record.robloxUserId ?? null,
+          robloxUsernameVerified: !!record.robloxUsernameVerified,
+          isPro: !!record.isPro,
+          lastGameWinAt: record.lastGameWinAt ?? null,
+          email: record.email ?? record.decodedEmail ?? null,
+          // RTDB stores the owner flag as `admin`; the app reads `isAdmin`.
+          isAdmin: !!record.admin || !!record.isAdmin,
+          isModerator: roleOv.isModerator ?? !!record.isModerator,
+          isBabyMod: roleOv.isBabyMod ?? !!record.isBabyMod,
+          isTrusted: roleOv.isTrusted ?? !!record.isTrusted,
+          isCMSR: roleOv.isCMSR ?? !!record.isCMSR,
+          isHelper: roleOv.isHelper ?? !!record.isHelper,
+        });
+
+        // Ban state for the Unban chip. checkBanStatus validates against
+        // server time, so an expired ban does not keep showing as active.
+        const emailToCheck = record.email || record.decodedEmail || selectedUser?.email;
+        if (emailToCheck) {
+          const banStatus = await checkBanStatus(emailToCheck);
+          if (isMounted) setIsBanned(banStatus.isBanned);
+        } else if (isMounted) {
+          setIsBanned(false);
+        }
+      } catch (error) {
+        console.error('Error fetching user data in BottomDrawer:', error);
+        if (isMounted) setUserData(null);
+      }
+    };
+
+    fetchUserData();
+
+
+    return () => {
+      isMounted = false;
+    };
+  }, [isVisible, selectedUserId, selectedUser?.email, appdatabase]);
+
+  // ✅ Check if current user is following this user (Firestore)
+  useEffect(() => {
+    // isVisible guard — see the roblox-fields effect above.
+    if (!isVisible || !user?.id || !selectedUserId || !firestoreDB || user.id === selectedUserId) {
+      setIsFollowing(false);
+      return;
+    }
+
+    const checkFollowStatus = async () => {
+      try {
+        const followSnapshot = await getDocs(
+          query(
+            collection(firestoreDB, 'following'),
+            where('followerId', '==', user.id),
+            where('followingId', '==', selectedUserId)
+          )
+        );
+        setIsFollowing(!followSnapshot.empty);
+      } catch (err) {
+        console.error('Error checking follow status:', err);
+        setIsFollowing(false);
+      }
+    };
+
+    checkFollowStatus();
+  }, [isVisible, user?.id, selectedUserId, firestoreDB]);
+
+  // ✅ Fetch follower count
+  useEffect(() => {
+    // isVisible guard — see above. This one is a getCountFromServer aggregation
+    // query, billed per call.
+    if (!isVisible || !selectedUserId || !firestoreDB) return;
+
+    const fetchFollowerCount = async () => {
+      try {
+        const q = query(
+          collection(firestoreDB, 'following'),
+          where('followingId', '==', selectedUserId)
+        );
+        const snap = await getCountFromServer(q);
+        setFollowersCount(snap.data().count || 0);
+      } catch (err) {
+        console.error('Error fetching follower count:', err);
+        setFollowersCount(0);
+      }
+    };
+    fetchFollowerCount();
+    // `isFollowing` deliberately NOT a dep: it is set by the follow-status
+    // effect above, so including it ran this aggregation query a second time
+    // for anyone you already follow. The count is cosmetic and refreshes on
+    // the next open; handleFollowToggle adjusts it optimistically.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isVisible, selectedUserId, firestoreDB]);
+
+  // ✅ Follow / Unfollow toggle (Firestore)
+  const handleFollowToggle = useCallback(async () => {
+    if (!user?.id || !selectedUserId || !firestoreDB || user.id === selectedUserId) return;
+
+    setFollowLoading(true);
+    try {
+      if (isFollowing) {
+        // Unfollow - find and delete the document
+        const followSnapshot = await getDocs(
+          query(
+            collection(firestoreDB, 'following'),
+            where('followerId', '==', user.id),
+            where('followingId', '==', selectedUserId)
+          )
+        );
+
+        if (!followSnapshot.empty) {
+          await Promise.all(followSnapshot.docs.map(docSnap =>
+            deleteDoc(doc(firestoreDB, 'following', docSnap.id))
+          ));
+        }
+        setIsFollowing(false);
+        // Adjust locally — the follower-count effect no longer re-runs on
+        // isFollowing (that cost an extra aggregation query per open).
+        setFollowersCount(c => Math.max(0, c - 1));
+        triggerHapticFeedback('impactLight');
+      } else {
+        // Follow - create a new document
+        await setDoc(doc(collection(firestoreDB, 'following')), {
+          followerId: user.id,
+          followingId: selectedUserId,
+          createdAt: serverTimestamp(),
+        });
+        setIsFollowing(true);
+        setFollowersCount(c => c + 1);
+        triggerHapticFeedback('notificationSuccess');
+      }
+    } catch (err) {
+      console.error('Error toggling follow:', err);
+      Alert.alert('Error', 'Could not update follow status.');
+    } finally {
+      setFollowLoading(false);
+    }
+  }, [user?.id, selectedUserId, firestoreDB, isFollowing, triggerHapticFeedback]);
+
+  // ✅ Merge selectedUser with fetched userData
+  const mergedUser = useMemo(() => {
+    if (!userData) return selectedUser;
+    return {
+      ...selectedUser,
+      // Roles and email come only from the RTDB record — selectedUser is
+      // built from a chat message, which never carries them.
+      email: userData.email ?? selectedUser?.email ?? null,
+      isAdmin: userData.isAdmin,
+      isModerator: userData.isModerator,
+      isBabyMod: userData.isBabyMod,
+      isTrusted: userData.isTrusted,
+      isCMSR: userData.isCMSR,
+      isHelper: userData.isHelper,
+      robloxUsername: selectedUser?.robloxUsername || userData.robloxUsername,
+      robloxUserId: selectedUser?.robloxUserId || userData.robloxUserId,
+      robloxUsernameVerified: selectedUser?.robloxUsernameVerified !== undefined 
+        ? selectedUser.robloxUsernameVerified 
+        : userData.robloxUsernameVerified,
+      isPro: selectedUser?.isPro !== undefined ? selectedUser.isPro : userData.isPro,
+    };
+  }, [selectedUser, userData]);
+
+  // ─────────────────────────────────────────────
+  // Clipboard
+  const copyToClipboard = (code) => {
+    triggerHapticFeedback('impactLight');
+    Clipboard.setString(code);
+    showSuccessMessage(t('value.copy'), 'Copied to Clipboard');
+    mixpanel.track('Code UserName', { UserName: code });
+  };
+
+  // ─────────────────────────────────────────────
+  // Open Roblox Profile
+  const handleOpenRobloxProfile = useCallback(async () => {
+    const robloxUsername = mergedUser?.robloxUsername;
+    const robloxUserId = mergedUser?.robloxUserId;
+    
+    if (!robloxUsername && !robloxUserId) {
+      return;
+    }
+
+    triggerHapticFeedback('impactLight');
+
+    try {
+      // Construct URLs
+      let robloxAppUrl = null;
+      let robloxWebUrl = null;
+
+      if (robloxUserId) {
+        // Use userId for app deep link (most reliable)
+        robloxAppUrl = `roblox://users/${robloxUserId}`;
+        // Use search URL format for web (works with username)
+        robloxWebUrl = robloxUsername 
+          ? `https://www.roblox.com/search/users?keyword=${encodeURIComponent(robloxUsername)}`
+          : `https://www.roblox.com/users/${robloxUserId}`;
+      } else if (robloxUsername) {
+        // Use search URL format with username
+        robloxWebUrl = `https://www.roblox.com/search/users?keyword=${encodeURIComponent(robloxUsername)}`;
+      }
+
+      if (!robloxWebUrl) {
+        Alert.alert('Error', 'Could not open Roblox profile. Missing username or user ID.');
+        return;
+      }
+
+      // Try to open in Roblox app first (only if we have userId)
+      if (robloxAppUrl) {
+        try {
+          const canOpenApp = await Linking.canOpenURL(robloxAppUrl);
+          if (canOpenApp) {
+            await Linking.openURL(robloxAppUrl);
+            return; // Successfully opened in app
+          }
+        } catch (appError) {
+          console.log('Could not open in Roblox app, falling back to browser:', appError);
+        }
+      }
+
+      // Fallback to browser with search URL
+      await Linking.openURL(robloxWebUrl);
+    } catch (error) {
+      console.error('Error opening Roblox profile:', error);
+      Alert.alert('Error', 'Could not open Roblox profile. Please try again.');
+    }
+  }, [mergedUser?.robloxUsername, mergedUser?.robloxUserId, triggerHapticFeedback]);
+
+  // ✅ Memoize formatCreatedAt
+  const formatCreatedAt = useCallback((timestamp) => {
+    if (!timestamp) return null;
+
+    const now = Date.now();
+    const diffMs = now - timestamp;
+
+    if (diffMs < 0) return null;
+
+    const minutes = Math.floor(diffMs / 60000);
+    if (minutes < 1) return 'Just now';
+    if (minutes < 60) return `${minutes} min${minutes === 1 ? '' : 's'} ago`;
+
+    const hours = Math.floor(minutes / 60);
+    if (hours < 24) return `${hours} hour${hours === 1 ? '' : 's'} ago`;
+
+    const days = Math.floor(hours / 24);
+    if (days < 30) return `${days} day${days === 1 ? '' : 's'} ago`;
+
+    const months = Math.floor(days / 30);
+    if (months < 12) return `${months} month${months === 1 ? '' : 's'} ago`;
+
+    const years = Math.floor(months / 12);
+    return `${years} year${years === 1 ? '' : 's'} ago`;
+  }, []);
+
+  // ✅ Memoize getTimestampMs
+  const getTimestampMs = useCallback((ts) => {
+    if (!ts) return null;
+
+    // Firestore Timestamp instance
+    if (typeof ts.toDate === 'function') {
+      return ts.toDate().getTime();
+    }
+
+    // { seconds, nanoseconds }
+    if (typeof ts.seconds === 'number') {
+      return ts.seconds * 1000 + Math.floor((ts.nanoseconds || 0) / 1e6);
+    }
+
+    // already a number?
+    if (typeof ts === 'number') return ts;
+
+    return null;
+  }, []);
+
+  // ─────────────────────────────────────────────
+  // Ban / Unban
+  const handleBanToggle = async () => {
+    if (!selectedUserId) return;
+
+    const action = isBlock ? t('chat.unblock') : t('chat.block');
+
+    Alert.alert(
+      `${action}`,
+      `${t('chat.are_you_sure')} ${action.toLowerCase()} ${userName}?`,
+      [
+        { text: t('chat.cancel'), style: 'cancel' },
+        {
+          text: action,
+          style: 'destructive',
+          onPress: async () => {
+            try {
+              let updatedBannedUsers;
+
+              // ✅ Safety check for array
+              const currentBanned = Array.isArray(bannedUsers) ? bannedUsers : [];
+              if (isBlock) {
+                updatedBannedUsers = currentBanned.filter(
+                  (id) => id !== selectedUserId,
+                );
+              } else {
+                updatedBannedUsers = [...currentBanned, selectedUserId];
+              }
+
+              await updateLocalState('bannedUsers', updatedBannedUsers);
+
+              setTimeout(() => {
+                showSuccessMessage(
+                  t('home.alert.success'),
+                  isBlock
+                    ? `${userName} ${t('chat.user_unblocked')}`
+                    : `${userName} ${t('chat.user_blocked')}`,
+                );
+              }, 100);
+            } catch (error) {
+              console.error('❌ Error toggling ban status:', error);
+            }
+          },
+        },
+      ],
+    );
+  };
+
+  // ─────────────────────────────────────────────
+  // Mod tools (PLAN_2026-09.md P3/P5)
+  //
+  // Who can do what. Admins qualify for everything. A user holding ONLY the
+  // delegated Junior-Mod grant is not staff — they get the Junior Mod chip
+  // and nothing else.
+  const canManageBabyMod = isAdmin || !!canGrantJmd;
+  const canManageBadges = isAdmin || !!user?.isModerator;
+  const isStaff = isAdmin || !!user?.isModerator || !!user?.isBabyMod;
+
+  // Strike / mute / ban all route through the reason modal, so every entry in
+  // the Admin Dashboard's ban list says WHY it happened.
+  const openReasonModal = useCallback((action) => {
+    const targetEmail = mergedUser?.email;
+    if (!targetEmail) {
+      Alert.alert('Error', 'This user has no email on record, so they cannot be sanctioned.');
+      return;
+    }
+    setReasonActionType({ ...action, email: targetEmail });
+    setAdminReason('');
+    toggleModal();            // close the drawer; the modal is its sibling
+    setShowReasonModal(true);
+  }, [mergedUser?.email, toggleModal]);
+
+  const handleApplyStrike = useCallback((strikeCount) => {
+    openReasonModal({ type: 'strike', value: strikeCount });
+  }, [openReasonModal]);
+
+  const handleMuteUser = useCallback((minutes) => {
+    openReasonModal({ type: 'mute', value: minutes });
+  }, [openReasonModal]);
+
+  const confirmAdminAction = useCallback(async () => {
+    if (!reasonActionType) return;
+    Keyboard.dismiss();
+
+    // Re-check the kill switch at commit time, not just when the panel
+    // rendered — an admin may have turned moderator powers off in between.
+    if (!canStaffBanMute({ isAdmin, isModerator: user?.isModerator, isBabyMod: user?.isBabyMod, modControlsEnabled })) {
+      setShowReasonModal(false);
+      setReasonActionType(null);
+      Alert.alert('Disabled', 'Moderator ban & mute are currently turned off by an admin.');
+      return;
+    }
+
+    setShowReasonModal(false);
+
+    const bannerInfo = { id: user?.id, displayName: user?.displayName || 'Admin', avatar: user?.avatar };
+    const reason = adminReason.trim() || undefined;
+    const { type, value, email } = reasonActionType;
+
+    let ok = false;
+    if (type === 'strike') {
+      ok = await setUserStrike(email, value, selectedUserId, true, bannerInfo, mergedUser, reason);
+    } else if (type === 'mute') {
+      ok = await muteUser(email, value, mergedUser, bannerInfo, true, reason);
+    }
+
+    if (ok) {
+      invalidateFullProfile(selectedUserId);
+      setIsBanned(true);
+    }
+    setReasonActionType(null);
+  }, [reasonActionType, adminReason, isAdmin, user, modControlsEnabled, mergedUser, selectedUserId]);
+
+  const handleUnbanUser = useCallback(async () => {
+    if (!mergedUser?.email) return;
+    const confirmed = await new Promise((resolve) => {
+      Alert.alert('Unban User', `Lift the ban on ${userName}?`, [
+        { text: 'Cancel', style: 'cancel', onPress: () => resolve(false) },
+        { text: 'Unban', onPress: () => resolve(true) },
+      ]);
+    });
+    if (!confirmed) return;
+    if (await unbanUserWithEmail(mergedUser.email)) {
+      invalidateFullProfile(selectedUserId);
+      setIsBanned(false);
+    }
+  }, [mergedUser?.email, userName, selectedUserId]);
+
+  // Role grants. One confirm dialog, one writer (utils.writeRoleFlag handles
+  // the cache invalidation), one local state patch so the pill updates without
+  // a re-open.
+  const applyRole = useCallback(async (fn, field, value, title, message) => {
+    if (!selectedUserId) return;
+    const confirmed = await new Promise((resolve) => {
+      Alert.alert(title, message, [
+        { text: 'Cancel', style: 'cancel', onPress: () => resolve(false) },
+        { text: value ? 'Confirm' : 'Remove', style: value ? 'default' : 'destructive', onPress: () => resolve(true) },
+      ]);
+    });
+    if (!confirmed) return;
+    if (await fn(selectedUserId)) {
+      setUserData((prev) => (prev ? { ...prev, [field]: value } : prev));
+    }
+  }, [selectedUserId]);
+
+  const handlePromoteModerator = () => applyRole(makeModerator, 'isModerator', true, 'Promote to Moderator', `Make ${userName} a Moderator?`);
+  const handleDemoteModerator  = () => applyRole(removeModerator, 'isModerator', false, 'Remove Moderator', `Remove Moderator from ${userName}?`);
+  const handleMakeBabyMod      = () => applyRole(makeBabyMod, 'isBabyMod', true, 'Make Junior Mod', `Make ${userName} a Junior Mod? They can only mute for up to 2 hours.`);
+  const handleRemoveBabyMod    = () => applyRole(removeBabyMod, 'isBabyMod', false, 'Remove Junior Mod', `Remove Junior Mod from ${userName}?`);
+  const handleMakeTrusted      = () => applyRole(makeTrusted, 'isTrusted', true, 'Make Trusted', `Give ${userName} the Trusted badge?`);
+  const handleRemoveTrusted    = () => applyRole(removeTrusted, 'isTrusted', false, 'Remove Trusted', `Remove the Trusted badge from ${userName}?`);
+  const handleMakeCMSR         = () => applyRole(makeCMSR, 'isCMSR', true, 'Make Commissioner', `Give ${userName} the CMSR badge?`);
+  const handleRemoveCMSR       = () => applyRole(removeCMSR, 'isCMSR', false, 'Remove Commissioner', `Remove the CMSR badge from ${userName}?`);
+  const handleMakeHelper       = () => applyRole(makeHelper, 'isHelper', true, 'Make Helper', `Give ${userName} the Helper badge?`);
+  const handleRemoveHelper     = () => applyRole(removeHelper, 'isHelper', false, 'Remove Helper', `Remove the Helper badge from ${userName}?`);
+
+  // ─────────────────────────────────────────────
+  // Start chat
+  const handleStartChat = () => {
+    if (startChat) startChat();
+  };
+
+  // Reset when drawer closes
+  useEffect(() => {
+    // showReasonModal guard: the reason modal deliberately closes the drawer,
+    // and without this the reset wiped the target user mid-action.
+    if (!isVisible && !showReasonModal) {
+      setShowModTools(false);
+      setLoadDetails(false);
+      setRatingSummary(null);
+      setUserBio(null);
+      setOwnedItems([]);
+      setWishlistItems([]);
+      setReviews([]);
+      lastReviewDocRef.current = null;
+      isLoadingRef.current = false;
+      setLastReviewDoc(null);
+      setHasMoreReviews(false);
+      setCreatedAtText(null);
+      setUserPoints(null);
+      setGameWins(null);
+      setUserData(null); // ✅ Clear fetched user data
+      setTrades([]);
+      setLastTradeDoc(null);
+      setHasMoreTrades(false);
+    }
+  }, [isVisible, showReasonModal]);
+
+  // ─────────────────────────────────────────────
+  // Load rating summary + joined
+  useEffect(() => {
+    if (!isVisible || !selectedUserId || !loadDetails) return;
+
+    let isMounted = true;
+
+    const loadRatingSummary = async () => {
+      setLoadingRating(true);
+      try {
+        // ✅ OPTIMIZED: Fetch only specific fields instead of full user object
+        // ✅ MIGRATED: Read rating summary from Firestore user_ratings_summary (single source of truth)
+        const [summaryDocSnap, createdSnap, rewardPointsSnap, reviewDocSnap] = await Promise.all([
+          getDoc(doc(firestoreDB, 'user_ratings_summary', selectedUserId)),
+          get(ref(appdatabase, `users/${selectedUserId}/createdAt`)),
+          get(ref(appdatabase, `users/${selectedUserId}/rewardPoints`)).catch(() => null),
+          getDoc(doc(firestoreDB, 'reviews', selectedUserId)), // ✅ Load bio from Firestore
+        ]);
+
+        if (!isMounted) return;
+
+        // ✅ FIRESTORE ONLY: Load rating summary from user_ratings_summary
+        if (summaryDocSnap.exists()) {
+          const summaryData = summaryDocSnap.data();
+          setRatingSummary({
+            value: Number(summaryData.averageRating || 0),
+            count: Number(summaryData.count || 0),
+          });
+        } else {
+          // ✅ COST-OPTIMIZED: Only recalculate if summary truly missing (one-time per user)
+          // Check RTDB first (free) before expensive Firestore query
+          const avgSnap = await get(ref(appdatabase, `averageRatings/${selectedUserId}`));
+          if (avgSnap.exists()) {
+            // ✅ RTDB has data - migrate it (cheap: 1 RTDB read + 1 Firestore write)
+            const avgData = avgSnap.val();
+            const avgValue = Number(avgData.value || 0);
+            const avgCount = Number(avgData.count || 0);
+            
+            setRatingSummary({
+              value: avgValue,
+              count: avgCount,
+            });
+            
+            if (avgValue > 0 || avgCount > 0) {
+              setDoc(
+                doc(firestoreDB, 'user_ratings_summary', selectedUserId),
+                {
+                  averageRating: avgValue,
+                  count: avgCount,
+                  updatedAt: serverTimestamp(),
+                },
+                { merge: true }
+              ).catch(err => console.error('Error migrating rating summary to Firestore:', err));
+            }
+          } else {
+            // ✅ Only query Firestore reviews if RTDB also has no data (expensive operation)
+            // This ensures we don't waste reads if RTDB migration is possible
+            try {
+              const reviewsQuery = query(
+                collection(firestoreDB, 'reviews'),
+                where('toUserId', '==', selectedUserId),
+                limit(100) // ✅ COST LIMIT: Max 100 reviews per calculation (prevents huge reads)
+              );
+              const reviewsSnapshot = await getDocs(reviewsQuery);
+              
+              if (!reviewsSnapshot.empty) {
+                let totalRating = 0;
+                let ratingCount = 0;
+                
+                reviewsSnapshot.docs.forEach((doc) => {
+                  const reviewData = doc.data();
+                  if (reviewData.rating && typeof reviewData.rating === 'number') {
+                    totalRating += reviewData.rating;
+                    ratingCount += 1;
+                  }
+                });
+                
+                if (ratingCount > 0) {
+                  const calculatedAverage = totalRating / ratingCount;
+                  
+                  setRatingSummary({
+                    value: parseFloat(calculatedAverage.toFixed(2)),
+                    count: ratingCount,
+                  });
+                  
+                  // ✅ Create summary (prevents future recalculations)
+                  await setDoc(
+                    doc(firestoreDB, 'user_ratings_summary', selectedUserId),
+                    {
+                      averageRating: parseFloat(calculatedAverage.toFixed(2)),
+                      count: ratingCount,
+                      updatedAt: serverTimestamp(),
+                    },
+                    { merge: true }
+                  );
+                } else {
+                  setRatingSummary(null);
+                }
+              } else {
+                setRatingSummary(null);
+              }
+            } catch (error) {
+              console.error('Error calculating summary from reviews:', error);
+              setRatingSummary(null);
+            }
+          }
+        }
+
+        // ✅ Load bio from Firestore reviews/{userId}
+        let bioValue = null;
+        if (reviewDocSnap.exists()) { // ✅ Firestore modular API: exists() is a method
+          const reviewData = reviewDocSnap.data();
+          if (reviewData.bio && typeof reviewData.bio === 'string' && reviewData.bio.trim()) {
+            bioValue = reviewData.bio.trim();
+          }
+        }
+        // ✅ Set bio value (use default if not found or empty)
+        setUserBio(bioValue || 'Hi there, I am new here');
+
+        if (createdSnap.exists()) {
+          const raw = createdSnap.val();
+          let ts = typeof raw === 'number' ? raw : Date.parse(raw);
+          if (!Number.isNaN(ts)) {
+            setCreatedAtText(formatCreatedAt(ts));
+          } else {
+            setCreatedAtText(null);
+          }
+        } else {
+          setCreatedAtText(null);
+        }
+
+        // ✅ Load user points (RTDB)
+        // ✅ Use rewardPointsSnap instead of full user object
+        if (rewardPointsSnap?.exists()) {
+          setUserPoints(rewardPointsSnap.val() || 0);
+        } else {
+          setUserPoints(0);
+        }
+
+        // ✅ Load game wins (Firestore game_stats)
+        if (firestoreDB && selectedUserId) {
+          const statsDoc = await getDoc(doc(firestoreDB, 'game_stats', selectedUserId));
+          if (statsDoc.exists()) {
+            const stats = statsDoc.data() || {};
+            setGameWins(stats.petGameWins || 0);
+          } else {
+            setGameWins(0);
+          }
+        } else {
+          setGameWins(0);
+        }
+      } catch (err) {
+        console.log('Rating load error:', err);
+        if (isMounted) {
+          setRatingSummary(null);
+          setCreatedAtText(null);
+          setUserPoints(null);
+          setGameWins(null);
+        }
+      } finally {
+        if (isMounted) setLoadingRating(false);
+      }
+    };
+
+    loadRatingSummary();
+
+    return () => {
+      isMounted = false;
+    };
+  }, [isVisible, selectedUserId, loadDetails, appdatabase, firestoreDB]);
+
+  // ─────────────────────────────────────────────
+  // Load items
+  useEffect(() => {
+    if (!isVisible || !selectedUserId || !loadDetails) return;
+
+    let isMounted = true;
+
+    const loadItems = async () => {
+      setLoadingItems(true);
+      try {
+        const reviewDocSnap = await getDoc(
+          doc(firestoreDB, 'reviews', selectedUserId),
+        );
+
+        if (!isMounted) return;
+
+        if (reviewDocSnap.exists()) {
+          const data = reviewDocSnap.data() || {};
+          setOwnedItems(Array.isArray(data.ownedPets) ? data.ownedPets : []);
+          setWishlistItems(
+            Array.isArray(data.wishlistPets) ? data.wishlistPets : [],
+          );
+        } else {
+          setOwnedItems([]);
+          setWishlistItems([]);
+        }
+      } catch (err) {
+        console.log('Items load error:', err);
+        if (isMounted) {
+          setOwnedItems([]);
+          setWishlistItems([]);
+        }
+      } finally {
+        if (isMounted) setLoadingItems(false);
+      }
+    };
+
+    loadItems();
+
+    return () => {
+      isMounted = false;
+    };
+  }, [isVisible, selectedUserId, loadDetails, firestoreDB]);
+
+  // ─────────────────────────────────────────────
+  // Load reviews (paged) — ✅ Memoized with useCallback
+  // ✅ Use refs to track state and avoid dependency issues
+  const lastReviewDocRef = useRef(null);
+  const isLoadingRef = useRef(false);
+  
+  const loadReviews = useCallback(async (reset = false, ratingFilter = null) => {
+    if (!firestoreDB || !selectedUserId) return;
+    
+    // ✅ Prevent duplicate calls using ref (avoids dependency issues)
+    if (isLoadingRef.current) {
+      console.log('🔄 [BottomDrawer] Already loading reviews, skipping...');
+      return;
+    }
+
+    isLoadingRef.current = true;
+    setLoadingReviews(true);
+    try {
+      // ✅ Build query constraints based on filter
+      const constraints = [
+        collection(firestoreDB, 'reviews'),
+        where('toUserId', '==', selectedUserId),
+      ];
+
+      // ⭐ Add rating filter if active
+      if (ratingFilter) {
+        constraints.push(where('rating', '==', ratingFilter));
+      }
+
+      constraints.push(orderBy('updatedAt', 'desc'));
+
+      if (!reset && lastReviewDocRef.current) {
+        constraints.push(startAfter(lastReviewDocRef.current));
+      }
+
+      constraints.push(limit(REVIEWS_PAGE_SIZE + 1)); // Fetch one extra to check if more exist
+
+      const q = query(...constraints);
+      const snap = await getDocs(q);
+
+      // ✅ Check if we got more than page size (means there are more reviews)
+      const hasMoreResults = snap.docs.length > REVIEWS_PAGE_SIZE;
+      
+      // ✅ Only take REVIEWS_PAGE_SIZE documents (discard the extra one)
+      const docsToUse = snap.docs.slice(0, REVIEWS_PAGE_SIZE);
+      
+      const batch = docsToUse.map((d) => {
+        const data = d.data();
+        return {
+          id: d.id,
+          ...data,
+        };
+      });
+
+      setReviews((prev) => (reset ? batch : [...prev, ...batch]));
+
+      // ✅ Use the last document from the actual batch (not the extra one)
+      const newLastDoc = docsToUse[docsToUse.length - 1] || null;
+      lastReviewDocRef.current = newLastDoc;
+      setLastReviewDoc(newLastDoc);
+      
+      // ✅ Fix: hasMoreReviews is true only if we got more results than page size
+      setHasMoreReviews(hasMoreResults);
+    } catch (err) {
+      console.log('Reviews load error:', err);
+      if (reset) setReviews([]);
+      setHasMoreReviews(false);
+    } finally {
+      isLoadingRef.current = false;
+      setLoadingReviews(false);
+    }
+  }, [firestoreDB, selectedUserId]); // ✅ Removed loadingReviews from deps to prevent re-renders
+
+  // initial reviews load when opening details
+  useEffect(() => {
+    if (!isVisible || !selectedUserId || !loadDetails) return;
+    // reset pagination when details open
+    lastReviewDocRef.current = null;
+    setLastReviewDoc(null);
+    setHasMoreReviews(false);
+    loadReviews(true, starFilter);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isVisible, selectedUserId, loadDetails]); // ✅ Removed loadReviews from deps to prevent re-renders
+
+  // ⭐ Re-fetch reviews when star filter changes
+  useEffect(() => {
+    if (!isVisible || !selectedUserId || !loadDetails) return;
+    // Reset pagination and re-fetch with new filter
+    lastReviewDocRef.current = null;
+    setLastReviewDoc(null);
+    setHasMoreReviews(false);
+    setReviews([]);
+    loadReviews(true, starFilter);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [starFilter]);
+
+  // ✅ Memoize handleLoadMoreReviews
+  const handleLoadMoreReviews = useCallback(() => {
+    if (!hasMoreReviews || loadingReviews) return;
+    loadReviews(false, starFilter);
+  }, [hasMoreReviews, loadingReviews, loadReviews, starFilter]);
+
+  // ─────────────────────────────────────────────
+  // Load trades (paged) — ✅ Initially show 1, then load 2 by 2
+  const INITIAL_TRADES_SIZE = 3; // Show 3 trades initially (like posts)
+  const LOAD_MORE_TRADES_SIZE = 3; // Load 3 trades at a time when loading more
+  
+  const loadTrades = useCallback(async (reset = false) => {
+    if (!firestoreDB || !selectedUserId) return;
+    if (loadingTrades) return;
+
+    setLoadingTrades(true);
+    try {
+      // Determine the limit based on whether it's initial load or load more
+      const limitSize = reset ? INITIAL_TRADES_SIZE : LOAD_MORE_TRADES_SIZE;
+      
+      let q;
+      if (!reset && lastTradeDoc) {
+        q = query(
+          collection(firestoreDB, 'trades_new'),
+          where('userId', '==', selectedUserId),
+          orderBy('timestamp', 'desc'),
+          startAfter(lastTradeDoc),
+          limit(limitSize + 1), // Fetch one extra to check if more exist
+        );
+      } else {
+        q = query(
+          collection(firestoreDB, 'trades_new'),
+          where('userId', '==', selectedUserId),
+          orderBy('timestamp', 'desc'),
+          limit(limitSize + 1), // Fetch one extra to check if more exist
+        );
+      }
+
+      const snap = await getDocs(q);
+
+      // Check if we got more than page size
+      const hasMoreResults = snap.docs.length > limitSize;
+      
+      // Only take limitSize documents (discard the extra one)
+      const docsToUse = snap.docs.slice(0, limitSize);
+      
+      const batch = docsToUse.map((d) => ({
+        id: d.id,
+        ...d.data(),
+      }));
+
+      setTrades((prev) => (reset ? batch : [...prev, ...batch]));
+
+      const newLastDoc = docsToUse[docsToUse.length - 1] || null;
+      setLastTradeDoc(newLastDoc);
+      setHasMoreTrades(hasMoreResults);
+    } catch (err) {
+      console.error('Trades load error:', err);
+      if (reset) setTrades([]);
+      setHasMoreTrades(false);
+    } finally {
+      setLoadingTrades(false);
+    }
+  }, [firestoreDB, selectedUserId, lastTradeDoc, loadingTrades]);
+
+  // Initial trades load when opening details
+  useEffect(() => {
+    if (!isVisible || !selectedUserId || !loadDetails) return;
+    setLastTradeDoc(null);
+    setHasMoreTrades(false);
+    loadTrades(true);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isVisible, selectedUserId, loadDetails]);
+
+  // ✅ Memoize handleLoadMoreTrades
+  const handleLoadMoreTrades = useCallback(() => {
+    if (!hasMoreTrades || loadingTrades) return;
+    loadTrades(false);
+  }, [hasMoreTrades, loadingTrades, loadTrades]);
+
+  // ─────────────────────────────────────────────
+  // Load Posts (paged) — ✅ Initially show 3, then load 3 by 3
+  const INITIAL_POSTS_SIZE = 3;
+  const LOAD_MORE_POSTS_SIZE = 3;
+
+  const loadPosts = useCallback(async (reset = false) => {
+    if (!firestoreDB || !selectedUserId) return;
+    if (loadingPosts) return;
+
+    setLoadingPosts(true);
+    try {
+      const limitSize = reset ? INITIAL_POSTS_SIZE : LOAD_MORE_POSTS_SIZE;
+      let q;
+
+      if (!reset && lastPostDoc) {
+        q = query(
+          collection(firestoreDB, 'designPosts'),
+          where('userId', '==', selectedUserId),
+          orderBy('createdAt', 'desc'),
+          startAfter(lastPostDoc),
+          limit(limitSize + 1)
+        );
+      } else {
+        q = query(
+          collection(firestoreDB, 'designPosts'),
+          where('userId', '==', selectedUserId),
+          orderBy('createdAt', 'desc'),
+          limit(limitSize + 1)
+        );
+      }
+
+      const snap = await getDocs(q);
+      const hasMoreResults = snap.docs.length > limitSize;
+      const docsToUse = snap.docs.slice(0, limitSize);
+
+      const batch = docsToUse.map((d) => ({
+        id: d.id,
+        ...d.data(),
+      }));
+
+      setPosts((prev) => (reset ? batch : [...prev, ...batch]));
+      setLastPostDoc(docsToUse[docsToUse.length - 1] || null);
+      setHasMorePosts(hasMoreResults);
+    } catch (err) {
+      console.error('Posts load error:', err);
+      if (reset) setPosts([]);
+      setHasMorePosts(false);
+    } finally {
+      setLoadingPosts(false);
+    }
+  }, [firestoreDB, selectedUserId, lastPostDoc, loadingPosts]);
+
+  // Initial posts load when opening details
+  useEffect(() => {
+    if (!isVisible || !selectedUserId || !loadDetails) return;
+    setLastPostDoc(null);
+    setHasMorePosts(false);
+    loadPosts(true);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isVisible, selectedUserId, loadDetails]);
+
+  // Handle Load More Posts
+  const handleLoadMorePosts = useCallback(() => {
+    if (!hasMorePosts || loadingPosts) return;
+    loadPosts(false);
+  }, [hasMorePosts, loadingPosts, loadPosts]);
+
+  // ─────────────────────────────────────────────
+  // Helpers for rendering - ✅ Memoized
+
+  const renderStars = useCallback((value) => {
+    const rounded = Math.round(value || 0);
+    const full = '★'.repeat(Math.min(rounded, 5));
+    const empty = '☆'.repeat(Math.max(0, 5 - rounded));
+    return (
+      <Text style={{ color: config.colors.warning, fontSize: SIZE.body, fontFamily: FONT.regular }}>
+        {full}
+        <Text style={{ color: config.colors.textTertiaryDark }}>{empty}</Text>
+      </Text>
+    );
+  }, []);
+
+  const renderItemBubble = useCallback((item, index) => {
+    // ✅ Safety checks
+    if (!item || typeof item !== 'object') return null;
+
+    return (
+      <View
+        key={`${item.id || item.name || index}-${index}`}
+        style={{
+          width: 42,
+          height: 42,
+          marginRight: SPACE.sm,
+          borderRadius: 10,
+          overflow: 'hidden',
+          backgroundColor: isDarkMode ? config.colors.surfaceElevatedDark : config.colors.dividerLight,
+        }}
+      >
+        <Image
+          source={{ uri: item.imageUrl || GAME.defaultAvatar }}
+          style={{ width: '100%', height: '100%' }}
+        />
+      </View>
+    );
+  }, [isDarkMode]);
+
+  // ✅ Parse values data for image lookup
+  const parsedValuesData = useMemo(() => {
+    try {
+      const rawData = localState.isGG ? localState.ggData : localState.data;
+      if (!rawData) return [];
+
+      const parsed = typeof rawData === 'string' ? JSON.parse(rawData) : rawData;
+      return typeof parsed === 'object' && parsed !== null ? Object.values(parsed) : [];
+    } catch (error) {
+      console.error("❌ Error parsing data:", error);
+      return [];
+    }
+  }, [localState.isGG, localState.data, localState.ggData]);
+
+  // ✅ Render trade item
+  const renderTradeItem = useCallback((trade) => {
+    const { deal, tradeRatio } = getTradeDeal(trade.hasTotal, trade.wantsTotal);
+    const tradePercentage = Math.abs(((tradeRatio - 1) * 100).toFixed(0));
+    const isProfit = tradeRatio > 1;
+    const neutral = tradeRatio === 1;
+    const formattedTime = trade.timestamp ? dayjs(trade.timestamp.toDate()).fromNow() : "Unknown";
+
+    const groupedHasItems = groupTradeItems(trade.hasItems || []);
+    const groupedWantsItems = groupTradeItems(trade.wantsItems || []);
+
+    // See Code/Helper/valueSources.js.
+    const getTradeItemImageUrl = resolveItemImage;
+
+    return (
+      <View
+        key={trade.id}
+        style={{
+          backgroundColor: isDarkMode ? config.colors.backgroundDark : '#ffffff',
+          borderRadius: 12,
+          padding: SPACE.lg,
+          marginBottom: SPACE.lg,
+          borderWidth: 1,
+          borderColor: isDarkMode ? config.colors.surfaceDark : '#e5e7eb',
+        }}
+      >
+        {/* Trade Header */}
+        <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: SPACE.md }}>
+          <View style={{ flex: 1 }}>
+            <View style={{ flexDirection: 'row', alignItems: 'center', marginBottom: SPACE.xs }}>
+              {trade.isFeatured && (
+                <View style={{
+                  backgroundColor: config.colors.hasBlockGreen,
+                  paddingVertical: 1,
+                  paddingHorizontal: SPACE.sm,
+                  borderRadius: 6,
+                  marginRight: 5,
+                  flexShrink: 0,
+                  flexGrow: 0,
+                }}>
+                  <Text style={{ color: 'white', fontFamily: FONT.regular, fontSize: SIZE.label, textAlign: 'center' }}>FEATURED</Text>
+                </View>
+              )}
+              <Text style={{ fontSize: SIZE.label, color: c.textSecondary }}>
+                {formattedTime}
+              </Text>
+            </View>
+            {/* Status and Mode Badges - Side by side like Trades.jsx */}
+            <View style={{ 
+              flexDirection: 'row', 
+              alignItems: 'center', 
+              marginTop: SPACE.xs, 
+              alignSelf: 'flex-start',
+              flexShrink: 1,
+              flexGrow: 0,
+              flexWrap: 'nowrap',
+              width: undefined,
+            }}>
+              {/* Status Badge (Win/Lose/Fair) - Only show if status field exists */}
+              {trade.status && (
+                <View style={{
+                  backgroundColor: trade.status === 'w' ? '#10B981' : // Green for win
+                                  trade.status === 'f' ? config.colors.secondary : // Blue for fair
+                                  config.colors.primary, // Pink/red for lose
+                  paddingVertical: 1,
+                  paddingHorizontal: SPACE.sm,
+                  borderRadius: 6,
+                  marginRight: 5,
+                  flexShrink: 0,
+                  flexGrow: 0,
+                }}>
+                  <Text style={{ color: 'white', fontFamily: FONT.regular, fontSize: SIZE.label, textAlign: 'center' }}>
+                    {trade.status === 'w' ? 'Win' : trade.status === 'f' ? 'Fair' : 'Lose'}
+                  </Text>
+                </View>
+              )}
+              {/* Shark/Frost/GG Badge */}
+              {trade.isSharkMode !== undefined && (
+                <View style={{
+                  backgroundColor: trade.isSharkMode == 'GG' ? '#5c4c49' : trade.isSharkMode === true ? config.colors.secondary : config.colors.hasBlockGreen,
+                  paddingVertical: 1,
+                  paddingHorizontal: SPACE.sm,
+                  borderRadius: 6,
+                  flexShrink: 0,
+                  flexGrow: 0,
+                }}>
+                  <Text style={{ color: 'white', fontFamily: FONT.regular, fontSize: SIZE.label, textAlign: 'center' }}>
+                    {trade.isSharkMode == 'GG' ? 'GG Values' : trade.isSharkMode === true ? 'Shark' : 'Frost'}
+                  </Text>
+                </View>
+              )}
+            </View>
+            {(groupedHasItems.length > 0 && groupedWantsItems.length > 0) && (
+              <View style={{ flexDirection: 'row', alignItems: 'center', marginTop: SPACE.xs }}>
+                <View style={{
+                  backgroundColor: deal.color,
+                  paddingHorizontal: SPACE.xs,
+                  paddingVertical: SPACE.hair,
+                  borderRadius: 6,
+                  marginRight: SPACE.md,
+                }}>
+                  <Text style={{ color: c.textInverse, fontSize: SIZE.label, fontFamily: FONT.bold }}>
+                    {t(deal.label) || deal.label}
+                  </Text>
+                </View>
+                <Text style={{
+                  fontSize: SIZE.small,
+                  color: !isProfit ? config.colors.hasBlockGreen : config.colors.wantBlockRed,
+                  fontFamily: FONT.regular
+                }}>
+                  {tradePercentage}% {!neutral && (
+                    <Icon
+                      name={isProfit ? 'arrow-down-outline' : 'arrow-up-outline'}
+                      size={10}
+                      color={isProfit ? config.colors.wantBlockRed : config.colors.hasBlockGreen}
+                    />
+                  )}
+                </Text>
+              </View>
+            )}
+          </View>
+        </View>
+
+        {/* Trade Items - Matching Trades.jsx structure */}
+        <View style={{ flexDirection: 'row', justifyContent: 'space-between', marginVertical: SPACE.lg }}>
+          {/* Has Items Grid */}
+          {trade.hasItems && trade.hasItems.length > 0 ? (
+            <View style={{ flexDirection: 'row', flexWrap: 'wrap', width: '48%' }}>
+              {Array.from({
+                length: Math.max(4, Math.ceil(trade.hasItems.length / 4) * 4)
+              }).map((_, idx) => {
+                const tradeItem = trade.hasItems[idx];
+                return (
+                  <View key={idx} style={{ width: '22%', height: 40, margin: 1, alignItems: 'center', justifyContent: 'center', position: 'relative', marginBottom: SPACE.lg }}>
+                    {tradeItem ? (
+                      <>
+                        <Image
+                          source={{ uri: getTradeItemImageUrl(tradeItem) || GAME.defaultAvatar }}
+                          style={{ width: 30, height: 30, borderRadius: 6 }}
+                          resizeMode="contain"
+                          defaultSource={{ uri: GAME.defaultAvatar }}
+                        />
+                        <View style={{ position: 'absolute', bottom: -5, right: 0, flexDirection: 'row', gap: 1, padding: 1, alignItems: 'center', justifyContent: 'center' }}>
+                          {tradeItem.isFly && (
+                            <Text style={{ color: 'white', backgroundColor: '#3498db', borderRadius: 10, width: 10, height: 10, fontSize: SIZE.label, textAlign: 'center', lineHeight: 10, fontFamily: FONT.bold, overflow: 'hidden', padding: 0, margin: 0 }}>F</Text>
+                          )}
+                          {tradeItem.isRide && (
+                            <Text style={{ color: 'white', backgroundColor: '#e74c3c', borderRadius: 10, width: 10, height: 10, fontSize: SIZE.label, textAlign: 'center', lineHeight: 10, fontFamily: FONT.bold, overflow: 'hidden', padding: 0, margin: 0 }}>R</Text>
+                          )}
+                          {tradeItem.valueType && tradeItem.valueType !== 'd' && (
+                            <Text style={{ 
+                              color: 'white', 
+                              backgroundColor: tradeItem.valueType === 'm' ? '#9b59b6' : '#2ecc71', 
+                              borderRadius: 10, 
+                              width: 10, 
+                              height: 10, 
+                              fontSize: SIZE.label, 
+                              textAlign: 'center', 
+                              lineHeight: 10, 
+                              fontFamily: FONT.bold, 
+                              overflow: 'hidden', 
+                              padding: 0, 
+                              margin: 0 
+                            }}>{tradeItem.valueType.toUpperCase()}</Text>
+                          )}
+                        </View>
+                      </>
+                    ) : null}
+                  </View>
+                );
+              })}
+            </View>
+          ) : (
+            <View style={{ width: '48%', alignItems: 'center', justifyContent: 'center' }}>
+              <View style={{
+                backgroundColor: 'black',
+                paddingVertical: 1,
+                paddingHorizontal: SPACE.sm,
+                borderRadius: 6,
+                flexShrink: 0,
+                flexGrow: 0,
+              }}>
+                <Text style={{ color: 'white', fontFamily: FONT.bold, fontSize: SIZE.label, textAlign: 'center' }}>Give offer</Text>
+              </View>
+            </View>
+          )}
+          
+          {/* Transfer Icon */}
+          <View style={{ justifyContent: 'center', alignItems: 'center' }}>
+            <Image source={require('../../../assets/left-right.png')} style={{ width: 20, height: 20, borderRadius: 5 }} />
+          </View>
+          
+          {/* Wants Items Grid */}
+          {trade.wantsItems && trade.wantsItems.length > 0 ? (
+            <View style={{ flexDirection: 'row', flexWrap: 'wrap', width: '48%' }}>
+              {Array.from({
+                length: Math.max(4, Math.ceil(trade.wantsItems.length / 4) * 4)
+              }).map((_, idx) => {
+                const tradeItem = trade.wantsItems[idx];
+                return (
+                  <View key={idx} style={{ width: '22%', height: 40, margin: 1, alignItems: 'center', justifyContent: 'center', position: 'relative', marginBottom: SPACE.lg }}>
+                    {tradeItem ? (
+                      <>
+                        <Image
+                          source={{ uri: getTradeItemImageUrl(tradeItem) || GAME.defaultAvatar }}
+                          style={{ width: 30, height: 30, borderRadius: 6 }}
+                          resizeMode="contain"
+                          defaultSource={{ uri: GAME.defaultAvatar }}
+                        />
+                        <View style={{ position: 'absolute', bottom: -5, right: 0, flexDirection: 'row', gap: 1, padding: 1, alignItems: 'center', justifyContent: 'center' }}>
+                          {tradeItem.isFly && (
+                            <Text style={{ color: 'white', backgroundColor: '#3498db', borderRadius: 10, width: 10, height: 10, fontSize: SIZE.label, textAlign: 'center', lineHeight: 10, fontFamily: FONT.bold, overflow: 'hidden', padding: 0, margin: 0 }}>F</Text>
+                          )}
+                          {tradeItem.isRide && (
+                            <Text style={{ color: 'white', backgroundColor: '#e74c3c', borderRadius: 10, width: 10, height: 10, fontSize: SIZE.label, textAlign: 'center', lineHeight: 10, fontFamily: FONT.bold, overflow: 'hidden', padding: 0, margin: 0 }}>R</Text>
+                          )}
+                          {tradeItem.valueType && tradeItem.valueType !== 'd' && (
+                            <Text style={{ 
+                              color: 'white', 
+                              backgroundColor: tradeItem.valueType === 'm' ? '#9b59b6' : '#2ecc71', 
+                              borderRadius: 10, 
+                              width: 10, 
+                              height: 10, 
+                              fontSize: SIZE.label, 
+                              textAlign: 'center', 
+                              lineHeight: 10, 
+                              fontFamily: FONT.bold, 
+                              overflow: 'hidden', 
+                              padding: 0, 
+                              margin: 0 
+                            }}>{tradeItem.valueType.toUpperCase()}</Text>
+                          )}
+                        </View>
+                      </>
+                    ) : null}
+                  </View>
+                );
+              })}
+            </View>
+          ) : (
+            <View style={{ width: '48%', alignItems: 'center', justifyContent: 'center' }}>
+              <View style={{
+                backgroundColor: 'black',
+                paddingVertical: 1,
+                paddingHorizontal: SPACE.sm,
+                borderRadius: 6,
+                flexShrink: 0,
+                flexGrow: 0,
+              }}>
+                <Text style={{ color: 'white', fontFamily: FONT.bold, fontSize: SIZE.label, textAlign: 'center' }}>Give offer</Text>
+              </View>
+            </View>
+          )}
+        </View>
+        
+        {/* Trade Totals - Matching Trades.jsx structure */}
+        <View style={{ flexDirection: 'row', justifyContent: 'center', width: '100%', marginTop: SPACE.lg }}>
+          {trade.hasItems && trade.hasItems.length > 0 && (
+            <Text style={{ 
+              fontSize: SIZE.label, 
+              fontFamily: FONT.bold, 
+              color: 'white', 
+              textAlign: 'center', 
+              alignSelf: 'center', 
+              marginHorizontal: 'auto', 
+              paddingHorizontal: SPACE.xs, 
+              paddingVertical: SPACE.hair, 
+              borderRadius: 6,
+              backgroundColor: config.colors.hasBlockGreen
+            }}>
+              ME: {formatTradeValue(typeof trade.hasTotal === 'number' ? trade.hasTotal : trade.hasTotal?.value || 0)}
+            </Text>
+          )}
+          <View style={{ justifyContent: 'center', alignItems: 'center', marginHorizontal: SPACE.md }}>
+            {(trade.hasItems && trade.hasItems.length > 0 && trade.wantsItems && trade.wantsItems.length > 0) && (
+              <>
+                {(() => {
+                  const hasValue = typeof trade.hasTotal === 'number' ? trade.hasTotal : trade.hasTotal?.value || 0;
+                  const wantsValue = typeof trade.wantsTotal === 'number' ? trade.wantsTotal : trade.wantsTotal?.value || 0;
+                  if (hasValue > wantsValue) {
+                    return (
+                      <View style={{ flexDirection: 'row', alignItems: 'center' }}>
+                        <Icon name="arrow-up-outline" size={12} color="green" />
+                        <Text style={{ fontSize: SIZE.label, fontFamily: FONT.bold, color: 'green', textAlign: 'center', alignSelf: 'center', marginHorizontal: 'auto', paddingHorizontal: SPACE.xs, paddingVertical: SPACE.hair, borderRadius: 6 }}>
+                          {formatTradeValue(hasValue - wantsValue)}
+                        </Text>
+                      </View>
+                    );
+                  } else if (hasValue < wantsValue) {
+                    return (
+                      <View style={{ flexDirection: 'row', alignItems: 'center' }}>
+                        <Icon name="arrow-down-outline" size={12} color={config.colors.hasBlockGreen} />
+                        <Text style={{ fontSize: SIZE.label, fontFamily: FONT.bold, color: config.colors.hasBlockGreen, textAlign: 'center', alignSelf: 'center', marginHorizontal: 'auto', paddingHorizontal: SPACE.xs, paddingVertical: SPACE.hair, borderRadius: 6 }}>
+                          {formatTradeValue(wantsValue - hasValue)}
+                        </Text>
+                      </View>
+                    );
+                  } else {
+                    return <Text style={{ fontSize: SIZE.label, fontFamily: FONT.bold, color: config.colors.primary, textAlign: 'center' }}>-</Text>;
+                  }
+                })()}
+              </>
+            )}
+          </View>
+          {trade.wantsItems && trade.wantsItems.length > 0 && (
+            <Text style={{ 
+              fontSize: SIZE.label, 
+              fontFamily: FONT.bold, 
+              color: 'white', 
+              textAlign: 'center', 
+              alignSelf: 'center', 
+              marginHorizontal: 'auto', 
+              paddingHorizontal: SPACE.xs, 
+              paddingVertical: SPACE.hair, 
+              borderRadius: 6,
+              backgroundColor: config.colors.wantBlockRed
+            }}>
+              YOU: {formatTradeValue(typeof trade.wantsTotal === 'number' ? trade.wantsTotal : trade.wantsTotal?.value || 0)}
+            </Text>
+          )}
+        </View>
+
+        {/* Description */}
+        {trade.description && (
+          <Text style={{
+            fontSize: SIZE.label,
+            color: c.textSecondary,
+            marginTop: SPACE.sm,
+            paddingTop: SPACE.sm,
+            borderTopWidth: 1,
+            borderTopColor: isDarkMode ? config.colors.surfaceDark : '#e5e7eb',
+          }}>
+            {trade.description}
+          </Text>
+        )}
+      </View>
+    );
+  }, [isDarkMode, t]);
+
+  // ✅ Render Post Item
+  const renderPostItem = useCallback((post) => {
+    const timeLabel = post.createdAt ? dayjs(post.createdAt.toDate ? post.createdAt.toDate() : post.createdAt).fromNow() : 'Just now';
+    const images = Array.isArray(post.imageUrl) ? post.imageUrl : (post.imageUrl ? [post.imageUrl] : []);
+    const likeCount = post.likes ? Object.keys(post.likes).length : 0;
+    const tags = Array.isArray(post.selectedTags) ? post.selectedTags : [];
+
+    const getTagColor = (tag) => {
+      switch ((tag || '').toLowerCase()) {
+        case 'scam alert': return '#FF3B30';
+        case 'looking for trade': return '#34C759';
+        case 'discussion': return '#5AC8FA';
+        case 'real or fake': return '#AF52DE';
+        case 'need help': return '#FF9500';
+        case 'misc': case 'misc.': return '#8E8E93';
+        default: return config.colors.primary;
+      }
+    };
+
+    return (
+      <TouchableOpacity
+        key={post.id}
+        activeOpacity={0.8}
+        onPress={() => setSelectedPost(post)}
+        style={{
+          backgroundColor: isDarkMode ? config.colors.backgroundDark : '#ffffff',
+          borderRadius: 12,
+          marginBottom: SPACE.md,
+          borderWidth: 1,
+          borderColor: isDarkMode ? config.colors.surfaceDark : '#e5e7eb',
+          overflow: 'hidden',
+        }}
+      >
+        {/* Post Image */}
+        {images.length > 0 && (
+          <Image
+            source={{ uri: images[0] }}
+            style={{ width: '100%', height: 140, borderTopLeftRadius: 12, borderTopRightRadius: 12 }}
+            resizeMode="cover"
+          />
+        )}
+
+        {/* Content */}
+        <View style={{ padding: SPACE.lg }}>
+          {/* Tags row */}
+          {tags.length > 0 && (
+            <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: SPACE.xs, marginBottom: SPACE.sm }}>
+              {tags.map((tag, idx) => (
+                <View key={idx} style={{
+                  paddingHorizontal: 7, paddingVertical: SPACE.hair,
+                  borderRadius: 999, backgroundColor: getTagColor(tag),
+                }}>
+                  <Text style={{ fontSize: SIZE.label, color: c.textInverse, fontFamily: FONT.bold }}>{tag}</Text>
+                </View>
+              ))}
+            </View>
+          )}
+
+          {/* Description */}
+          {!!post.desc && (
+            <Text
+              style={{
+                fontSize: SIZE.caption, lineHeight: 17,
+                color: c.text,
+                marginBottom: SPACE.sm,
+              }}
+              numberOfLines={3}
+            >
+              {post.desc}
+            </Text>
+          )}
+
+          {/* Footer: time + stats */}
+          <View style={{ flexDirection: 'row', alignItems: 'center', gap: SPACE.lg }}>
+            <Text style={{ fontSize: SIZE.label, color: c.textMuted }}>
+              {timeLabel}
+            </Text>
+            {likeCount > 0 && (
+              <View style={{ flexDirection: 'row', alignItems: 'center', gap: 3 }}>
+                <Icon name="heart" size={10} color="#EF4444" />
+                <Text style={{ fontSize: SIZE.label, fontFamily: FONT.bold, color: c.textSecondary }}>
+                  {likeCount}
+                </Text>
+              </View>
+            )}
+          </View>
+        </View>
+      </TouchableOpacity>
+    );
+  }, [isDarkMode]);
+
+  // ── Post Viewer Modal ──
+  const screenWidth = Dimensions.get('window').width;
+
+  const renderPostViewerModal = useMemo(() => {
+    if (!selectedPost) return null;
+
+    const post = selectedPost;
+    const timeLabel = post.createdAt
+      ? dayjs(post.createdAt.toDate ? post.createdAt.toDate() : post.createdAt).fromNow()
+      : 'Just now';
+    const images = Array.isArray(post.imageUrl) ? post.imageUrl : (post.imageUrl ? [post.imageUrl] : []);
+    const likeCount = post.likes ? Object.keys(post.likes).length : 0;
+    const tags = Array.isArray(post.selectedTags) ? post.selectedTags : [];
+
+    const getTagColor = (tag) => {
+      switch ((tag || '').toLowerCase()) {
+        case 'scam alert': return '#FF3B30';
+        case 'looking for trade': return '#34C759';
+        case 'discussion': return '#5AC8FA';
+        case 'real or fake': return '#AF52DE';
+        case 'need help': return '#FF9500';
+        case 'misc': case 'misc.': return '#8E8E93';
+        default: return config.colors.primary;
+      }
+    };
+
+    return (
+      <Modal
+        animationType="slide"
+        transparent={true}
+        visible={!!selectedPost}
+        onRequestClose={() => setSelectedPost(null)}
+      >
+        <Pressable
+          style={{ flex: 1, backgroundColor: 'rgba(0,0,0,0.6)', justifyContent: 'flex-end' }}
+          onPress={() => setSelectedPost(null)}
+        >
+          <Pressable
+            onPress={() => {}}
+            style={{
+              backgroundColor: isDarkMode ? config.colors.surfaceDark : '#ffffff',
+              borderTopLeftRadius: 20,
+              borderTopRightRadius: 20,
+              paddingBottom: insets.bottom,
+              maxHeight: '85%',
+              paddingBottom: Platform.OS === 'ios' ? 34 : 20,
+            }}
+          >
+            {/* Header */}
+            <View style={{
+              flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between',
+              paddingHorizontal: SPACE.xxl, paddingVertical: 14,
+              borderBottomWidth: 1, borderBottomColor: isDarkMode ? config.colors.surfaceDark : '#e5e7eb',
+            }}>
+              <View style={{ flexDirection: 'row', alignItems: 'center', flex: 1 }}>
+                <Image
+                  source={{ uri: post.avatar || avatar || GAME.defaultAvatar }}
+                  style={{ width: 36, height: 36, borderRadius: 18, marginRight: SPACE.lg }}
+                />
+                <View style={{ flex: 1 }}>
+                  <Text style={{ fontSize: SIZE.body, fontFamily: FONT.regular, color: c.text }} numberOfLines={1}>
+                    {post.displayName || userName || 'Anonymous'}
+                  </Text>
+                  <Text style={{ fontSize: SIZE.small, color: c.textSecondary }}>{timeLabel}</Text>
+                </View>
+              </View>
+              <TouchableOpacity onPress={() => setSelectedPost(null)} style={{ padding: SPACE.xs }}>
+                <Icon name="close" size={24} color={isDarkMode ? '#e5e7eb' : '#374151'} />
+              </TouchableOpacity>
+            </View>
+
+            {/* Images */}
+            {images.length > 0 && (
+              <ScrollView horizontal pagingEnabled showsHorizontalScrollIndicator={false}>
+                {images.map((img, idx) => (
+                  <Image
+                    key={idx}
+                    source={{ uri: img }}
+                    style={{ width: screenWidth, height: 300 }}
+                    resizeMode="cover"
+                  />
+                ))}
+              </ScrollView>
+            )}
+
+            <ScrollView showsVerticalScrollIndicator={false} contentContainerStyle={{ paddingHorizontal: SPACE.xxl }}>
+              {/* Tags */}
+              {tags.length > 0 && (
+                <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: SPACE.sm, marginTop: SPACE.xl, marginBottom: SPACE.xs }}>
+                  {tags.map((tag, idx) => (
+                    <View key={idx} style={{ paddingHorizontal: SPACE.lg, paddingVertical: SPACE.xs, borderRadius: 12, backgroundColor: getTagColor(tag) }}>
+                      <Text style={{ fontSize: SIZE.small, color: c.textInverse, fontFamily: FONT.regular }}>{tag}</Text>
+                    </View>
+                  ))}
+                </View>
+              )}
+
+              {/* Description */}
+              {post.desc ? (
+                <Text style={{ fontSize: SIZE.body, color: c.text, lineHeight: 20, marginTop: SPACE.lg, marginBottom: SPACE.lg }}>
+                  {post.desc}
+                </Text>
+              ) : null}
+
+              {/* Like count */}
+              <View style={{
+                flexDirection: 'row', alignItems: 'center', paddingVertical: SPACE.lg,
+                borderTopWidth: 1, borderTopColor: isDarkMode ? config.colors.surfaceDark : '#e5e7eb', marginBottom: SPACE.lg,
+              }}>
+                <Icon name="heart" size={16} color="#EF4444" />
+                <Text style={{ fontSize: SIZE.caption, fontFamily: FONT.regular, color: c.text, marginLeft: SPACE.sm }}>
+                  {likeCount} {likeCount === 1 ? 'Like' : 'Likes'}
+                </Text>
+              </View>
+            </ScrollView>
+          </Pressable>
+        </Pressable>
+      </Modal>
+    );
+  }, [selectedPost, isDarkMode, avatar, userName, screenWidth]);
+
+  // ── Default gradient — neutral gray ──
+  const DEFAULT_BANNER = ['#64748b', '#94a3b8', '#cbd5e1'];
+  const bannerColor = DEFAULT_BANNER[0];
+  const bannerColorEnd = DEFAULT_BANNER[2];
+
+  // ─────────────────────────────────────────────
+  return (
+    <>
+      {renderPostViewerModal}
+    <Modal
+      animationType="slide"
+      transparent={true}
+      visible={isVisible && !selectedPost}
+      onRequestClose={toggleModal}
+    >
+      {/* Overlay */}
+      <Pressable style={[styles.overlay, { backgroundColor: 'rgba(0,0,0,0.5)' }]} onPress={toggleModal} />
+
+      {/* Drawer Content */}
+      <View style={{ backgroundColor: 'rgba(0,0,0,0.5)' }}>
+        <SwipeableBottomDrawer onClose={toggleModal} showPill={false} style={[styles.drawer, { padding: 0, paddingBottom: 0, backgroundColor: 'rgba(0,0,0,0.5)', shadowOpacity: 0, elevation: 0 }]}>
+
+          <ScrollView
+            showsVerticalScrollIndicator={false}
+            style={{ maxHeight: loadDetails ? Dimensions.get('window').height * 0.85 : 500, backgroundColor: 'rgba(0,0,0,0.5)' }}
+          >
+            {/* ═══ GRADIENT BANNER ═══ */}
+            <View style={{
+              height: 90,
+              backgroundColor: bannerColor,
+              overflow: 'hidden',
+              position: 'relative',
+            }}>
+              {/* Drag Handle — overlaid on banner */}
+              <View style={{ alignItems: 'center', position: 'absolute', top: 0, left: 0, right: 0, zIndex: 10 }}>
+                <View style={{ width: 36, height: 4, borderRadius: 2, backgroundColor: 'rgba(255,255,255,0.4)', marginTop: SPACE.md }} />
+              </View>
+              {/* Decorative gradient circles */}
+              <View style={{
+                position: 'absolute', top: -20, right: -20,
+                width: 80, height: 80, borderRadius: 40,
+                backgroundColor: bannerColorEnd, opacity: 0.3,
+              }} />
+              <View style={{
+                position: 'absolute', bottom: -15, left: 30,
+                width: 50, height: 50, borderRadius: 25,
+                backgroundColor: c.card, opacity: 0.1,
+              }} />
+              <View style={{
+                position: 'absolute', top: 10, left: -10,
+                width: 60, height: 60, borderRadius: 30,
+                backgroundColor: bannerColorEnd, opacity: 0.2,
+              }} />
+
+              {/* PRO badge on banner */}
+              {mergedUser?.isPro && (
+                <View style={{
+                  position: 'absolute', top: 12, right: 14,
+                  flexDirection: 'row', alignItems: 'center', gap: SPACE.xs,
+                  backgroundColor: 'rgba(255,255,255,0.2)',
+                  paddingHorizontal: SPACE.lg, paddingVertical: SPACE.xs,
+                  borderRadius: 999,
+                }}>
+                  <Text style={{ fontSize: SIZE.caption }}>⭐</Text>
+                  <Text style={{ color: c.textInverse, fontSize: SIZE.label, fontFamily: FONT.bold, textTransform: 'uppercase', letterSpacing: 1 }}>Pro</Text>
+                </View>
+              )}
+
+              {/* Ban/Block icon on banner */}
+              <TouchableOpacity
+                onPress={handleBanToggle}
+                style={{
+                  position: 'absolute', top: 12, left: 14,
+                  padding: SPACE.sm, borderRadius: 999,
+                  backgroundColor: 'rgba(255,255,255,0.15)',
+                }}
+              >
+                <Icon
+                  name={isBlock ? 'shield-checkmark-outline' : 'ban-outline'}
+                  size={16}
+                  color="#fff"
+                />
+              </TouchableOpacity>
+            </View>
+
+            {/* ═══ CONTENT AREA (white/dark bg below banner) ═══ */}
+            <View style={{ backgroundColor: c.bg, paddingBottom: SPACE.xl }}>
+
+              {/* ═══ CENTERED AVATAR (overlapping banner) ═══ */}
+              <View style={{ alignItems: 'center', marginTop: -36, zIndex: 10 }}>
+                {/* No fixed-size overflow:hidden wrapper here — FramedAvatar
+                    paints wider than its avatarSize and would be clipped. */}
+                <FramedAvatar
+                  avatarUri={mergedUser?.avatar || avatar || GAME.defaultAvatar}
+                  frame={drawerCosmetics?.profileFrame || null}
+                  isDarkMode={isDarkMode}
+                  avatarSize={72}
+                />
+                {/* Online indicator */}
+                <View style={{
+                  position: 'absolute', bottom: 2, right: '50%', marginRight: -36,
+                  width: 14, height: 14,
+                  borderRadius: 7,
+                  backgroundColor: isOnline ? '#22c55e' : '#94a3b8',
+                  borderWidth: 2,
+                  borderColor: c.bg,
+                  zIndex: 11,
+                }} />
+              </View>
+
+              {/* ═══ NAME + BADGES (centered) ═══ */}
+              <View style={{ alignItems: 'center', marginTop: SPACE.md, paddingHorizontal: SPACE.xl }}>
+                {/* Name row */}
+                <View style={{ flexDirection: 'row', alignItems: 'center', gap: SPACE.sm, flexWrap: 'wrap', justifyContent: 'center' }}>
+                  <Text
+                    style={{
+                      fontSize: SIZE.heading, fontFamily: FONT.bold,
+                      color: c.text,
+                    }}
+                    numberOfLines={1}
+                  >
+                    {userName}
+                  </Text>
+                  {selectedUser?.flage ? (
+                    <Text style={{ fontSize: SIZE.subtitle }}>{selectedUser.flage}</Text>
+                  ) : null}
+                  <TouchableOpacity onPress={() => copyToClipboard(userName)} style={{ padding: SPACE.hair }}>
+                    <Icon name="copy-outline" size={14} color={c.textMuted} />
+                  </TouchableOpacity>
+                </View>
+
+                {/* Badge pills */}
+                <View style={{ flexDirection: 'row', flexWrap: 'wrap', alignItems: 'center', justifyContent: 'center', gap: 5, marginTop: 5 }}>
+                  {/* Role pills — one component for every surface, so a rank
+                      looks identical here, in chat, on trades and in the feed.
+                      Only the highest-priority badge a user holds shimmers. */}
+                  {(() => {
+                    const firstBadge = getFirstBadgeType(mergedUser);
+                    return (
+                      <>
+                        {mergedUser?.isAdmin && (
+                          <UserBadgePill type="admin" size="md" isDarkMode={isDarkMode} labelOverride={t('chat.admin')} glow={firstBadge === 'admin'} />
+                        )}
+                        {!mergedUser?.isAdmin && mergedUser?.isModerator && (
+                          <UserBadgePill type="mod" size="md" isDarkMode={isDarkMode} glow={firstBadge === 'mod'} />
+                        )}
+                        {!mergedUser?.isAdmin && !mergedUser?.isModerator && mergedUser?.isBabyMod && (
+                          <UserBadgePill type="jmd" size="md" isDarkMode={isDarkMode} glow={firstBadge === 'jmd'} />
+                        )}
+                        {mergedUser?.isTrusted && (
+                          <UserBadgePill type="trusted" size="md" isDarkMode={isDarkMode} glow={firstBadge === 'trusted'} />
+                        )}
+                        {mergedUser?.isCMSR && (
+                          <UserBadgePill type="cmsr" size="md" isDarkMode={isDarkMode} glow={firstBadge === 'cmsr'} />
+                        )}
+                        {mergedUser?.isHelper && (
+                          <UserBadgePill type="helper" size="md" isDarkMode={isDarkMode} glow={firstBadge === 'helper'} />
+                        )}
+                      </>
+                    );
+                  })()}
+                  {mergedUser?.robloxUsernameVerified && (
+                    <View style={{
+                      flexDirection: 'row', alignItems: 'center', gap: SPACE.xs,
+                      backgroundColor: isDarkMode ? 'rgba(56,189,248,0.15)' : 'rgba(14,165,233,0.1)',
+                      borderWidth: 1, borderColor: isDarkMode ? 'rgba(56,189,248,0.3)' : 'rgba(14,165,233,0.25)',
+                      paddingHorizontal: SPACE.md, paddingVertical: 3, borderRadius: 999,
+                    }}>
+                      <Icon name="checkmark-circle" size={10} color={isDarkMode ? '#38bdf8' : '#0ea5e9'} />
+                      <Text style={{ fontSize: SIZE.label, fontFamily: FONT.bold, color: isDarkMode ? '#38bdf8' : '#0ea5e9' }}>Verified</Text>
+                    </View>
+                  )}
+                  {mergedUser?.robloxUsername && !mergedUser?.robloxUsernameVerified && (
+                    <View style={{
+                      flexDirection: 'row', alignItems: 'center', gap: SPACE.xs,
+                      backgroundColor: isDarkMode ? 'rgba(251,191,36,0.15)' : 'rgba(217,119,6,0.1)',
+                      borderWidth: 1, borderColor: isDarkMode ? 'rgba(251,191,36,0.3)' : 'rgba(217,119,6,0.25)',
+                      paddingHorizontal: SPACE.md, paddingVertical: 3, borderRadius: 999,
+                    }}>
+                      <Icon name="alert-circle-outline" size={10} color={isDarkMode ? '#fbbf24' : '#d97706'} />
+                      <Text style={{ fontSize: SIZE.label, fontFamily: FONT.bold, color: isDarkMode ? '#fbbf24' : '#d97706' }}>Unverified</Text>
+                    </View>
+                  )}
+                </View>
+
+                {/* Roblox username subtitle */}
+                {mergedUser?.robloxUsername && (
+                  <TouchableOpacity
+                    onPress={handleOpenRobloxProfile}
+                    style={{ flexDirection: 'row', alignItems: 'center', gap: SPACE.xs, marginTop: SPACE.xs }}
+                    activeOpacity={0.7}
+                  >
+                    <Icon name="game-controller" size={12} color={c.textMuted} />
+                    <Text style={{ fontSize: SIZE.caption, color: c.textSecondary, fontFamily: FONT.regular }}>
+                      {mergedUser.robloxUsername}
+                    </Text>
+                  </TouchableOpacity>
+                )}
+              </View>
+
+              {/* ═══ STATS STRIP ═══ */}
+              {loadDetails && !loadingRating && (
+                <View style={{
+                  flexDirection: 'row', alignItems: 'center',
+                  marginTop: 14, marginHorizontal: SPACE.xl,
+                  paddingVertical: SPACE.lg,
+                  borderTopWidth: 1, borderBottomWidth: 1,
+                  borderColor: isDarkMode ? config.colors.surfaceDark : '#f1f5f9',
+                }}>
+                  {/* Rating */}
+                  {ratingSummary && (
+                    <View style={{ flex: 1, alignItems: 'center' }}>
+                      <Text style={{ fontSize: SIZE.label, fontFamily: FONT.bold, textTransform: 'uppercase', letterSpacing: 0.8, color: c.textMuted }}>Rating</Text>
+                      <View style={{ flexDirection: 'row', alignItems: 'center', gap: 3, marginTop: 3 }}>
+                        <Text style={{ fontSize: SIZE.caption, color: '#fbbf24' }}>★</Text>
+                        <Text style={{ fontSize: SIZE.caption, fontFamily: FONT.bold, color: c.text }}>
+                          {ratingSummary.value.toFixed(1)}
+                        </Text>
+                        <Text style={{ fontSize: SIZE.label, fontFamily: FONT.bold, color: c.textMuted }}>({ratingSummary.count})</Text>
+                      </View>
+                    </View>
+                  )}
+                  {/* Followers */}
+                  <View style={{
+                    flex: 1, alignItems: 'center',
+                    borderLeftWidth: ratingSummary ? 1 : 0,
+                    borderColor: c.border,
+                  }}>
+                    <Text style={{ fontSize: SIZE.label, fontFamily: FONT.bold, textTransform: 'uppercase', letterSpacing: 0.8, color: c.textMuted }}>Followers</Text>
+                    <View style={{ flexDirection: 'row', alignItems: 'center', gap: 3, marginTop: 3 }}>
+                      <Icon name="people" size={12} color="#8b5cf6" />
+                      <Text style={{ fontSize: SIZE.caption, fontFamily: FONT.bold, color: c.text }}>
+                        {followersCount || 0}
+                      </Text>
+                    </View>
+                  </View>
+                  {/* XP */}
+                  {userPoints !== null && userPoints > 0 && (
+                    <View style={{
+                      flex: 1, alignItems: 'center',
+                      borderLeftWidth: 1, borderColor: c.border,
+                    }}>
+                      <Text style={{ fontSize: SIZE.label, fontFamily: FONT.bold, textTransform: 'uppercase', letterSpacing: 0.8, color: c.textMuted }}>XP</Text>
+                      <View style={{ flexDirection: 'row', alignItems: 'center', gap: 3, marginTop: 3 }}>
+                        <Text style={{ fontSize: SIZE.caption }}>⚡</Text>
+                        <Text style={{ fontSize: SIZE.caption, fontFamily: FONT.bold, color: c.text }}>
+                          {Number(userPoints).toLocaleString()}
+                        </Text>
+                      </View>
+                    </View>
+                  )}
+                  {/* Wins */}
+                  {gameWins !== null && gameWins > 0 && (
+                    <View style={{
+                      flex: 1, alignItems: 'center',
+                      borderLeftWidth: 1, borderColor: c.border,
+                    }}>
+                      <Text style={{ fontSize: SIZE.label, fontFamily: FONT.bold, textTransform: 'uppercase', letterSpacing: 0.8, color: c.textMuted }}>Wins</Text>
+                      <View style={{ flexDirection: 'row', alignItems: 'center', gap: 3, marginTop: 3 }}>
+                        <Text style={{ fontSize: SIZE.caption }}>🏆</Text>
+                        <Text style={{ fontSize: SIZE.caption, fontFamily: FONT.regular, color: c.text }}>
+                          {gameWins}
+                        </Text>
+                      </View>
+                    </View>
+                  )}
+                </View>
+              )}
+
+              {/* ═══ JOINED DATE (under stats) ═══ */}
+              {loadDetails && !loadingRating && createdAtText && (
+                <View style={{ alignItems: 'center', marginTop: SPACE.md }}>
+                  <View style={{ flexDirection: 'row', alignItems: 'center', gap: SPACE.xs }}>
+                    <Icon name="calendar-outline" size={11} color={c.textMuted} />
+                    <Text style={{ fontSize: SIZE.label, color: c.textMuted, fontFamily: FONT.regular }}>
+                      Joined {createdAtText}
+                    </Text>
+                  </View>
+                </View>
+              )}
+
+              {/* Loading indicator for details */}
+              {loadDetails && loadingRating && (
+                <View style={{ alignItems: 'center', paddingVertical: SPACE.xxxl }}>
+                  <ActivityIndicator size="small" color={config.colors.primary} />
+                </View>
+              )}
+
+              {/* 📝 Bio Section */}
+              {loadDetails && (
+                <View style={{
+                  borderRadius: 14, padding: SPACE.xl, marginHorizontal: SPACE.xl,
+                  backgroundColor: c.bgAlt,
+                  marginTop: SPACE.md,
+                }}>
+                  <View style={{ flexDirection: 'row', alignItems: 'center', gap: SPACE.sm, marginBottom: SPACE.md }}>
+                    <View style={{
+                      width: 24, height: 24, borderRadius: 8,
+                      backgroundColor: isDarkMode ? 'rgba(96,165,250,0.15)' : 'rgba(96,165,250,0.1)',
+                      alignItems: 'center', justifyContent: 'center',
+                    }}>
+                      <Icon name="person" size={12} color="#60a5fa" />
+                    </View>
+                    <Text style={{ fontSize: SIZE.caption, fontFamily: FONT.bold, color: c.text }}>
+                      Bio
+                    </Text>
+                  </View>
+                  <Text style={{
+                    fontSize: SIZE.caption, lineHeight: 19,
+                    color: c.text,
+                  }}>
+                    {userBio || 'Hi there, I am new here'}
+                  </Text>
+                </View>
+              )}
+
+
+              {/* 🎒 Items & Portfolio */}
+              {loadDetails && (
+                <View style={{ marginHorizontal: SPACE.xl }}>
+                  <CompactPortfolio
+                    ownedPets={ownedItems}
+                    wishlistPets={wishlistItems}
+                    isDarkMode={isDarkMode}
+                    t={t}
+                    loadingPets={loadingItems}
+                    renderPetBubble={renderItemBubble}
+                  />
+                </View>
+              )}
+
+              {/* ⭐ Reviews Section */}
+              {loadDetails && (
+                <View style={{ marginHorizontal: SPACE.xl }}>
+                  <ProfileReviewsSection
+                    isDarkMode={isDarkMode}
+                    t={t}
+                    reviews={reviews}
+                    loadingReviews={loadingReviews}
+                    hasMoreReviews={hasMoreReviews}
+                    handleLoadMoreReviews={handleLoadMoreReviews}
+                    renderStars={renderStars}
+                    getTimestampMs={getTimestampMs}
+                    formatCreatedAt={formatCreatedAt}
+                    starFilter={starFilter}
+                    setStarFilter={setStarFilter}
+                  />
+                </View>
+              )}
+
+              {/* 🔄 Trades Section */}
+              {loadDetails && (
+                <View style={{ marginHorizontal: SPACE.xl }}>
+                  <ProfileTradesSection
+                    isDarkMode={isDarkMode}
+                    t={t}
+                    trades={trades}
+                    loadingTrades={loadingTrades}
+                    hasMoreTrades={hasMoreTrades}
+                    handleLoadMoreTrades={handleLoadMoreTrades}
+                    renderTradeItem={renderTradeItem}
+                  />
+                </View>
+              )}
+
+              {/* 🖼️ Posts Section */}
+              {loadDetails && (
+                <View style={{ marginHorizontal: SPACE.xl }}>
+                  <ProfilePostsSection
+                    isDarkMode={isDarkMode}
+                    t={t}
+                    posts={posts}
+                    loadingPosts={loadingPosts}
+                    hasMorePosts={hasMorePosts}
+                    handleLoadMorePosts={handleLoadMorePosts}
+                    renderPostItem={renderPostItem}
+                  />
+                </View>
+              )}
+
+              {/* ═══ ACTION BUTTONS (Premium Pill Style) ═══ */}
+              <View style={{
+                marginTop: SPACE.lg, marginBottom: SPACE.lg,
+                paddingHorizontal: SPACE.xl,
+                gap: 7,
+              }}>
+                {/* Top row: Chat + Follow (or Chat + Roblox if no follow) */}
+                <View style={{ flexDirection: 'row', gap: SPACE.lg }}>
+                  {/* Chat Action */}
+                  {!fromPvtChat && (
+                    <TouchableOpacity
+                      onPress={handleStartChat}
+                      activeOpacity={0.85}
+                      style={{
+                        flex: 1, flexDirection: 'row', alignItems: 'center', justifyContent: 'center',
+                        gap: 7, paddingVertical: SPACE.lg, borderRadius: 12,
+                        backgroundColor: bannerColor,
+                        shadowColor: bannerColor, shadowOffset: { width: 0, height: 5 },
+                        shadowOpacity: 0.35, shadowRadius: 10, elevation: 6,
+                      }}
+                    >
+                      {/* Inner glow */}
+                      <View style={{
+                        position: 'absolute', top: 1.5, left: 1.5, right: 1.5, bottom: 1.5,
+                        borderRadius: 13, borderWidth: 1,
+                        borderColor: 'rgba(255,255,255,0.2)',
+                      }} />
+                      <Icon name="chatbubble" size={18} color="#fff" />
+                      <Text style={{ color: c.textInverse, fontSize: SIZE.caption, fontFamily: FONT.bold }}>
+                        {t('chat.start_chat')}
+                      </Text>
+                    </TouchableOpacity>
+                  )}
+
+                  {/* Follow/Unfollow Action */}
+                  {!fromPvtChat && user?.id !== selectedUserId && (
+                    <TouchableOpacity
+                      onPress={handleFollowToggle}
+                      disabled={followLoading}
+                      activeOpacity={0.85}
+                      style={{
+                        flex: 1, flexDirection: 'row', alignItems: 'center', justifyContent: 'center',
+                        gap: 7, paddingVertical: SPACE.lg, borderRadius: 12,
+                        backgroundColor: isFollowing
+                          ? (isDarkMode ? config.colors.surfaceDark : '#f1f5f9')
+                          : (isDarkMode ? '#059669' : '#10b981'),
+                        borderWidth: isFollowing ? 1.5 : 0,
+                        borderColor: isFollowing
+                          ? (c.border)
+                          : 'transparent',
+                        shadowColor: isFollowing ? (isDarkMode ? '#000' : '#94a3b8') : '#10b981',
+                        shadowOffset: { width: 0, height: isFollowing ? 3 : 5 },
+                        shadowOpacity: isFollowing ? 0.15 : 0.35,
+                        shadowRadius: isFollowing ? 6 : 10,
+                        elevation: isFollowing ? 3 : 6,
+                      }}
+                    >
+                      {!isFollowing && (
+                        <View style={{
+                          position: 'absolute', top: 1.5, left: 1.5, right: 1.5, bottom: 1.5,
+                          borderRadius: 13, borderWidth: 1,
+                          borderColor: 'rgba(255,255,255,0.2)',
+                        }} />
+                      )}
+                      {followLoading ? (
+                        <ActivityIndicator size="small" color={isFollowing ? (c.textSecondary) : '#fff'} />
+                      ) : (
+                        <>
+                          <Icon
+                            name={isFollowing ? "person-remove" : "person-add"}
+                            size={18}
+                            color={isFollowing ? (c.textSecondary) : '#fff'}
+                          />
+                          <Text style={{
+                            fontSize: SIZE.caption, fontFamily: FONT.bold,
+                            color: isFollowing ? (c.textSecondary) : '#fff',
+                          }}>
+                            {isFollowing ? 'Unfollow' : 'Follow'}
+                          </Text>
+                        </>
+                      )}
+                    </TouchableOpacity>
+                  )}
+                </View>
+
+                {/* Second row: Roblox + View Profile */}
+                <View style={{ flexDirection: 'row', gap: SPACE.lg }}>
+                  {/* Roblox Profile */}
+                  {mergedUser?.robloxUsername && (
+                    <TouchableOpacity
+                      onPress={handleOpenRobloxProfile}
+                      activeOpacity={0.85}
+                      style={{
+                        flex: 1, flexDirection: 'row', alignItems: 'center', justifyContent: 'center',
+                        gap: 7, paddingVertical: 9, borderRadius: 12,
+                        backgroundColor: isDarkMode ? config.colors.surfaceDark : '#f1f5f9',
+                        borderWidth: 1.5,
+                        borderColor: c.border,
+                        shadowColor: c.shadow,
+                        shadowOffset: { width: 0, height: 3 },
+                        shadowOpacity: 0.12, shadowRadius: 6, elevation: 3,
+                      }}
+                    >
+                      <Icon name="game-controller" size={16} color={isDarkMode ? '#60a5fa' : '#2563eb'} />
+                      <Text style={{
+                        fontSize: SIZE.caption, fontFamily: FONT.bold,
+                        color: isDarkMode ? '#60a5fa' : '#2563eb',
+                      }}>Roblox</Text>
+                    </TouchableOpacity>
+                  )}
+
+                  {/* View Profile — only on initial view */}
+                  {!loadDetails && (
+                    <TouchableOpacity
+                      onPress={() => setLoadDetails(true)}
+                      activeOpacity={0.85}
+                      style={{
+                        flex: 1, flexDirection: 'row', alignItems: 'center', justifyContent: 'center',
+                        gap: 7, paddingVertical: 9, borderRadius: 12,
+                        backgroundColor: isDarkMode ? config.colors.surfaceDark : '#f1f5f9',
+                        borderWidth: 1.5,
+                        borderColor: c.border,
+                        shadowColor: c.shadow,
+                        shadowOffset: { width: 0, height: 3 },
+                        shadowOpacity: 0.12, shadowRadius: 6, elevation: 3,
+                      }}
+                    >
+                      <Icon name="person" size={16} color={isDarkMode ? '#e2e8f0' : '#475569'} />
+                      <Text style={{
+                        fontSize: SIZE.caption, fontFamily: FONT.bold,
+                        color: c.textSecondary,
+                      }}>View Detail Profile</Text>
+                    </TouchableOpacity>
+                  )}
+                </View>
+              </View>
+
+              {/* ═══ MOD TOOLS ═══
+                  Collapsed by default so the panel never gets in the way of
+                  an ordinary profile view. A user holding only the delegated
+                  Junior-Mod grant is not staff, but still needs the toggle to
+                  reach their one chip — ProfileAdminActions hides the rest. */}
+              {!loadDetails && user?.id !== selectedUserId && (isStaff || canManageBabyMod) && (
+                <View style={{ paddingHorizontal: SPACE.xl }}>
+                  <TouchableOpacity
+                    onPress={() => setShowModTools((prev) => !prev)}
+                    style={{
+                      flexDirection: 'row', alignItems: 'center', justifyContent: 'center',
+                      paddingVertical: SPACE.md, marginTop: SPACE.xs, gap: SPACE.sm, borderRadius: 10,
+                      backgroundColor: showModTools
+                        ? (isDarkMode ? 'rgba(239,68,68,0.15)' : 'rgba(239,68,68,0.08)')
+                        : (isDarkMode ? 'rgba(100,116,139,0.15)' : 'rgba(100,116,139,0.08)'),
+                    }}
+                  >
+                    <Icon name={showModTools ? 'shield' : 'shield-outline'} size={16}
+                      color={showModTools ? '#EF4444' : c.textSecondary} />
+                    <Text style={{ fontSize: SIZE.caption, fontFamily: FONT.bold, color: showModTools ? '#EF4444' : c.textSecondary }}>
+                      {showModTools ? 'Hide Mod Tools' : 'Mod Tools'}
+                    </Text>
+                  </TouchableOpacity>
+
+                  {showModTools && (
+                    <ProfileAdminActions
+                      isAdmin={isAdmin}
+                      isDarkMode={isDarkMode}
+                      isBanned={isBanned}
+                      mergedUser={mergedUser}
+                      handleApplyStrike={handleApplyStrike}
+                      handleMuteUser={handleMuteUser}
+                      handleUnbanUser={handleUnbanUser}
+                      handlePromoteModerator={handlePromoteModerator}
+                      handleDemoteModerator={handleDemoteModerator}
+                      isBabyMod={!!user?.isBabyMod}
+                      isModerator={!!user?.isModerator}
+                      isStaff={isStaff}
+                      canManageBabyMod={canManageBabyMod}
+                      targetIsBabyMod={!!mergedUser?.isBabyMod}
+                      handleMakeBabyMod={handleMakeBabyMod}
+                      handleRemoveBabyMod={handleRemoveBabyMod}
+                      canManageBadges={canManageBadges}
+                      targetIsTrusted={!!mergedUser?.isTrusted}
+                      targetIsCMSR={!!mergedUser?.isCMSR}
+                      targetIsHelper={!!mergedUser?.isHelper}
+                      handleMakeTrusted={handleMakeTrusted}
+                      handleRemoveTrusted={handleRemoveTrusted}
+                      handleMakeCMSR={handleMakeCMSR}
+                      handleRemoveCMSR={handleRemoveCMSR}
+                      handleMakeHelper={handleMakeHelper}
+                      handleRemoveHelper={handleRemoveHelper}
+                    />
+                  )}
+                </View>
+              )}
+
+            </View>{/* end content area */}
+          </ScrollView>
+        </SwipeableBottomDrawer>
+      </View>
+    </Modal>
+
+    {/* Reason modal — a SIBLING of the drawer, shown after it closes, so the
+        two modals never stack and the keyboard has the screen to itself.
+        KeyboardAvoidingView on iOS only: Android already resizes via
+        adjustResize, and doubling up makes the modal jump when the keyboard
+        dismisses, which lands taps on the wrong button. */}
+    <Modal visible={showReasonModal} transparent animationType="fade" onRequestClose={() => setShowReasonModal(false)}>
+      <KeyboardAvoidingView behavior="padding" enabled={Platform.OS === 'ios'} style={{ flex: 1 }}>
+        <Pressable
+          onPress={() => setShowReasonModal(false)}
+          style={{ flex: 1, backgroundColor: 'rgba(0,0,0,0.6)', justifyContent: 'center', alignItems: 'center', paddingHorizontal: SPACE.xxxl }}
+        >
+          <Pressable onPress={(e) => e.stopPropagation()} style={{ width: '100%', backgroundColor: c.bg, borderRadius: 16, padding: SPACE.xxxl, borderWidth: 1, borderColor: c.border }}>
+            <Text style={{ fontSize: SIZE.subtitle, fontFamily: FONT.bold, color: c.text, marginBottom: SPACE.lg }}>
+              {reasonActionType?.type === 'strike' && `Apply Strike ${reasonActionType.value}`}
+              {reasonActionType?.type === 'mute' && `Mute for ${reasonActionType.value} min`}
+            </Text>
+            <Text style={{ fontSize: SIZE.caption, color: c.textMuted, marginBottom: 15 }}>
+              Give a reason. It is stored with the ban and shown in the Admin Dashboard.
+            </Text>
+            <TextInput
+              style={{
+                backgroundColor: c.bgAlt, color: c.text, borderRadius: 10, padding: SPACE.xl,
+                minHeight: 80, borderWidth: 1, borderColor: c.border, textAlignVertical: 'top',
+              }}
+              placeholder="e.g. scamming, abusive language, spam..."
+              placeholderTextColor={c.textMuted}
+              multiline
+              value={adminReason}
+              onChangeText={setAdminReason}
+              autoFocus
+            />
+            <View style={{ flexDirection: 'row', justifyContent: 'flex-end', gap: SPACE.lg, marginTop: SPACE.xxxl }}>
+              <TouchableOpacity
+                onPress={() => { setShowReasonModal(false); setReasonActionType(null); }}
+                style={{ paddingVertical: SPACE.lg, paddingHorizontal: SPACE.xxl, borderRadius: 8, backgroundColor: c.bgAlt }}
+              >
+                <Text style={{ color: c.text, fontFamily: FONT.regular }}>Cancel</Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                onPress={confirmAdminAction}
+                style={{ paddingVertical: SPACE.lg, paddingHorizontal: SPACE.xxl, borderRadius: 8, backgroundColor: '#ef4444' }}
+              >
+                <Text style={{ color: c.textInverse, fontFamily: FONT.regular }}>Confirm</Text>
+              </TouchableOpacity>
+            </View>
+          </Pressable>
+        </Pressable>
+      </KeyboardAvoidingView>
+    </Modal>
+    </>
+  );
+};
+
+export default ProfileBottomDrawer;
+

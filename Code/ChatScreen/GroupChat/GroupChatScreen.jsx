@@ -1,0 +1,1279 @@
+import React, { useState, useEffect, useMemo, useCallback, useRef } from 'react';
+import {
+  View,
+  ActivityIndicator,
+  Alert,
+  Text,
+  RefreshControl,
+  TouchableOpacity,
+  Modal,
+  FlatList,
+  Image,
+} from 'react-native';
+import { useFocusEffect, useRoute, useNavigation } from '@react-navigation/native';
+import { getStyles } from '../Style';
+import GroupMessageInput from './GroupMessageInput';
+import GroupMessageList from './GroupMessageList';
+import { useGlobalState } from '../../GlobelStats';
+import { GestureHandlerRootView } from 'react-native-gesture-handler';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
+import { setActiveChat, clearActiveChat, setActiveGroupChat, clearActiveGroupChat } from '../utils';
+import { get, ref, update, query as dbQuery, orderByKey, limitToLast, orderByValue, equalTo } from '@react-native-firebase/database';
+import { useTranslation } from 'react-i18next';
+import ConditionalKeyboardWrapper from '../../Helper/keyboardAvoidingContainer';
+import { sendGroupMessage, removeMemberFromGroup, hasGroupPermission, getPendingInviteForGroup, acceptGroupInvite, declineGroupInvite, leaveGroup, makeMemberCreator } from '../utils/groupUtils';
+import { doc, getDoc, onSnapshot, collection, query, where, getDocs } from '@react-native-firebase/firestore';
+import { Menu, MenuOptions, MenuOption, MenuTrigger } from 'react-native-popup-menu';
+import Icon from 'react-native-vector-icons/Ionicons';
+import { showSuccessMessage, showErrorMessage } from '../../Helper/MessageHelper';
+import ProfileBottomDrawer from './BottomDrawer';
+import { isUserOnline } from '../utils';
+import { useLocalState } from '../../LocalGlobelStats';
+import PetModal from '../PrivateChat/PetsModel';
+import config from '../../Helper/Environment';
+import { seedCurrentUser } from '../../Helper/profileCache';
+import { GAME } from '../../config/game';
+import { getThemeColors } from '../../Helper/themeColors';
+import { SIZE } from '../../Design/tokens';
+import { SPACE } from '../../Design/tokens';
+import { FONT } from '../../Design/tokens';
+
+const INITIAL_PAGE_SIZE = 10; // ✅ Initial load: 10 messages
+const PAGE_SIZE = 10; // ✅ Pagination: load 10 messages per batch
+const MEMBER_STATUS_BATCH_SIZE = 5; // ✅ Load 5 member statuses at a time
+
+const GroupChatScreen = () => {
+  const route = useRoute();
+  const navigation = useNavigation();
+  const { groupId } = route.params || {};
+
+  const { user, theme, appdatabase, firestoreDB } = useGlobalState();
+
+  // Seed MY OWN profile into the shared cache.
+  // Chat message payloads are slim — they carry no frame/text-colour — so the
+  // row renderer resolves cosmetics via the profile cache. warmProfileCache
+  // deliberately skips the current user (it only fetches *other* senders), so
+  // without this the signed-in user is the one person whose frame and chat
+  // text colour never render on their own messages.
+  // Deps are deliberately narrow: `user` is a fresh object on many unrelated
+  // updates, and re-seeding on each would fire a needless DB read.
+  useEffect(() => {
+    if (user?.id) seedCurrentUser(user, null, appdatabase);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [user?.id, user?.avatar, appdatabase]);
+  const [messages, setMessages] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
+  const [groupData, setGroupData] = useState(null);
+  const [isPaginating, setIsPaginating] = useState(false);
+  const [onlineMembers, setOnlineMembers] = useState([]);
+  const [loadedMemberStatuses, setLoadedMemberStatuses] = useState(new Set()); // Track which members' status we've checked
+  const [loadingMemberStatuses, setLoadingMemberStatuses] = useState(false);
+  const [showMembersModal, setShowMembersModal] = useState(false);
+  const membersInsets = useSafeAreaInsets();
+  const [pendingInvite, setPendingInvite] = useState(null);
+  const [pendingInvitations, setPendingInvitations] = useState([]); // All pending invitations for the group
+  const [isMember, setIsMember] = useState(false);
+  const [checkingAccess, setCheckingAccess] = useState(true);
+  const [isDrawerVisible, setIsDrawerVisible] = useState(false);
+  const [selectedUserForDrawer, setSelectedUserForDrawer] = useState(null);
+  const [selectedUserOnline, setSelectedUserOnline] = useState(false);
+  const [memberToMakeCreator, setMemberToMakeCreator] = useState(null);
+  const [petModalVisible, setPetModalVisible] = useState(false);
+  const [selectedFruits, setSelectedFruits] = useState([]);
+  const [replyTo, setReplyTo] = useState(null); // Reply to message state
+  const [highlightedMessageId, setHighlightedMessageId] = useState(null); // Highlighted message ID
+  const flatListRef = useRef(null); // Ref for FlatList in GroupMessageList
+  const lastLoadedKeyRef = useRef(null); // Oldest message ID (for pagination)
+  const newestMessageIdRef = useRef(null); // Newest message ID (for real-time listener)
+  const previousGroupIdRef = useRef(null);
+  const { t } = useTranslation();
+
+  const isDarkMode = theme === 'dark';
+
+  const c = getThemeColors(isDarkMode);
+  const styles = useMemo(() => getStyles(isDarkMode), [isDarkMode]);
+
+  const messagesRef = useMemo(
+    () => (groupId ? ref(appdatabase, `group_messages/${groupId}/messages`) : null),
+    [groupId, appdatabase],
+  );
+
+  // Load group data from Firestore and check access
+  useEffect(() => {
+    if (!groupId || !firestoreDB || !user?.id) return;
+
+    setCheckingAccess(true);
+    const groupRef = doc(firestoreDB, 'groups', groupId);
+    const unsubscribe = onSnapshot(
+      groupRef,
+      async (snapshot) => {
+        if (snapshot.exists) {
+          const data = snapshot.data();
+          setGroupData(data);
+
+          // Check if user is a member
+          const memberIds = data.memberIds || [];
+          const userIsMember = memberIds.includes(user.id);
+          setIsMember(userIsMember);
+
+          // If not a member, check for pending invitation
+          if (!userIsMember) {
+            const inviteResult = await getPendingInviteForGroup(firestoreDB, groupId, user.id);
+            if (inviteResult.success) {
+              setPendingInvite({
+                id: inviteResult.inviteId,
+                ...inviteResult.inviteData,
+              });
+            } else {
+              setPendingInvite(null);
+            }
+          } else {
+            setPendingInvite(null);
+          }
+        } else {
+          Alert.alert(t('home.alert.error'), t('group_chat.group_not_found'));
+          setGroupData(null);
+        }
+        setCheckingAccess(false);
+      },
+      (error) => {
+        console.error('Error loading group data:', error);
+        showErrorMessage(t('home.alert.error'), t('group_chat.failed_load_group'));
+        setCheckingAccess(false);
+      }
+    );
+
+    return () => unsubscribe();
+  }, [groupId, firestoreDB, user?.id]);
+
+  // ✅ Function to load a batch of member statuses
+  const loadMemberStatusesBatch = useCallback(async (memberIds) => {
+    if (!appdatabase || memberIds.length === 0 || loadingMemberStatuses) return;
+    
+    // ✅ Filter out already loaded members to prevent duplicate checks
+    const unloadedIds = memberIds.filter(id => !loadedMemberStatuses.has(id));
+    if (unloadedIds.length === 0) {
+      // All members in this batch are already loaded, no need to fetch
+      return;
+    }
+
+    setLoadingMemberStatuses(true);
+    try {
+      // ✅ Check each member's presence in parallel (only unloaded ones)
+      const presencePromises = unloadedIds.map(async (memberId) => {
+        try {
+          const memberPresenceRef = ref(appdatabase, `presence/${memberId}`);
+          const snapshot = await get(memberPresenceRef);
+          const isOnline = snapshot.exists() && snapshot.val() === true;
+          return { memberId, isOnline };
+        } catch (error) {
+          return { memberId, isOnline: false };
+        }
+      });
+
+      const results = await Promise.all(presencePromises);
+      
+      // ✅ Update online members list
+      setOnlineMembers((prev) => {
+        const newSet = new Set(prev);
+        results.forEach(({ memberId, isOnline }) => {
+          if (isOnline) {
+            newSet.add(memberId);
+          } else {
+            newSet.delete(memberId);
+          }
+        });
+        return Array.from(newSet);
+      });
+
+      // ✅ Track which members we've loaded (only the ones we actually checked)
+      setLoadedMemberStatuses((prev) => {
+        const newSet = new Set(prev);
+        unloadedIds.forEach((id) => newSet.add(id));
+        return newSet;
+      });
+    } catch (error) {
+      console.error('Error loading member statuses:', error);
+    } finally {
+      setLoadingMemberStatuses(false);
+    }
+  }, [appdatabase, loadingMemberStatuses, loadedMemberStatuses]);
+
+  // ✅ Reset when modal closes
+  useEffect(() => {
+    if (!showMembersModal) {
+      setOnlineMembers([]);
+      setLoadedMemberStatuses(new Set());
+      return;
+    }
+  }, [showMembersModal]);
+
+  // ✅ Load first batch of member statuses when modal opens
+  useEffect(() => {
+    if (!showMembersModal || !groupData || !appdatabase || !user?.id) {
+      return;
+    }
+
+    const groupMemberIds = groupData.memberIds || [];
+    if (groupMemberIds.length === 0) {
+      return;
+    }
+
+    // ✅ Load first batch of members' status
+    const loadFirstBatch = async () => {
+      const firstBatch = groupMemberIds.slice(0, MEMBER_STATUS_BATCH_SIZE);
+      await loadMemberStatusesBatch(firstBatch);
+    };
+
+    loadFirstBatch();
+  }, [showMembersModal, groupData, appdatabase, user?.id, loadMemberStatusesBatch]);
+
+  // ✅ OPTIMIZED: Load pending invitations ONLY when members modal opens (lazy loading)
+  const fetchPendingInvitations = useCallback(async () => {
+    if (!groupId || !firestoreDB || !groupData || !appdatabase) {
+      setPendingInvitations([]);
+      return;
+    }
+
+    try {
+      const invitationsQuery = query(
+        collection(firestoreDB, 'group_invitations'),
+        where('groupId', '==', groupId),
+        where('status', '==', 'pending')
+      );
+      const snapshot = await getDocs(invitationsQuery);
+      
+      const invitations = [];
+      const memberIds = groupData.memberIds || [];
+      
+      // ✅ OPTIMIZED: Use stored invited user data first, only fetch from RTDB users node if needed (lazy loading)
+      let onlineUsersMap = null; // Lazy load only if needed
+      
+      // ✅ Process invitations - Show the INVITED USER's info (not the creator who sent it)
+      for (const docSnapshot of snapshot.docs) {
+        const data = docSnapshot.data();
+        // Check if invitation is expired and user is not already a member
+        if (data.expiresAt && Date.now() < data.expiresAt && !memberIds.includes(data.invitedUserId)) {
+          // ✅ Priority: Use stored data first, then fallback to RTDB users node, then "Anonymous"
+          const invitedUserId = data.invitedUserId;
+          let displayName = 'Anonymous';
+          let avatar = GAME.defaultAvatar;
+          
+          // 1. First priority: Use stored data from invitation document (NO Firestore read needed)
+          if (data.invitedUserDisplayName) {
+            displayName = data.invitedUserDisplayName;
+          }
+          if (data.invitedUserAvatar) {
+            avatar = data.invitedUserAvatar;
+          }
+          
+          // 2. Fallback: Lazy load from RTDB users node ONLY if stored data not available (OPTIMIZATION: avoid unnecessary read)
+          if (displayName === 'Anonymous' && invitedUserId && onlineUsersMap === null) {
+            try {
+              // ✅ OPTIMIZED: Fetch only specific fields instead of full user object
+              const [displayNameSnap, avatarSnap] = await Promise.all([
+                get(ref(appdatabase, `users/${invitedUserId}/displayName`)).catch(() => null),
+                get(ref(appdatabase, `users/${invitedUserId}/avatar`)).catch(() => null),
+              ]);
+              
+              if (displayNameSnap?.exists() || avatarSnap?.exists()) {
+                onlineUsersMap = {
+                  [invitedUserId]: {
+                    displayName: displayNameSnap?.exists() ? displayNameSnap.val() : 'Anonymous',
+                    avatar: avatarSnap?.exists() ? avatarSnap.val() : GAME.defaultAvatar,
+                  }
+                };
+              } else {
+                onlineUsersMap = {}; // Mark as loaded (empty) to avoid retrying
+              }
+            } catch (onlineError) {
+              console.warn('Could not fetch user data for pending invites:', onlineError);
+              onlineUsersMap = {}; // Mark as loaded (empty) to avoid retrying
+            }
+          }
+          
+          // 3. Use RTDB users node data if available
+          if (displayName === 'Anonymous' && invitedUserId && onlineUsersMap) {
+            const invitedUserData = onlineUsersMap[invitedUserId];
+            if (invitedUserData) {
+              displayName = invitedUserData.displayName || 'Anonymous';
+              avatar = invitedUserData.avatar || avatar;
+            }
+          }
+          
+          invitations.push({
+            id: docSnapshot.id,
+            invitedUserId: invitedUserId, // The person who was invited
+            displayName: displayName,
+            avatar: avatar,
+            invitedBy: data.invitedBy, // Store who sent the invitation (for reference)
+          });
+        }
+      }
+      setPendingInvitations(invitations);
+    } catch (error) {
+      console.error('Error fetching pending invitations:', error);
+      setPendingInvitations([]);
+    }
+  }, [groupId, firestoreDB, groupData, appdatabase]);
+
+
+  // ✅ Load pending invitations only when members modal opens AND user is creator
+  useEffect(() => {
+    if (!showMembersModal || !groupData || !user?.id) {
+      setPendingInvitations([]);
+      return;
+    }
+
+    // ✅ Only show pending invitations to creator
+    const isCreator = groupData.createdBy === user.id;
+    
+    if (isCreator) {
+      fetchPendingInvitations();
+    } else {
+      // Regular members don't see pending invitations
+      setPendingInvitations([]);
+    }
+  }, [showMembersModal, fetchPendingInvitations, groupData, user?.id]);
+
+  // ✅ OPTIMIZED: Load messages with pagination (only if user is a member) - matching private chat strategy
+  const loadMessages = useCallback(
+    async (reset = false) => {
+      if (!messagesRef || !isMember) return; // Don't load messages if not a member
+
+      if (reset) {
+        setLoading(true);
+        setMessages([]);
+        lastLoadedKeyRef.current = null;
+        newestMessageIdRef.current = null; // Reset newest message ID
+      } else {
+        setIsPaginating(true);
+      }
+
+      try {
+        // ✅ Use same query pattern as private chat for consistency
+        let query = messagesRef.orderByKey();
+
+        const lastKey = lastLoadedKeyRef.current;
+        if (!reset && lastKey) {
+          // ✅ Get older messages (messages before lastKey)
+          // endAt includes lastKey, but we'll filter it out to avoid duplicates
+          query = query.endAt(lastKey);
+        }
+
+        // ✅ Apply limit ONLY ONCE, at the end
+        // limitToLast gets the last N messages from the query result
+        // Use INITIAL_PAGE_SIZE for first load, PAGE_SIZE for pagination
+        const limitSize = reset ? INITIAL_PAGE_SIZE : PAGE_SIZE;
+        query = query.limitToLast(limitSize);
+
+        const snapshot = await query.once('value');
+        const data = snapshot.val() || {};
+
+        let parsedMessages = Object.entries(data)
+          .map(([key, value]) => ({ id: key, ...value }))
+          .sort((a, b) => (b?.timestamp || 0) - (a?.timestamp || 0)); // ✅ DESCENDING: newest -> oldest (for inverted FlatList)
+        
+        // ✅ Filter out the lastKey itself when loading more (to avoid duplicate)
+        if (!reset && lastKey && parsedMessages.length > 0) {
+          parsedMessages = parsedMessages.filter(msg => String(msg.id) !== String(lastKey));
+        }
+
+        // ✅ If reset and no messages found, return early
+        if (parsedMessages.length === 0) {
+          if (reset) {
+            // Only clear if we explicitly reset
+          } else {
+            // ✅ No more messages to load - set ref to null to prevent further pagination
+            lastLoadedKeyRef.current = null;
+          }
+          return;
+        }
+
+        // ✅ Track new messages for pagination key update
+        const newMessagesRef = { value: parsedMessages };
+        
+        setMessages((prev) => {
+          if (!Array.isArray(prev)) return parsedMessages;
+          const existingIds = new Set(prev.map((m) => String(m?.id)));
+          newMessagesRef.value = parsedMessages.filter((m) => !existingIds.has(String(m?.id)));
+
+          if (reset) {
+            // Initial load: use parsed messages as-is (already sorted descending)
+            return parsedMessages;
+          } else {
+            // Load more (older messages): append and maintain descending order
+            const combined = [...prev, ...newMessagesRef.value];
+            return combined.sort((a, b) => (b?.timestamp || 0) - (a?.timestamp || 0));
+          }
+        });
+
+        // ✅ Store oldest message ID in this batch (last item in descending array)
+        // ✅ Use newMessagesRef.value (actual new messages after duplicate filtering)
+        if (newMessagesRef.value.length > 0) {
+          // ✅ Use the oldest message from the new batch (last item in descending array)
+          lastLoadedKeyRef.current = newMessagesRef.value[newMessagesRef.value.length - 1]?.id;
+          // ✅ Store newest message ID (first item in descending array) for real-time listener
+          newestMessageIdRef.current = newMessagesRef.value[0]?.id;
+        } else if (parsedMessages.length > 0) {
+          // ✅ If all were duplicates, still update to oldest from parsed to prevent infinite loop
+          // ✅ This handles edge case where all messages in batch are duplicates
+          lastLoadedKeyRef.current = parsedMessages[parsedMessages.length - 1]?.id;
+          newestMessageIdRef.current = parsedMessages[0]?.id;
+        } else {
+          // ✅ No messages at all - set to null to stop pagination
+          lastLoadedKeyRef.current = null;
+          newestMessageIdRef.current = null;
+        }
+      } catch (err) {
+        console.warn('Error loading messages:', err);
+      } finally {
+        if (reset) setLoading(false);
+        setIsPaginating(false);
+      }
+    },
+    [messagesRef, isMember],
+  );
+
+  // Load messages when groupId changes (only if user is a member)
+  useEffect(() => {
+    if (!messagesRef || !isMember) return;
+
+    const currentGroupId = groupId;
+    const previousGroupId = previousGroupIdRef.current;
+
+    if (currentGroupId !== previousGroupId) {
+      previousGroupIdRef.current = currentGroupId;
+      loadMessages(true);
+    } else if (previousGroupId === null) {
+      previousGroupIdRef.current = currentGroupId;
+      loadMessages(true);
+    }
+  }, [groupId, messagesRef, loadMessages, isMember]);
+
+  // ✅ OPTIMIZED: Listen to new messages in real-time (only newest message)
+  // This prevents child_added from firing for all existing messages when listener is attached
+  // This significantly reduces Firebase read costs
+  useEffect(() => {
+    if (!messagesRef || !isMember) {
+      // Clear messages if user is not a member
+      setMessages([]);
+      return;
+    }
+
+    let isMounted = true;
+
+    // ✅ Use limitToLast(1) to only listen to the newest message
+    // This ensures we only get NEW messages, not all existing ones
+    const limitedRef = messagesRef.limitToLast(1);
+
+    const handleChildAdded = (snapshot) => {
+      if (!isMounted || !snapshot || !snapshot.key) return;
+      const data = snapshot.val();
+      if (!data || typeof data !== 'object') return;
+
+      const newMessage = { id: snapshot.key, ...data };
+      if (!newMessage.timestamp) {
+        newMessage.timestamp = Date.now();
+      }
+
+      setMessages((prev) => {
+        if (!Array.isArray(prev)) return [newMessage];
+        const exists = prev.some((m) => String(m?.id) === String(newMessage.id));
+        if (exists) return prev; // don't duplicate
+
+        // ✅ Keep DESCENDING order: add to the beginning (newest first for inverted FlatList)
+        // This matches private chat exactly
+        const updated = [newMessage, ...prev].sort((a, b) => (b?.timestamp || 0) - (a?.timestamp || 0));
+        // ✅ Update newest message ID for tracking
+        if (updated.length > 0) {
+          newestMessageIdRef.current = updated[0]?.id;
+        }
+        return updated;
+      });
+    };
+
+    // ✅ OPTIMIZED: Only listen to the last message to avoid duplicate reads
+    // This ensures new messages are added in real-time without reading all existing messages
+    const listener = limitedRef.on('child_added', handleChildAdded);
+
+    return () => {
+      isMounted = false;
+      if (limitedRef) {
+        limitedRef.off('child_added', listener);
+      }
+    };
+  }, [messagesRef, isMember]); // Re-run when messagesRef or isMember changes
+
+  // Set active chat and reset unread count
+  useFocusEffect(
+    useCallback(() => {
+      if (!user?.id || !groupId) return;
+
+      // Set active chat (both for private chat pattern and group batch checking)
+      setActiveChat(user.id, groupId);
+      setActiveGroupChat(user.id, groupId);
+
+      // Reset unreadCount when entering chat
+      const groupMetaRef = ref(appdatabase, `group_meta_data/${user.id}/${groupId}`);
+      update(groupMetaRef, { unreadCount: 0 }).catch((error) => {
+        console.error('Error resetting unread count:', error);
+      });
+
+      return () => {
+        clearActiveChat(user.id);
+        clearActiveGroupChat(user.id, groupId);
+      };
+    }, [user?.id, groupId, appdatabase])
+  );
+
+  // Handle refresh
+  const handleRefresh = useCallback(async () => {
+    setRefreshing(true);
+    await loadMessages(true);
+    setRefreshing(false);
+  }, [loadMessages]);
+
+  // Handle load more
+  const handleLoadMore = useCallback(() => {
+    // ✅ Prevent loading if already paginating, no more messages, or not a member
+    if (isPaginating || !lastLoadedKeyRef.current || !isMember) {
+      return;
+    }
+    loadMessages(false);
+  }, [loadMessages, isPaginating, isMember]);
+
+  // Scroll to message function (for reply navigation)
+  const scrollToMessage = useCallback(
+    (targetId) => {
+      if (!flatListRef?.current || !targetId) return;
+
+      // Filtered messages are sorted descending (newest first) for inverted FlatList
+      const filteredMessages = [...messages].sort((a, b) => (b?.timestamp || 0) - (a?.timestamp || 0));
+      const index = filteredMessages.findIndex((m) => m.id === targetId);
+      if (index === -1) return;
+
+      try {
+        flatListRef.current.scrollToIndex({
+          index,
+          animated: true,
+          viewPosition: 0.5,
+        });
+
+        // Highlight the scrolled-to message
+        setHighlightedMessageId(targetId);
+
+        setTimeout(() => {
+          setHighlightedMessageId((current) =>
+            current === targetId ? null : current,
+          );
+        }, 1500);
+      } catch (e) {
+        console.log('scrollToIndex error:', e);
+        // Fallback: try scrolling to offset
+        try {
+          const offset = index * 100; // Approximate height per message
+          flatListRef.current.scrollToOffset({ offset, animated: true });
+        } catch (e2) {
+          console.log('scrollToOffset error:', e2);
+        }
+      }
+    },
+    [messages],
+  );
+
+  // Handle reply to message
+  const handleReply = useCallback((message) => {
+    setReplyTo({
+      id: message.id,
+      text: message.text || '',
+      sender: message.sender || 'Anonymous',
+      hasFruits: Array.isArray(message.fruits) && message.fruits.length > 0,
+      fruitsCount: Array.isArray(message.fruits) ? message.fruits.length : 0,
+      imageUrl: message.imageUrl || null,
+    });
+  }, []);
+
+  // Cancel reply
+  const handleCancelReply = useCallback(() => {
+    setReplyTo(null);
+  }, []);
+
+  // Send message
+  const sendMessage = useCallback(
+    async (text, image, fruits, replyToMessage) => {
+      const trimmedText = (text || '').trim();
+      // Handle both single image (string) and multiple images (array)
+      const hasImage = !!image && (typeof image === 'string' || (Array.isArray(image) && image.length > 0));
+      const hasFruits = Array.isArray(fruits) && fruits.length > 0;
+
+      // Validate fruits count - maximum 18 fruits allowed
+      if (hasFruits && fruits.length > 18) {
+        showErrorMessage(t('home.alert.error'), t('group_chat.limit_pets'));
+        return;
+      }
+
+      // Block only if there's no text, no image AND no fruits
+      if (!trimmedText && !hasImage && !hasFruits) {
+        showErrorMessage(t('home.alert.error'), t('chat.cannot_empty'));
+        return;
+      }
+
+      // Safety checks
+      if (!user?.id || !groupId || !appdatabase || !firestoreDB) {
+        showErrorMessage(t('home.alert.error'), t('group_chat.missing_data'));
+        return;
+      }
+
+      // Check if user is member and not muted
+      if (groupData) {
+        const isMember = groupData.memberIds?.includes(user.id);
+        const isMuted = groupData.members?.[user.id]?.muted;
+
+        if (!isMember) {
+          showErrorMessage(t('home.alert.error'), t('group_chat.not_member'));
+          return;
+        }
+
+        if (isMuted) {
+          showErrorMessage(t('home.alert.error'), t('group_chat.muted_in_group'));
+          return;
+        }
+      }
+
+      // Check if user has recent game win
+      const now = Date.now();
+      const hasRecentWin =
+        typeof user?.lastGameWinAt === 'number' &&
+        now - user.lastGameWinAt <= 24 * 60 * 60 * 1000; // last win within 24h
+
+      // Check if user is creator
+      const isCreator = groupData?.createdBy === user.id;
+
+      // Build message payload
+      const messageData = {
+        text: trimmedText,
+        senderId: user.id,
+        sender: user.displayName || 'Anonymous',
+        avatar: user.avatar || null,
+        timestamp: Date.now(),
+        isPro: !!localState?.isPro,
+        robloxUsernameVerified: user?.robloxUsernameVerified || false,
+        hasRecentGameWin: hasRecentWin,
+        lastGameWinAt: user?.lastGameWinAt || null,
+        isCreator: isCreator,
+      };
+
+      if (hasImage) {
+        // Store as array if multiple images, single string if one image
+        if (Array.isArray(image)) {
+          messageData.imageUrls = image; // Array of image URLs
+          messageData.imageUrl = image[0]; // Keep first for backward compatibility
+        } else {
+          messageData.imageUrl = image; // Single image URL
+        }
+      }
+
+      if (hasFruits) {
+        messageData.fruits = fruits;
+      }
+
+      // Add replyTo if replying to a message
+      if (replyToMessage && replyToMessage.id) {
+        messageData.replyTo = {
+          id: replyToMessage.id,
+          text: replyToMessage.text || '',
+          sender: replyToMessage.sender || 'Anonymous',
+          imageUrl: replyToMessage.imageUrl || null,
+          imageUrls: replyToMessage.imageUrls || null, // Support multiple images in reply
+          hasFruits: replyToMessage.hasFruits || false,
+          fruitsCount: replyToMessage.fruitsCount || 0,
+        };
+      }
+
+      try {
+        const result = await sendGroupMessage(
+          appdatabase,
+          firestoreDB,
+          groupId,
+          messageData,
+          {
+            id: user.id,
+            displayName: user.displayName || 'Anonymous',
+            avatar: user.avatar || null,
+          }
+        );
+
+        if (!result.success) {
+          showErrorMessage(t('home.alert.error'), result.error || t('group_chat.failed_send'));
+        } else {
+          // Clear reply after successful send
+          setReplyTo(null);
+        }
+      } catch (error) {
+        console.error('Error sending message:', error);
+        Alert.alert(t('home.alert.error'), t('group_chat.could_not_send'));
+      }
+    },
+    [user, groupId, appdatabase, firestoreDB, groupData, t, localState?.isPro]
+  );
+
+  // Handle remove member (admin action)
+  const handleRemoveMember = useCallback(async (memberId, memberName) => {
+    if (!user?.id || !groupId) return;
+
+    Alert.alert(
+      t('group_chat.remove_member_title'),
+      t('group_chat.remove_member_msg', { name: memberName || t('group_chat.anonymous') }),
+      [
+        { text: t('group_chat.btn_cancel'), style: 'cancel' },
+        {
+          text: t('group_chat.btn_remove'),
+          style: 'destructive',
+          onPress: async () => {
+            try {
+              const result = await removeMemberFromGroup(
+                firestoreDB,
+                appdatabase,
+                groupId,
+                memberId,
+                user.id
+              );
+
+              if (result.success) {
+                showSuccessMessage(t('home.alert.success'), t('group_chat.remove_success'));
+              } else {
+                showErrorMessage(t('home.alert.error'), result.error || t('group_chat.remove_failed'));
+              }
+            } catch (error) {
+              console.error('Error removing member:', error);
+              showErrorMessage(t('home.alert.error'), t('group_chat.remove_failed'));
+            }
+          },
+        },
+      ]
+    );
+  }, [user?.id, groupId, firestoreDB, appdatabase]);
+
+  // ✅ Handle making a member creator (with warning)
+  // ✅ iOS Fix: Close members modal first, then show Alert (nested modals cause freezing on iOS)
+  const handleMakeCreator = useCallback((memberId, memberName) => {
+    // Close members modal first to avoid nested modal issues on iOS
+    setShowMembersModal(false);
+    
+    // Use setTimeout to ensure modal closes before showing alert
+    setTimeout(() => {
+      Alert.alert(
+        t('group_chat.transfer_creator_title'),
+        t('group_chat.transfer_creator_msg', { name: memberName }),
+        [
+          {
+            text: t('group_chat.btn_cancel'),
+            style: 'cancel',
+            onPress: () => {
+              setMemberToMakeCreator(null);
+            },
+          },
+          {
+            text: t('group_chat.btn_transfer'),
+            style: 'destructive',
+            onPress: async () => {
+              if (!groupId || !firestoreDB || !appdatabase || !user?.id) {
+                return;
+              }
+
+              try {
+                const result = await makeMemberCreator(
+                  firestoreDB,
+                  appdatabase,
+                  groupId,
+                  memberId,
+                  user.id
+                );
+
+                if (result.success) {
+                  showSuccessMessage(t('home.alert.success'), t('group_chat.transfer_success', { name: memberName }));
+                  setMemberToMakeCreator(null);
+                } else {
+                  showErrorMessage(t('home.alert.error'), result.error || t('group_chat.transfer_failed'));
+                }
+              } catch (error) {
+                console.error('Error making member creator:', error);
+                showErrorMessage(t('home.alert.error'), t('group_chat.transfer_failed'));
+              }
+            },
+          },
+        ],
+        { cancelable: true }
+      );
+    }, 300); // Small delay to ensure modal closes
+  }, [groupId, firestoreDB, appdatabase, user?.id]);
+
+
+  const memberCount = groupData?.memberCount || 0;
+  const isCreator = groupData && groupData.createdBy === user?.id;
+
+  // Handle accept invitation
+  const handleAcceptInvite = useCallback(async () => {
+    if (!pendingInvite || !user?.id) return;
+
+    try {
+      const result = await acceptGroupInvite(
+        firestoreDB,
+        appdatabase,
+        pendingInvite.id,
+        {
+          id: user.id,
+          displayName: user.displayName || 'Anonymous',
+          avatar: user.avatar || null,
+        }
+      );
+
+      if (result.success) {
+        showSuccessMessage(t('home.alert.success'), t('group_chat.join_success'));
+        setPendingInvite(null);
+        setIsMember(true);
+      } else {
+        showErrorMessage(t('home.alert.error'), result.error || t('group_chat.accept_failed'));
+      }
+    } catch (error) {
+      console.error('Error accepting invitation:', error);
+      showErrorMessage(t('home.alert.error'), t('group_chat.accept_failed'));
+    }
+  }, [pendingInvite, user, firestoreDB, appdatabase]);
+
+  // Handle decline invitation
+  const handleDeclineInvite = useCallback(async () => {
+    if (!pendingInvite || !user?.id) return;
+
+    Alert.alert(
+      t('group_chat.decline_title'),
+      t('group_chat.decline_msg'),
+      [
+        { text: t('group_chat.btn_cancel'), style: 'cancel' },
+        {
+          text: t('group_chat.btn_decline'),
+          style: 'destructive',
+          onPress: async () => {
+            try {
+              const result = await declineGroupInvite(firestoreDB, pendingInvite.id, user.id);
+              if (result.success) {
+                showSuccessMessage(t('home.alert.success'), t('group_chat.decline_success'));
+                setPendingInvite(null);
+                navigation.goBack();
+              } else {
+                showErrorMessage(t('home.alert.error'), result.error || t('group_chat.decline_failed'));
+              }
+            } catch (error) {
+              console.error('Error declining invitation:', error);
+              showErrorMessage(t('home.alert.error'), t('group_chat.decline_failed'));
+            }
+          },
+        },
+      ]
+    );
+  }, [pendingInvite, user, firestoreDB, navigation]);
+
+  // Handle leave group
+  const handleLeaveGroup = useCallback(() => {
+    if (!groupId || !user?.id) return;
+
+    Alert.alert(
+      t('group_chat.leave_title'),
+      t('group_chat.leave_msg'),
+      [
+        { text: t('group_chat.btn_cancel'), style: 'cancel' },
+        {
+          text: t('group_chat.btn_leave'),
+          style: 'destructive',
+          onPress: async () => {
+            try {
+              const result = await leaveGroup(firestoreDB, appdatabase, groupId, user.id);
+              if (result.success) {
+                showSuccessMessage(t('home.alert.success'), t('group_chat.leave_success'));
+                navigation.goBack();
+              } else {
+                showErrorMessage(t('home.alert.error'), result.error || t('group_chat.leave_failed'));
+              }
+            } catch (error) {
+              console.error('Error leaving group:', error);
+              showErrorMessage(t('home.alert.error'), t('group_chat.leave_failed'));
+            }
+          },
+        },
+      ]
+    );
+  }, [groupId, user?.id, firestoreDB, appdatabase, navigation]);
+
+  // Handle user press to open profile drawer
+  const handleUserPress = useCallback(async (userData) => {
+    if (!userData || !userData.senderId) return;
+
+    setSelectedUserForDrawer({
+      senderId: userData.senderId,
+      sender: userData.sender || 'Anonymous',
+      avatar: userData.avatar || GAME.defaultAvatar,
+    });
+
+    // Check if user is online
+    try {
+      const online = await isUserOnline(userData.senderId);
+      setSelectedUserOnline(online);
+    } catch (error) {
+      setSelectedUserOnline(false);
+    }
+
+    setIsDrawerVisible(true);
+  }, []);
+
+  // Get banned users from local state
+  const { localState } = useLocalState();
+  const bannedUsers = useMemo(() => {
+    return Array.isArray(localState?.bannedUsers) ? localState.bannedUsers : [];
+  }, [localState?.bannedUsers]);
+
+  // Update header with member info and leave button
+  useEffect(() => {
+    if (!groupData) return;
+
+    const isCreator = groupData?.createdBy === user?.id;
+
+    // Truncate group name for header (max 30 characters)
+    const groupName = groupData.name || 'Group Chat';
+    const truncatedGroupName = groupName.length > 30 ? groupName.substring(0, 30).trim() + '...' : groupName;
+
+    navigation.setOptions({
+      headerBackVisible: true,
+      headerTitle: () => (
+        <Text 
+          style={{ 
+            fontSize: SIZE.subtitle, 
+            fontFamily: FONT.bold, 
+            color: c.text,
+            textAlign: 'center',
+          }}
+          numberOfLines={1}
+          ellipsizeMode="tail"
+        >
+          {truncatedGroupName}
+        </Text>
+      ),
+      headerTitleAlign: 'center',
+      headerRight: () => (
+        <TouchableOpacity
+          onPress={() => setShowMembersModal(true)}
+          style={{ flexDirection: 'row', alignItems: 'center', marginRight: 15 }}
+        >
+          <Icon name="people" size={20} color={isDarkMode ? '#fff' : '#000'} />
+          <Text style={{ marginLeft: SPACE.sm, color: c.text, fontFamily: FONT.bold, fontSize: SIZE.body }}>
+            {memberCount}
+          </Text>
+        </TouchableOpacity>
+      ),
+    });
+  }, [groupData, memberCount, isDarkMode, navigation, isMember, handleLeaveGroup, user?.id]);
+
+  if (!groupId) {
+    return (
+      <View style={[styles.container, { justifyContent: 'center', alignItems: 'center' }]}>
+        <Text style={styles.text}>{t('group_chat.no_group_id')}</Text>
+      </View>
+    );
+  }
+
+  if (checkingAccess) {
+    return (
+      <View style={[styles.container, { justifyContent: 'center', alignItems: 'center' }]}>
+        <ActivityIndicator size="large" color="#8B5CF6" />
+        <Text style={[styles.text, { marginTop: SPACE.xxl }]}>{t('group_chat.loading')}</Text>
+      </View>
+    );
+  }
+
+  // Show invitation acceptance screen if user has pending invitation
+  if (pendingInvite && !isMember) {
+    return (
+      <View style={[styles.container, { justifyContent: 'center', alignItems: 'center', padding: SPACE.xxxl }]}>
+        <Icon name="mail-outline" size={64} color={isDarkMode ? '#8B5CF6' : '#8B5CF6'} />
+        <Text style={[styles.text, { fontSize: SIZE.title, fontFamily: FONT.bold, marginTop: SPACE.xxxl, marginBottom: SPACE.lg }]}>
+          {t('group_chat.invite_title')}
+        </Text>
+        <Text style={[styles.text, { fontSize: SIZE.subtitle, textAlign: 'center', marginBottom: 30, opacity: 0.7 }]} numberOfLines={2} ellipsizeMode="tail">
+          {t('group_chat.invite_msg', { groupName: groupData?.name ? (groupData.name.length > 25 ? groupData.name.substring(0, 25).trim() + '...' : groupData.name) : 'this group' })}
+        </Text>
+        <View style={{ flexDirection: 'row', gap: 15 }}>
+          <TouchableOpacity
+            onPress={handleDeclineInvite}
+            style={{
+              paddingHorizontal: 30,
+              paddingVertical: SPACE.xl,
+              borderRadius: 8,
+              backgroundColor: isDarkMode ? config.colors.surfaceElevatedDark : '#E5E7EB',
+            }}
+          >
+            <Text style={{ color: c.text, fontFamily: FONT.bold }}>{t('group_chat.btn_decline')}</Text>
+          </TouchableOpacity>
+          <TouchableOpacity
+            onPress={handleAcceptInvite}
+            style={{
+              paddingHorizontal: 30,
+              paddingVertical: SPACE.xl,
+              borderRadius: 8,
+              backgroundColor: '#8B5CF6',
+            }}
+          >
+            <Text style={{ color: c.textInverse, fontFamily: FONT.bold }}>{t('group_chat.btn_accept')}</Text>
+          </TouchableOpacity>
+        </View>
+      </View>
+    );
+  }
+
+  // Show access denied if not a member and no pending invitation
+  if (!isMember && !pendingInvite) {
+    return (
+      <View style={[styles.container, { justifyContent: 'center', alignItems: 'center', padding: SPACE.xxxl }]}>
+        <Icon name="lock-closed-outline" size={64} color={isDarkMode ? '#9CA3AF' : '#6B7280'} />
+        <Text style={[styles.text, { fontSize: SIZE.title, fontFamily: FONT.bold, marginTop: SPACE.xxxl, marginBottom: SPACE.lg }]}>
+          {t('group_chat.access_denied_title')}
+        </Text>
+        <Text style={[styles.text, { fontSize: SIZE.subtitle, textAlign: 'center', marginBottom: 30, opacity: 0.7 }]}>
+          {t('group_chat.access_denied_msg')}
+        </Text>
+        <TouchableOpacity
+          onPress={() => navigation.goBack()}
+          style={{
+            paddingHorizontal: 30,
+            paddingVertical: SPACE.xl,
+            borderRadius: 8,
+            backgroundColor: '#8B5CF6',
+          }}
+        >
+          <Text style={{ color: c.textInverse, fontFamily: FONT.bold }}>{t('group_chat.btn_go_back')}</Text>
+        </TouchableOpacity>
+      </View>
+    );
+  }
+
+  if (loading && messages.length === 0) {
+    return (
+      <View style={[styles.container, { justifyContent: 'center', alignItems: 'center' }]}>
+        <ActivityIndicator size="large" color="#8B5CF6" />
+        <Text style={[styles.text, { marginTop: SPACE.xxl }]}>{t('group_chat.loading_msgs')}</Text>
+      </View>
+    );
+  }
+
+  return (
+    <GestureHandlerRootView style={{ flex: 1 }}>
+      <ConditionalKeyboardWrapper style={{ flex: 1 }} privatechatscreen={true}>
+        <View style={[styles.container, { position: 'relative' }]}>
+          {messages.length === 0 && !loading ? (
+            // No messages yet - show empty state but keep input visible
+            <View style={styles.emptyContainer}>
+              <Text style={styles.emptyText}>{t('group_chat.no_msgs')}</Text>
+            </View>
+          ) : (
+            <GroupMessageList
+              messages={messages}
+              userId={user?.id}
+              user={user}
+              groupData={groupData}
+              handleLoadMore={handleLoadMore}
+              refreshing={refreshing}
+              onRefresh={handleRefresh}
+              loading={loading}
+              isPaginating={isPaginating}
+              onUserPress={handleUserPress}
+              onReply={handleReply}
+              scrollToMessage={scrollToMessage}
+              highlightedMessageId={highlightedMessageId}
+              flatListRef={flatListRef}
+            />
+          )}
+
+          <GroupMessageInput
+            onSend={(text, image, fruits) => sendMessage(text, image, fruits, replyTo)}
+            isBanned={false}
+            petModalVisible={petModalVisible}
+            setPetModalVisible={setPetModalVisible}
+            selectedFruits={selectedFruits}
+            setSelectedFruits={setSelectedFruits}
+            replyTo={replyTo}
+            onCancelReply={handleCancelReply}
+          />
+        </View>
+      </ConditionalKeyboardWrapper>
+
+      {/* No spacer. The comment here used to say it reserved room for a
+          "floating tab bar", but the tab bar in AppHelper/MainTabs.js is a
+          plain View with height 56 + insets.bottom and paddingBottom
+          insets.bottom -- no position:'absolute'. It is docked in the layout
+          flow and already occupies its own space, which is why every screen
+          sets bannerBottomPos = 0 with the note "screen bottom == tab bar
+          top". So this reserved the tab bar a second time and left 84-102dp of
+          dead air between the message input and the nav. This screen renders
+          no banner either, so there is nothing else to clear. */}
+
+      {/* Members Modal */}
+      <Modal
+        visible={showMembersModal}
+        transparent={true}
+        animationType="slide"
+        onRequestClose={() => setShowMembersModal(false)}
+      >
+        <View style={{ flex: 1, backgroundColor: 'rgba(0,0,0,0.5)', justifyContent: 'flex-end' }}>
+          {/* Bottom-anchored sheet: without the inset its last row sits under
+              the Android navigation bar. */}
+          <View style={{ backgroundColor: isDarkMode ? config.colors.surfaceDark : '#fff', borderTopLeftRadius: 20, borderTopRightRadius: 20, maxHeight: '80%', paddingBottom: membersInsets.bottom }}>
+            <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', padding: SPACE.xxxl, borderBottomWidth: 1, borderBottomColor: isDarkMode ? config.colors.surfaceElevatedDark : '#E5E7EB' }}>
+              <Text style={{ fontSize: SIZE.heading, fontFamily: FONT.bold, color: c.text }}>
+                {t('group_chat.members_title', { count: memberCount })}
+              </Text>
+              <TouchableOpacity onPress={() => setShowMembersModal(false)}>
+                <Icon name="close" size={24} color={isDarkMode ? '#fff' : '#000'} />
+              </TouchableOpacity>
+            </View>
+
+            <FlatList
+              data={[
+                // Actual members
+                ...(groupData?.memberIds || []).map(id => ({ type: 'member', id })),
+                // Pending invitations
+                ...pendingInvitations.map(inv => ({ type: 'pending', id: inv.invitedUserId, inviteData: inv }))
+              ]}
+              keyExtractor={(item) => `${item.type}-${item.id}`}
+              onEndReached={() => {
+                // ✅ Load next batch of member statuses on scroll
+                // ✅ Prevent loading if already loading or if all members are loaded
+                if (loadingMemberStatuses || !groupData?.memberIds) return;
+                
+                const allMemberIds = groupData.memberIds || [];
+                const unloadedIds = allMemberIds.filter(id => !loadedMemberStatuses.has(id));
+                
+                // ✅ Only load if there are unloaded members
+                if (unloadedIds.length > 0) {
+                  const nextBatch = unloadedIds.slice(0, MEMBER_STATUS_BATCH_SIZE);
+                  loadMemberStatusesBatch(nextBatch);
+                }
+              }}
+              onEndReachedThreshold={0.1}
+              scrollEnabled={true}
+              removeClippedSubviews={false}
+              ListFooterComponent={
+                loadingMemberStatuses ? (
+                  <View style={{ padding: SPACE.lg, alignItems: 'center' }}>
+                    <ActivityIndicator size="small" color={isDarkMode ? '#8B5CF6' : '#8B5CF6'} />
+                  </View>
+                ) : null
+              }
+              renderItem={({ item }) => {
+                if (item.type === 'pending') {
+                  // ✅ Render pending invitation - Shows the INVITED USER (the person who was invited)
+                  const inviteData = item.inviteData;
+                  return (
+                    <View style={{ flexDirection: 'row', alignItems: 'center', padding: 15, borderBottomWidth: 1, borderBottomColor: isDarkMode ? config.colors.surfaceElevatedDark : '#E5E7EB' }}>
+                      <Image
+                        source={{ uri: inviteData.avatar || GAME.defaultAvatar }}
+                        style={{ width: 50, height: 50, borderRadius: 25, marginRight: SPACE.xl, opacity: 0.6 }}
+                      />
+                      <View style={{ flex: 1 }}>
+                        <Text style={{ fontSize: SIZE.subtitle, fontFamily: FONT.bold, color: c.text }}>
+                          {inviteData.displayName || 'Anonymous'}
+                        </Text>
+                        <Text style={{ fontSize: SIZE.caption, fontFamily: FONT.regular, color: c.textSecondary, marginTop: SPACE.hair }}>
+                          {t('group_chat.pending_join')}
+                        </Text>
+                      </View>
+                    </View>
+                  );
+                }
+
+                // Render actual member
+                const memberId = item.id;
+                const member = groupData?.members?.[memberId] || {};
+                const isOnline = onlineMembers.includes(memberId);
+                const isCurrentUser = memberId === user?.id;
+                const isMemberCreator = groupData?.createdBy === memberId;
+                const canRemove = isCreator && !isCurrentUser && !isMemberCreator;
+                const canMakeCreator = isCreator && !isCurrentUser && !isMemberCreator;
+
+                return (
+                  <View style={{ flexDirection: 'row', alignItems: 'center', padding: 15, borderBottomWidth: 1, borderBottomColor: isDarkMode ? config.colors.surfaceElevatedDark : '#E5E7EB' }}>
+                    <Image
+                      source={{ uri: member.avatar || GAME.defaultAvatar }}
+                      style={{ width: 50, height: 50, borderRadius: 25, marginRight: SPACE.xl }}
+                    />
+                    <View style={{ flex: 1 }}>
+                      <View style={{ flexDirection: 'row', alignItems: 'center' }}>
+                        <Text style={{ fontSize: SIZE.subtitle, fontFamily: FONT.bold, color: c.text }}>
+                          {member.displayName || 'Anonymous'}
+                        </Text>
+                        {isOnline && (
+                          <View style={{ width: 8, height: 8, borderRadius: 4, backgroundColor: '#10B981', marginLeft: SPACE.md }} />
+                        )}
+                      </View>
+                      <Text style={{ fontSize: SIZE.caption, fontFamily: FONT.regular, color: c.textSecondary, marginTop: SPACE.hair }}>
+                        {isMemberCreator ? t('group_chat.role_creator') : t('group_chat.role_member')}
+                        {isOnline && t('group_chat.online')}
+                      </Text>
+                    </View>
+                    <View style={{ flexDirection: 'row', alignItems: 'center', gap: SPACE.md }}>
+                      {canMakeCreator && (
+                        <TouchableOpacity
+                          onPress={() => handleMakeCreator(memberId, member.displayName)}
+                          style={{ padding: SPACE.md }}
+                        >
+                          <Icon name="star-outline" size={20} color="#F59E0B" />
+                        </TouchableOpacity>
+                      )}
+                      {canRemove && (
+                        <TouchableOpacity
+                          onPress={() => handleRemoveMember(memberId, member.displayName)}
+                          style={{ padding: SPACE.md }}
+                        >
+                          <Icon name="trash-outline" size={20} color="#EF4444" />
+                        </TouchableOpacity>
+                      )}
+                    </View>
+                  </View>
+                );
+              }}
+              ListEmptyComponent={
+                <View style={{ padding: 40, alignItems: 'center' }}>
+                  <Text style={{ color: c.textSecondary }}>{t('group_chat.no_members')}</Text>
+                </View>
+              }
+            />
+          </View>
+        </View>
+      </Modal>
+
+      {/* Profile Bottom Drawer */}
+      <ProfileBottomDrawer
+        isVisible={isDrawerVisible}
+        toggleModal={() => setIsDrawerVisible(false)}
+        startChat={() => {
+          setIsDrawerVisible(false);
+          // Navigate to private chat if needed
+        }}
+        selectedUser={selectedUserForDrawer}
+        isOnline={selectedUserOnline}
+        bannedUsers={bannedUsers}
+        fromPvtChat={true}
+      />
+
+      <PetModal
+        fromChat={true}
+        visible={petModalVisible}
+        onClose={() => setPetModalVisible(false)}
+        selectedFruits={selectedFruits}
+        setSelectedFruits={setSelectedFruits}
+      />
+    </GestureHandlerRootView>
+  );
+};
+
+export default GroupChatScreen;
+

@@ -1,0 +1,247 @@
+import React, { useEffect, useState, useMemo, useCallback } from 'react';
+import {
+  View,
+  Text,
+  FlatList,
+  TouchableOpacity,
+  Image,
+  StyleSheet,
+
+} from 'react-native';
+import { get, ref, remove } from '@react-native-firebase/database';
+import Icon from 'react-native-vector-icons/Ionicons';
+import config from '../../Helper/Environment';
+import { useLocalState } from '../../LocalGlobelStats';
+import { useGlobalState } from '../../GlobelStats';
+import { useTranslation } from 'react-i18next';
+import { showSuccessMessage } from '../../Helper/MessageHelper';
+import { GAME } from '../../config/game';
+import { SIZE } from '../../Design/tokens';
+import { SPACE } from '../../Design/tokens';
+
+
+const BlockedUsersScreen = () => {
+  const { user, theme, appdatabase } = useGlobalState();
+  const { localState, updateLocalState } = useLocalState();
+  const { t } = useTranslation();
+
+
+  const isDarkMode = theme === 'dark';
+  // ✅ Memoize styles
+  const styles = useMemo(() => getStyles(isDarkMode), [isDarkMode]);
+
+  const [blockedUsers, setBlockedUsers] = useState([]);
+
+  useEffect(() => {
+    let isMounted = true;
+
+    const fetchBlockedUsers = async () => {
+      if (!user?.id || !appdatabase) {
+        console.warn('⚠️ Missing required data: user ID or database instance');
+        return;
+      }
+
+      try {
+        const bannedUserIds = Array.isArray(localState?.bannedUsers) 
+          ? localState.bannedUsers 
+          : [];
+
+        if (bannedUserIds.length === 0) {
+          if (isMounted) {
+            setBlockedUsers([]);
+          }
+          return;
+        }
+
+        // ✅ OPTIMIZED: Fetch only displayName and avatar instead of full user objects
+        const userDetailsPromises = bannedUserIds.map(async (id) => {
+          if (!id) return null;
+
+          try {
+            // ✅ Fetch only the fields we need (parallel requests to specific child paths)
+            const [displayNameSnap, avatarSnap] = await Promise.all([
+              get(ref(appdatabase, `users/${id}/displayName`)).catch(() => null),
+              get(ref(appdatabase, `users/${id}/avatar`)).catch(() => null),
+            ]);
+
+            // ✅ Check if user exists (if no displayName and no avatar, user likely doesn't exist)
+            if (!displayNameSnap?.exists() && !avatarSnap?.exists()) {
+              return null;
+            }
+
+            return {
+              id,
+              displayName: displayNameSnap?.exists() ? (displayNameSnap.val()?.trim() || t('private_chat.anonymous')) : t('private_chat.anonymous'),
+              avatar: avatarSnap?.exists() ? (avatarSnap.val()?.trim() || GAME.defaultAvatar) 
+                     : GAME.defaultAvatar,
+            };
+          } catch (error) {
+            console.error(`❌ Error fetching user ${id}:`, error);
+            return null;
+          }
+        });
+
+        const resolvedUsers = await Promise.all(userDetailsPromises);
+        const validUsers = resolvedUsers.filter(user => user !== null);
+
+        if (isMounted) {
+          setBlockedUsers(validUsers);
+        }
+      } catch (error) {
+        console.error("❌ Error in fetchBlockedUsers:", error);
+        if (isMounted) {
+          setBlockedUsers([]);
+        }
+      }
+    };
+
+    fetchBlockedUsers();
+
+    return () => {
+      isMounted = false;
+    };
+  }, [user?.id, localState?.bannedUsers, appdatabase]);
+  // ✅ Memoize handleUnblockUser
+  const handleUnblockUser = useCallback(async (selectedUserId) => {
+    // ✅ Safety check
+    if (!selectedUserId) {
+      console.error('❌ Invalid user ID for unblock');
+      return;
+    }
+
+    try {
+      const currentBanned = Array.isArray(localState?.bannedUsers) ? localState.bannedUsers : [];
+      const updatedBannedUsers = currentBanned.filter(id => id !== selectedUserId);
+
+      // ✅ Update Local Storage
+      if (updateLocalState && typeof updateLocalState === 'function') {
+        await updateLocalState('bannedUsers', updatedBannedUsers);
+      }
+
+      // 🔹 Update Firebase: Unban user globally
+      if (user?.id && appdatabase) {
+        await remove(ref(appdatabase, `bannedUsers/${user.id}/${selectedUserId}`));
+      }
+
+      // ✅ Update UI immediately
+      setBlockedUsers(prevBlockedUsers => {
+        if (!Array.isArray(prevBlockedUsers)) return [];
+        return prevBlockedUsers.filter((blockedUser) => blockedUser?.id !== selectedUserId);
+      });
+
+      // ✅ Show Alert
+      showSuccessMessage(t("home.alert.success"), t("chat.user_unblocked"));
+    } catch (error) {
+      console.error('❌ Error unblocking user:', error);
+    }
+  }, [localState?.bannedUsers, updateLocalState, t]);
+
+  // ✅ Memoize renderBlockedUser
+  const renderBlockedUser = useCallback(({ item }) => {
+    // ✅ Safety checks
+    if (!item || typeof item !== 'object') return null;
+
+    const avatar = item.avatar || GAME.defaultAvatar;
+    const displayName = item.displayName || t('private_chat.anonymous');
+    const userId = item.id;
+
+    if (!userId) return null;
+
+    return (
+      <View style={styles.userContainer}>
+        <Image source={{ uri: avatar }} style={styles.avatar} />
+        <View style={styles.textContainer}>
+          <Text style={styles.userName}>{displayName}</Text>
+          <TouchableOpacity
+            style={styles.unblockButton}
+            onPress={() => handleUnblockUser(userId)}
+          >
+            <Icon name="person-remove-outline" size={20} color={isDarkMode ? 'white' : 'black'} />
+            <Text style={styles.unblockText}>{t("chat.unblock")}</Text>
+          </TouchableOpacity>
+        </View>
+      </View>
+    );
+  }, [styles, isDarkMode, handleUnblockUser, t]);
+
+  return (
+    <View style={styles.container}>
+      {blockedUsers.length === 0 ? (
+        <View style={styles.centerContainer}>
+          <Text style={styles.emptyText}>{t("chat.no_user_blocked")}</Text>
+        </View>
+      ) : (
+        <FlatList
+          data={blockedUsers}
+          keyExtractor={(item, index) => item?.id || `blocked-${index}`}
+          renderItem={renderBlockedUser}
+          showsVerticalScrollIndicator={false}
+          removeClippedSubviews={true}
+          maxToRenderPerBatch={10}
+          windowSize={10}
+        />
+      )}
+    </View>
+  );
+};
+
+export const getStyles = (isDarkMode) =>
+  StyleSheet.create({
+    container: {
+      flex: 1,
+      backgroundColor: isDarkMode ? config.colors.backgroundDark : '#f2f2f7',
+      padding: SPACE.lg,
+    },
+    centerContainer: {
+      flex: 1,
+      justifyContent: 'center',
+      alignItems: 'center',
+    },
+    emptyText: {
+      fontSize: SIZE.subtitle,
+      color: isDarkMode ? 'white' : 'black',
+      textAlign: 'center',
+    },
+    userContainer: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      marginBottom: 15,
+      padding: SPACE.lg,
+      backgroundColor: config.colors.card,
+      borderRadius: 10,
+      borderBottomWidth: 1,
+      borderColor: isDarkMode ? 'white' : 'black',
+    },
+    avatar: {
+      width: 50,
+      height: 50,
+      borderRadius: 25,
+      marginRight: SPACE.lg,
+      backgroundColor: 'white',
+    },
+    textContainer: {
+      flex: 1,
+      flexDirection: 'row',
+      justifyContent: 'space-between',
+      alignItems: 'center',
+    },
+    userName: {
+      fontSize: SIZE.subtitle,
+      color: isDarkMode ? 'white' : 'black',
+    },
+    unblockButton: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      backgroundColor: config.colors.danger,
+      paddingVertical: 5,
+      paddingHorizontal: SPACE.lg,
+      borderRadius: 5,
+    },
+    unblockText: {
+      marginLeft: 5,
+      color: isDarkMode ? 'white' : 'black',
+      fontSize: SIZE.body,
+    },
+  });
+
+export default BlockedUsersScreen;

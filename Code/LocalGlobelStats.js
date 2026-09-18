@@ -1,0 +1,364 @@
+import React, { createContext, useContext, useState, useEffect, useMemo, useCallback } from 'react';
+import { Appearance } from 'react-native';
+import { createMMKV } from 'react-native-mmkv';
+import Purchases from 'react-native-purchases';
+import config from './Helper/Environment';
+import { GAME, hasProEntitlement } from './config/game';
+import { useTranslation } from 'react-i18next';
+
+import { mixpanel } from './AppHelper/MixPenel';
+import { showErrorMessage, showSuccessMessage } from './Helper/MessageHelper';
+
+const storage = createMMKV();
+const LocalStateContext = createContext();
+
+export const useLocalState = () => useContext(LocalStateContext);
+
+export const LocalStateProvider = ({ children }) => {
+  // Initial local state
+  const safeParseJSON = (key, defaultValue) => {
+    try {
+      const value = storage.getString(key);
+      return value ? JSON.parse(value) : defaultValue;
+    } catch (error) {
+      // console.error(`🚨 JSON Parse Error for key "${key}":`, error);
+      return defaultValue; // Return a safe fallback value
+    }
+  };
+
+  const [localState, setLocalState] = useState(() => ({
+    localKey: storage.getString('localKey') || 'defaultValue',
+    reviewCount: Number(storage.getString('reviewCount')) || 0,
+    lastVersion: storage.getString('lastVersion') || 'UNKNOWN',
+    updateCount: Number(storage.getString('updateCount')) || 0,
+    featuredCount: safeParseJSON('featuredCount', { count: 0, time: null }),
+    isHaptic: storage.getBoolean('isHaptic') ?? true,
+    theme: storage.getString('theme') || 'system',
+    consentStatus: storage.getString('consentStatus') || 'UNKNOWN',
+    isPro: storage.getBoolean('isPro') ?? false,
+    fetchDataTime: storage.getString('fetchDataTime') || null,
+    data: safeParseJSON('data', {}),
+    // The Supreme catalogue. GlobalStats has written this to MMKV since the
+    // dual-feed fetch landed, but it was never rehydrated here — so on every
+    // cold start it came back undefined and stayed that way until the next
+    // network fetch finished.
+    suprime: safeParseJSON('suprime', {}),
+    // Which catalogue prices the calculator: 'mm2' | 'supreme'. The two
+    // disagree on 70% of the items they share, so this is a real preference,
+    // not a display option. See Code/Helper/valueSources.js.
+    valueSource: storage.getString('valueSource') || 'supreme',
+    // Seasonal-event config, mirrored from RTDB /events. Empty until the first
+    // fetch; the event screen falls back to its built-in estimates until then,
+    // so a cold start with no network still shows a sensible countdown.
+    events: safeParseJSON('events', {}),
+    // The feed envelope's `meta`: catalogue `generatedAt` plus the measured
+    // event schedule the Timers screen counts down from. Kept separate from
+    // `data` so nothing that reads the collections has to change.
+    feedMeta: safeParseJSON('feedMeta', {}),
+    ggData: safeParseJSON('ggData', {}),
+    codes: safeParseJSON('codes', {}),
+    normalStock: safeParseJSON('normalStock', []),
+    // My Stuff mirror (source of truth = Firestore reviews/{uid}) — read by
+    // the calculator INVENTORY tab and the chat item picker so all three
+    // surfaces share ONE list.
+    ownedPets: safeParseJSON('ownedPets', []),
+    wishlistPets: safeParseJSON('wishlistPets', []),
+    bannedUsers: safeParseJSON('bannedUsers', []),
+    isAppReady: storage.getBoolean('isAppReady') ?? false,
+    lastActivity: storage.getString('lastActivity') || null,
+    showOnBoardingScreen: storage.getBoolean('showOnBoardingScreen') ?? true,
+    user_name: storage.getString('user_name') || 'Anonymous',
+    translationUsage: safeParseJSON('translationUsage', { count: 0, date: new Date().toDateString() }),
+    favorites: safeParseJSON('favorites', []),
+    imgurl: storage.getString('imgurl') || 'https://elvebredd.com',
+    imgurlGG: storage.getString('imgurlGG') || 'https://adoptmevalues.gg',
+    isGG: storage.getBoolean('isGG') ?? false,
+    showAd1: storage.getBoolean('showAd1') ?? true,
+    postsCache: safeParseJSON('postsCache', []),
+    tradingServerLink: storage.getString('tradingServerLink') || null,
+    lastServerFetch: storage.getString('lastServerFetch') || null,
+    // When the value catalogues were last pulled. Deliberately NOT lastActivity:
+    // that key is stamped on every app launch (and mirrored to RTDB), so using
+    // it as the catalogue's TTL clock meant timeElapsed was always ~0 and a
+    // cached catalogue was never refreshed. MUST be rehydrated here -- left
+    // undefined it reads as epoch 0 and every launch refetches both feeds.
+    valuesFetchedAt: storage.getString('valuesFetchedAt') || null,
+    showFlag: storage.getBoolean('showFlag') ?? true, // ✅ Default true (show flag), user can hide to save data
+    showOnlineStatus: storage.getBoolean('showOnlineStatus') ?? true, // ✅ Default true (show online), user can hide to save Firebase costs
+    gameMusicEnabled: storage.getBoolean('gameMusicEnabled') ?? true, // ✅ Default true (music on), user can toggle off/on
+
+  }));
+
+
+  // RevenueCat states
+  const [customerId, setCustomerId] = useState(null);
+  // const [isPro, setIsPro] = useState(true); // Sync with MMKV storage
+  const [packages, setPackages] = useState([]);
+  const [mySubscriptions, setMySubscriptions] = useState([]);
+  const { t } = useTranslation();
+
+
+  // Listen for system theme changes
+  useEffect(() => {
+    if (localState.theme === 'system') {
+      const listener = Appearance.addChangeListener(({ colorScheme }) => {
+        updateLocalState('theme', colorScheme);
+      });
+      return () => listener.remove(); // Correct cleanup
+    }
+  }, [localState.theme]);
+
+  useEffect(() => {
+    if (localState.data) {
+      storage.set('data', JSON.stringify(localState.data)); // Force store
+    }
+  }, [localState.data]);
+
+  // console.log(localState.isPro)
+  // ✅ Memoize updateLocalState to prevent recreation on every render
+  const updateLocalState = useCallback((key, value) => {
+    setLocalState((prevState) => ({
+      ...prevState,
+      [key]: value,
+    }));
+
+    // Save to MMKV storage
+    if (typeof value === 'string') {
+      storage.set(key, value);
+    } else if (typeof value === 'number') {
+      storage.set(key, value.toString());
+    } else if (typeof value === 'boolean') {
+      storage.set(key, value);
+    } else if (typeof value === 'object') {
+      storage.set(key, JSON.stringify(value)); // ✅ Store objects/arrays as JSON
+    } else {
+      // console.error('🚨 MMKV supports only string, number, boolean, or JSON stringified objects.');
+    }
+  }, []); // ✅ Empty deps - function is stable, doesn't depend on any props/state
+  const canTranslate = useCallback(() => {
+    const today = new Date().toDateString();
+    const { count, date } = localState.translationUsage || { count: 0, date: today };
+
+    if (date !== today) {
+      // Reset count for new day
+      const newUsage = { count: 0, date: today };
+      updateLocalState('translationUsage', newUsage);
+      return true;
+    }
+
+    return count < 5;
+  }, [localState.translationUsage, updateLocalState]);
+  
+  // ✅ Memoize toggleAd to prevent recreation on every render
+  const toggleAd = useCallback(() => {
+    const newAdState = !localState.showAd1;
+    updateLocalState('showAd1', newAdState);
+    return newAdState;
+  }, [localState.showAd1, updateLocalState]);
+
+  const incrementTranslationCount = useCallback(() => {
+    const today = new Date().toDateString();
+    const { count, date } = localState.translationUsage || { count: 0, date: today };
+
+    const updatedUsage = {
+      count: date === today ? count + 1 : 1,
+      date: today,
+    };
+
+    updateLocalState('translationUsage', updatedUsage);
+  }, [localState.translationUsage, updateLocalState]);
+
+
+  // console.log(localState.data)
+  // console.log(isPro)
+  // Initialize RevenueCat
+  const initRevenueCat = async () => {
+    try {
+      await Purchases.configure({ apiKey: config.apiKey, usesStoreKit2IfAvailable: false });
+      const userID = await Purchases.getAppUserID();
+      setCustomerId(userID);
+
+      // Run these in parallel for better performance
+      await Promise.all([
+        fetchOfferings().catch(error => {
+          // console.error('❌ Error fetching offerings:', error.message);
+          return null; // Return null instead of throwing
+        }),
+        checkEntitlements().catch(error => {
+          // console.error('❌ Error checking entitlements:', error.message);
+          return null; // Return null instead of throwing
+        })
+      ]);
+    } catch (error) {
+      // console.error('❌ Error initializing RevenueCat:', error.message);
+      // Set a default state in case of failure
+      setCustomerId(null);
+      setPackages([]);
+      setMySubscriptions([]);
+    }
+  };
+  useEffect(() => {
+    const timeoutId = setTimeout(() => {
+      initRevenueCat();
+    }, 0);
+    return () => clearTimeout(timeoutId);
+  }, []);
+
+  // console.log(isPro)
+  // Fetch available subscriptions
+  const fetchOfferings = async () => {
+    try {
+      // No RevenueCat products for this app yet — see Code/config/game.js.
+      // Without this, every launch logs a NetworkError/offerings failure.
+      if (!GAME.subscriptionsEnabled) return;
+      // ✅ Guard: skip if billing is unavailable (e.g. emulator)
+      const canPay = await Purchases.canMakePayments().catch(() => false);
+      if (!canPay) {
+        console.warn('⚠️ Billing unavailable — skipping fetchOfferings');
+        return;
+      }
+      const offerings = await Purchases.getOfferings();
+      if (offerings.current?.availablePackages?.length > 0) {
+        setPackages(offerings.current.availablePackages);
+      } else {
+        console.warn('⚠️ No offerings found in RevenueCat.');
+      }
+    } catch (error) {
+      console.error('❌ Fetch Offerings Error:', error.message);
+    }
+  };
+
+// console.log(packages)
+
+
+  const restorePurchases = async (setLoadingReStore) => {
+    setLoadingReStore(true);
+    try {
+      const customerInfo = await Purchases.restorePurchases();
+      const entitlements = customerInfo.entitlements.active;
+      const proStatus = hasProEntitlement(entitlements);
+
+      updateLocalState('isPro', proStatus);
+      setMySubscriptions(
+        proStatus
+          ? customerInfo.activeSubscriptions.map((plan) => ({
+            plan,
+            expiry: customerInfo.allExpirationDates[plan] || null,
+          }))
+          : []
+      );
+    } catch (error) {
+      // console.error('❌ Restore Purchases Error:', error);
+    } finally {
+      setLoadingReStore(false); // Ensure loading state resets
+    }
+  };
+
+
+  // Check if the user has an active subscription
+  const checkEntitlements = async () => {
+    try {
+      const canPay = await Purchases.canMakePayments().catch(() => false);
+      if (!canPay) return;
+      const customerInfo = await Purchases.getCustomerInfo();
+      const entitlements = customerInfo.entitlements.active;
+      // console.log(customerInfo.activeSubscriptions)
+      const proStatus = hasProEntitlement(entitlements);
+      if (proStatus) {
+        updateLocalState('isPro', proStatus); // Persist Pro status in MMKV
+        const activePlansWithExpiry = customerInfo.activeSubscriptions.map((subscription) => ({
+          plan: subscription,
+          expiry: customerInfo.allExpirationDates[subscription],
+        }));
+        setMySubscriptions(activePlansWithExpiry);
+      }
+    } catch (error) {
+      // console.error('❌ Error checking entitlements:', error);
+    }
+  };
+  // Handle in-app purchase
+  const purchaseProduct = async (packageToPurchase, setLoading, track) => {
+    setLoading(true);
+    try {
+      const { customerInfo } = await Purchases.purchasePackage(packageToPurchase);
+      const entitlements = customerInfo.entitlements.active;
+      const proStatus = hasProEntitlement(entitlements);
+
+      updateLocalState('isPro', proStatus);
+      setMySubscriptions(
+        proStatus
+          ? customerInfo.activeSubscriptions.map((plan) => ({
+            plan,
+            expiry: customerInfo.allExpirationDates[plan] || null,
+          }))
+          : []
+      );
+
+      if (track) {
+        mixpanel.track('Purchase Completed', {
+          package: packageToPurchase.identifier,
+          price: packageToPurchase.product.price,
+          currency: packageToPurchase.product.currencyCode,
+        });
+      }
+
+      showSuccessMessage("Success", "Purchase completed successfully!");
+    } catch (error) {
+      if (!error.userCancelled) {
+        // console.error('❌ Purchase Error:', error);
+        showErrorMessage("Error", "Failed to complete purchase. Please try again.");
+      }
+    } finally {
+      setLoading(false);
+    }
+  };
+
+ 
+  // Clear a specific key
+  const clearKey = useCallback((key) => {
+    setLocalState((prevState) => {
+      const newState = { ...prevState };
+      delete newState[key];
+      return newState;
+    });
+
+    storage.delete(key);
+  }, []);
+
+  // Clear all local state and MMKV storage
+  const clearAll = useCallback(() => {
+    setLocalState({});
+    storage.clearAll();
+  }, []);
+
+  const getRemainingTranslationTries = useCallback(() => {
+    const today = new Date().toDateString();
+    const { count = 0, date = today } = localState.translationUsage || {};
+    return date === today ? 5 - count : 5;
+  }, [localState.translationUsage]);
+
+
+  const contextValue = useMemo(
+    () => ({
+      localState,
+      updateLocalState,
+      clearKey,
+      clearAll,
+      customerId,
+      packages,
+      mySubscriptions,
+      purchaseProduct,
+      restorePurchases,
+      canTranslate,
+      incrementTranslationCount,
+      getRemainingTranslationTries, toggleAd
+    }),
+    [localState, customerId, packages, mySubscriptions, updateLocalState, canTranslate, incrementTranslationCount, getRemainingTranslationTries, toggleAd, clearKey, clearAll]
+  );
+
+  return (
+    <LocalStateContext.Provider value={contextValue}>
+      {children}
+    </LocalStateContext.Provider>
+  );
+};

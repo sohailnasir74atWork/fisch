@@ -1,0 +1,563 @@
+import React, { useCallback, useEffect, useState } from 'react';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
+import {
+  Modal,
+  View,
+  Text,
+  StyleSheet,
+  TextInput,
+  TouchableOpacity,
+  Pressable,
+  ActivityIndicator,
+  Platform,
+  Image,
+  Alert,
+} from 'react-native';
+import { GoogleSignin } from '@react-native-google-signin/google-signin';
+import Icon from 'react-native-vector-icons/FontAwesome';
+import appleAuth, { AppleButton } from '@invertase/react-native-apple-authentication';
+import { useHaptic } from '../Helper/HepticFeedBack';
+import { useGlobalState } from '../GlobelStats';
+import ConditionalKeyboardWrapper from '../Helper/keyboardAvoidingContainer';
+import { useTranslation } from 'react-i18next';
+import { showSuccessMessage, showErrorMessage, showWarningMessage } from '../Helper/MessageHelper';
+import { mixpanel } from '../AppHelper/MixPenel';
+import { requestPermission } from '../Helper/PermissionCheck';
+import config from '../Helper/Environment';
+// import { showMessage } from 'react-native-flash-message';
+
+import { getApp } from '@react-native-firebase/app';
+import { STATUS } from '../Design/tokens';
+import { SIZE } from '../Design/tokens';
+import { SPACE } from '../Design/tokens';
+import { GOOGLE_WEB_CLIENT_ID } from '../config/game';
+import { FONT } from '../Design/tokens';
+import {
+  getAuth,
+  sendPasswordResetEmail,
+  signInWithEmailAndPassword,
+  createUserWithEmailAndPassword,
+  signInWithCredential,
+  GoogleAuthProvider,
+  AppleAuthProvider,
+  signOut,
+} from '@react-native-firebase/auth';
+
+const SignInDrawer = ({ visible, onClose, selectedTheme, message, screen }) => {
+  const insets = useSafeAreaInsets();
+  const [email, setEmail] = useState('');
+  const [password, setPassword] = useState('');
+  const [isRegisterMode, setIsRegisterMode] = useState(false);
+  const [isLoading, setIsLoading] = useState(false);            // Google / reset
+  const [isLoadingSecondary, setIsLoadingSecondary] = useState(false); // email/pass
+  const [robloxUsernameError, setRobloxUsernameError] = useState('');
+  const [robloxUsernamelocal, setRobloxUsernamelocal] = useState();
+  const [isForgotPasswordMode, setIsForgotPasswordMode] = useState(false);
+
+  const { triggerHapticFeedback } = useHaptic();
+  const { theme, robloxUsernameRef } = useGlobalState();
+  const { t } = useTranslation();
+
+  // 🔐 Modular Auth instance
+  const app = getApp();
+  const auth = getAuth(app);
+
+  const isDarkMode = theme === 'dark';
+
+  useEffect(() => {
+    robloxUsernameRef.current = robloxUsernamelocal;
+  }, [robloxUsernamelocal, robloxUsernameRef]);
+
+  useEffect(() => {
+    GoogleSignin.configure({
+      // Read from config rather than hardcoding. The literal that used to sit
+      // here belonged to project 312806709908 — a different Firebase project,
+      // inherited with the fork. Sign-In matches package + certificate +
+      // client id, so a foreign client id fails with DEVELOPER_ERROR however
+      // many fingerprints are registered, and the error names none of that.
+      webClientId: GOOGLE_WEB_CLIENT_ID,
+      offlineAccess: true,
+    });
+  }, []);
+
+  useEffect(() => {
+    if (!appleAuth.isSupported) return;
+
+    return appleAuth.onCredentialRevoked(async () => {
+      try {
+        await signOut(auth);
+        showWarningMessage('Session Expired', 'Please sign in again.');
+      } catch (e) {
+        // Error during signOut on Apple revoke
+      }
+    });
+  }, [auth]);
+
+  const handleForgotPassword = async () => {
+    if (!email) {
+      Alert.alert(t('home.alert.error'), 'Enter valid email address');
+      return;
+    }
+
+    const isValidEmail = (em) => /\S+@\S+\.\S+/.test(em);
+    if (!isValidEmail(email)) {
+      Alert.alert(t('home.alert.error'), t('signin.error_input_message'));
+      return;
+    }
+
+    setIsLoading(true);
+    try {
+      await sendPasswordResetEmail(auth, email);
+      showSuccessMessage(t('home.alert.success'), t('signin.password_reset_email_sent'));
+      setIsForgotPasswordMode(false);
+    } catch (error) {
+      showErrorMessage(
+        t('home.alert.error'),
+        error?.message || t('signin.error_reset_password')
+      );
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  const onAppleButtonPress = useCallback(async () => {
+    triggerHapticFeedback('impactLight');
+
+    try {
+      const { identityToken, nonce } = await appleAuth.performRequest({
+        requestedOperation: appleAuth.Operation.LOGIN,
+        requestedScopes: [appleAuth.Scope.FULL_NAME, appleAuth.Scope.EMAIL],
+      });
+
+      if (!identityToken) throw new Error(t('signin.error_apple_token'));
+
+      const appleCredential = AppleAuthProvider.credential(identityToken, nonce);
+      await signInWithCredential(auth, appleCredential);
+
+      showSuccessMessage(t('home.alert.success'), t('signin.success_signin'));
+      setTimeout(onClose, 200);
+      mixpanel.track(`Login with apple from ${screen}`);
+      await requestPermission();
+    } catch (error) {
+      showErrorMessage(
+        t('home.alert.error'),
+        error?.message || t('signin.error_signin_message')
+      );
+    }
+  }, [auth, t, triggerHapticFeedback, onClose, screen]);
+
+  const handleSignInOrRegister = async () => {
+    triggerHapticFeedback('impactLight');
+
+    if (!email || !password) {
+      Alert.alert(t('home.alert.error'), t('signin.error_input_message'));
+      return;
+    }
+
+    const isValidEmail = (em) => /\S+@\S+\.\S+/.test(em);
+    if (!isValidEmail(email)) {
+      Alert.alert(t('home.alert.error'), t('signin.error_input_message'));
+      return;
+    }
+
+    setIsLoadingSecondary(true);
+
+    try {
+      if (isRegisterMode) {
+        // 🔐 Register new user
+        const userCredential = await createUserWithEmailAndPassword(auth, email, password);
+        const user = userCredential.user;
+
+        if (!user.emailVerified) {
+          await user.sendEmailVerification();
+          await signOut(auth);
+
+          Alert.alert(
+            '✅ Account Created',
+            "Please check your inbox to verify your email. If you don't see it, check the Spam or Promotions folder."
+          );
+          return;
+        }
+      } else {
+        // 🔐 Login existing user
+        const userCredential = await signInWithEmailAndPassword(auth, email, password);
+        const user = userCredential.user;
+
+        if (!user.emailVerified) {
+          await user.sendEmailVerification();
+          await signOut(auth);
+
+          Alert.alert(
+            '📩 Email Not Verified',
+            'A new verification link has been sent to your email. Please check your inbox or spam folder before signing in.'
+          );
+          return;
+        }
+
+        mixpanel.track(`Login with email from ${screen}`);
+        Alert.alert(t('signin.alert_welcome_back'), t('signin.success_signin'));
+        await requestPermission();
+        setTimeout(onClose, 200);
+      }
+    } catch (error) {
+      // Error handling for login
+
+      let errorMessage = t('signin.error_signin_message');
+
+      if (error?.code === 'auth/invalid-email') errorMessage = t('signin.error_invalid_email_format');
+      else if (error?.code === 'auth/user-disabled') errorMessage = t('signin.error_user_disabled');
+      else if (error?.code === 'auth/user-not-found') errorMessage = t('signin.error_user_not_found');
+      else if (error?.code === 'auth/wrong-password') errorMessage = t('signin.error_wrong_password');
+      else if (error?.code === 'auth/email-already-in-use') errorMessage = t('signin.error_email_in_use');
+      else if (error?.code === 'auth/weak-password') errorMessage = t('signin.error_weak_password');
+      // The network case was unmapped, so a blocked/throttled connection looked
+      // identical to a wrong password.
+      else if (error?.code === 'auth/network-request-failed') {
+        errorMessage = t('signin.error_network', {
+          defaultValue: 'We couldn\'t reach the sign-in server. Check your connection and try again. If Google services are restricted on your network, try email sign-in or a different connection.',
+        });
+      }
+
+      Alert.alert(t('signin.error_signin_message'), errorMessage);
+    } finally {
+      setIsLoadingSecondary(false);
+    }
+  };
+
+  const handleGoogleSignIn = useCallback(async () => {
+    triggerHapticFeedback('impactLight');
+
+    try {
+      setIsLoading(true);
+      await GoogleSignin.hasPlayServices({ showPlayServicesUpdateDialog: true });
+      const signInResult = await GoogleSignin.signIn();
+      const idToken = signInResult?.idToken || signInResult?.data?.idToken;
+      if (!idToken) throw new Error(t('signin.error_signin_message'));
+
+      const googleCredential = GoogleAuthProvider.credential(idToken);
+      await signInWithCredential(auth, googleCredential);
+
+      showSuccessMessage(t('signin.alert_welcome_back'), t('signin.success_signin'));
+      setTimeout(onClose, 200);
+      mixpanel.track(`Login with google from ${screen}`);
+      await requestPermission();
+    } catch (error) {
+      // Every Google failure used to render the same "unexpected error", which
+      // told users nothing. The two common real causes are (a) no/outdated
+      // Google Play Services — widespread on devices in regions where Google
+      // services are restricted — and (b) the request never reaching Google.
+      // Both are recoverable by signing in with email instead, so say so.
+      const code = error?.code;
+      const msg = String(error?.message || '');
+
+      if (code === '12501' || code === 12501 || /cancel/i.test(msg)) {
+        return; // user backed out — not an error worth a toast
+      }
+
+      const noPlayServices =
+        code === '2' || code === 2 || /play\s*services/i.test(msg);
+      const networkish =
+        /network|timeout|unreachable|failed to connect|ETIMEDOUT|ENOTFOUND/i.test(msg) ||
+        code === 'auth/network-request-failed';
+
+      if (noPlayServices) {
+        showErrorMessage(
+          t('signin.error_google_unavailable_title', { defaultValue: 'Google sign-in unavailable' }),
+          t('signin.error_google_unavailable', {
+            defaultValue: 'Google Play Services isn\'t available on this device. Please sign in with email instead — tap "Sign in with Email" below.',
+          })
+        );
+      } else if (networkish) {
+        showErrorMessage(
+          t('signin.error_network_title', { defaultValue: 'Connection problem' }),
+          t('signin.error_network', {
+            defaultValue: 'We couldn\'t reach the sign-in server. Check your connection and try again. If Google services are restricted on your network, try email sign-in or a different connection.',
+          })
+        );
+      } else {
+        showErrorMessage(
+          t('signin.error_google_signin', { defaultValue: 'Google Sign-In Error' }),
+          error?.message || t('signin.error_signin_message')
+        );
+      }
+    } finally {
+      setIsLoading(false);
+    }
+  }, [auth, t, triggerHapticFeedback, onClose, screen]);
+
+  return (
+    <Modal visible={visible} animationType="slide" transparent onRequestClose={onClose}>
+      <Pressable style={styles.modalOverlay} onPress={onClose} />
+      <ConditionalKeyboardWrapper>
+        <Pressable onPress={() => {}}>
+          {/* paddingBottom: this sheet is position:absolute bottom:0, so without
+              the inset its last row ('Switch to Register') sits on the gesture bar. */}
+          <View style={[styles.drawer, { backgroundColor: isDarkMode ? config.colors.surfaceDark : config.colors.surfaceLight, paddingBottom: insets.bottom }]}>
+            <Text style={[styles.title, { color: selectedTheme.colors.text }]}>
+              {isRegisterMode
+                ? t('signin.title_register')
+                : isForgotPasswordMode
+                ? 'Forget Password'
+                : t('signin.title_signin')}
+            </Text>
+
+            <View>
+              <Text style={[styles.text, { color: selectedTheme.colors.text }]}>{message}</Text>
+            </View>
+
+            {/* Email / Password fields */}
+            {!isForgotPasswordMode && (
+              <>
+                <TextInput
+                  style={[
+                    styles.input, 
+                    { 
+                      color: selectedTheme.colors.text,
+                      backgroundColor: isDarkMode ? config.colors.surfaceDark : config.colors.surfaceLight,
+                      borderColor: isDarkMode ? config.colors.borderDark : config.colors.borderLight,
+                    }
+                  ]}
+                  placeholder={t('signin.placeholder_email')}
+                  value={email}
+                  onChangeText={setEmail}
+                  keyboardType="email-address"
+                  autoCapitalize="none"
+                  placeholderTextColor={isDarkMode ? config.colors.placeholderDark : config.colors.placeholderLight}
+                />
+
+                <TextInput
+                  style={[
+                    styles.input, 
+                    { 
+                      color: selectedTheme.colors.text,
+                      backgroundColor: isDarkMode ? config.colors.surfaceDark : config.colors.surfaceLight,
+                      borderColor: isDarkMode ? config.colors.borderDark : config.colors.borderLight,
+                    }
+                  ]}
+                  placeholder={t('signin.placeholder_password')}
+                  value={password}
+                  onChangeText={setPassword}
+                  secureTextEntry
+                  placeholderTextColor={isDarkMode ? config.colors.placeholderDark : config.colors.placeholderLight}
+                />
+              </>
+            )}
+
+            {isForgotPasswordMode && (
+              <TextInput
+                style={[
+                  styles.input, 
+                  { 
+                    color: selectedTheme.colors.text,
+                    backgroundColor: isDarkMode ? config.colors.surfaceDark : config.colors.surfaceLight,
+                    borderColor: isDarkMode ? config.colors.borderDark : config.colors.borderLight,
+                  }
+                ]}
+                placeholder={t('signin.placeholder_email')}
+                value={email}
+                onChangeText={setEmail}
+                keyboardType="email-address"
+                autoCapitalize="none"
+                placeholderTextColor={isDarkMode ? config.colors.placeholderDark : config.colors.placeholderLight}
+              />
+            )}
+
+            <TouchableOpacity
+              style={[styles.secondaryButton, { alignItems: 'flex-end', paddingBottom: SPACE.lg }]}
+              onPress={() => setIsForgotPasswordMode(!isForgotPasswordMode)}
+            >
+              <Text style={[
+                styles.secondaryButtonText,
+                { color: isDarkMode ? config.colors.linkDark : config.colors.linkLight }
+              ]}>
+                {isForgotPasswordMode ? 'Signin Mode' : 'Forgetpassword Mode'}
+              </Text>
+            </TouchableOpacity>
+
+            {isForgotPasswordMode ? (
+              <TouchableOpacity
+                style={styles.primaryButton}
+                onPress={handleForgotPassword}
+                disabled={isLoading}
+              >
+                {isLoading ? (
+                  <ActivityIndicator size="small" color="white" />
+                ) : (
+                  <Text style={styles.primaryButtonText}>Send Reset Link</Text>
+                )}
+              </TouchableOpacity>
+            ) : (
+              <TouchableOpacity
+                style={styles.primaryButton}
+                onPress={handleSignInOrRegister}
+                disabled={isLoadingSecondary}
+              >
+                {isLoadingSecondary ? (
+                  <ActivityIndicator size="small" color="white" />
+                ) : (
+                  <Text style={styles.primaryButtonText}>
+                    {isRegisterMode ? t('signin.title_register') : t('signin.title_signin')}
+                  </Text>
+                )}
+              </TouchableOpacity>
+            )}
+
+<View style={styles.container}>
+  <View style={[
+    styles.line, 
+    { backgroundColor: isDarkMode ? config.colors.dividerDark : config.colors.dividerLight }
+  ]} />
+  <Text style={[styles.textoR, { color: selectedTheme.colors.text }]}>
+    {t('signin.or')}
+  </Text>
+  <View style={[
+    styles.line, 
+    { backgroundColor: isDarkMode ? config.colors.dividerDark : config.colors.dividerLight }
+  ]} />
+</View>
+
+            <TouchableOpacity
+              style={styles.googleButton}
+              onPress={handleGoogleSignIn}
+              disabled={isLoading}
+            >
+              {isLoading ? (
+                <ActivityIndicator size="small" color="white" />
+              ) : (
+                <>
+                  <Icon name="google" size={20} color="white" style={styles.googleIcon} />
+                  <Text style={styles.googleButtonText}>{t('signin.google_signin')}</Text>
+                </>
+              )}
+            </TouchableOpacity>
+
+            {Platform.OS === 'ios' && (
+              <AppleButton
+                buttonStyle={
+                  isDarkMode ? AppleButton.Style.WHITE : AppleButton.Style.BLACK
+                }
+                buttonType={AppleButton.Type.SIGN_IN}
+                style={styles.applebUUTON}
+                onPress={onAppleButtonPress}
+              />
+            )}
+
+            <TouchableOpacity
+              style={styles.secondaryButton}
+              onPress={() => {
+                if (!isForgotPasswordMode) {
+                  setIsRegisterMode(!isRegisterMode);
+                }
+              }}
+            >
+              <Text style={[
+                styles.secondaryButtonText,
+                { color: isDarkMode ? config.colors.linkDark : config.colors.linkLight }
+              ]}>
+                {isRegisterMode
+                  ? t('signin.button_switch_signin')
+                  : t('signin.button_switch_register')}
+              </Text>
+            </TouchableOpacity>
+          </View>
+        </Pressable>
+      </ConditionalKeyboardWrapper>
+    </Modal>
+  );
+};
+
+const styles = StyleSheet.create({
+  modalOverlay: {
+    flex: 1,
+    backgroundColor: 'rgba(0,0,0,0.5)',
+  },
+  drawer: {
+    borderTopLeftRadius: 10,
+    borderTopRightRadius: 10,
+    paddingHorizontal: SPACE.xxxl,
+    paddingTop: SPACE.xxxl,
+    position: 'absolute',
+    bottom: 0,
+    left: 0,
+    right: 0,
+  },
+  title: {
+    fontSize: SIZE.subtitle,
+    fontFamily: FONT.bold,
+    textAlign: 'center',
+  },
+  input: {
+    width: '100%',
+    height: 40,
+    borderWidth: 1,
+    borderRadius: 5,
+    paddingHorizontal: SPACE.lg,
+    marginTop: 15,
+  },
+  primaryButton: {
+    backgroundColor: STATUS.primary,
+    padding: SPACE.lg,
+    borderRadius: 5,
+    alignItems: 'center',
+  },
+  primaryButtonText: {
+    color: 'white',
+    fontFamily: FONT.bold,
+  },
+  secondaryButton: {
+    padding: SPACE.lg,
+    alignItems: 'center',
+  },
+  secondaryButtonText: {
+    textDecorationLine: 'underline',
+  },
+  googleButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: '#DB4437',
+    padding: SPACE.lg,
+    borderRadius: 5,
+    marginBottom: SPACE.lg,
+    height: 40,
+  },
+  applebUUTON: {
+    height: 40,
+    width: '100%',
+  },
+  googleIcon: {
+    marginRight: SPACE.lg,
+  },
+  googleButtonText: {
+    color: 'white',
+    fontSize: SIZE.subtitle,
+    fontFamily: FONT.bold,
+  },
+  text: {
+    alignSelf: 'center',
+    fontSize: SIZE.caption,
+    paddingVertical: 3,
+    marginBottom: SPACE.lg,
+  },
+  container: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginVertical: SPACE.lg,
+  },
+  line: {
+    flex: 1,
+    height: 1,
+  },
+  textoR: {
+    marginHorizontal: SPACE.lg,
+    fontSize: SIZE.subtitle,
+    fontFamily: FONT.bold,
+  },
+  errorText: {
+    fontSize: SIZE.caption,
+    marginTop: 5,
+    marginLeft: 5,
+  },
+});
+
+export default SignInDrawer;

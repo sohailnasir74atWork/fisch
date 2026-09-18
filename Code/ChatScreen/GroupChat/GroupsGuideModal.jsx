@@ -1,0 +1,198 @@
+import React, { useMemo } from 'react';
+import {
+  Modal,
+  View,
+  Text,
+  TouchableOpacity,
+  ScrollView,
+  StyleSheet,
+} from 'react-native';
+import Icon from 'react-native-vector-icons/Ionicons';
+import { useGlobalState } from '../../GlobelStats';
+import config from '../../Helper/Environment';
+import { getThemeColors } from '../../Helper/themeColors';
+import { SIZE } from '../../Design/tokens';
+import { SPACE } from '../../Design/tokens';
+import { FONT } from '../../Design/tokens';
+
+const GroupsGuideModal = ({ visible, onClose }) => {
+  const { theme } = useGlobalState();
+  const isDarkMode = theme === 'dark';
+  const c = getThemeColors(isDarkMode);
+
+  const styles = useMemo(() => getStyles(isDarkMode), [isDarkMode]);
+
+  return (
+    <Modal
+      animationType="slide"
+      transparent={true}
+      visible={visible}
+      onRequestClose={onClose}
+    >
+      <View style={styles.overlay}>
+        <View style={[styles.modalContent, { backgroundColor: isDarkMode ? config.colors.surfaceDark : '#FFFFFF' }]}>
+          {/* Header */}
+          <View style={styles.modalHeader}>
+            <Text style={[styles.modalTitle, { color: c.text }]}>
+              Groups Guide
+            </Text>
+            <TouchableOpacity onPress={onClose} style={styles.closeButton}>
+              <Icon name="close-circle" size={28} color={isDarkMode ? '#9CA3AF' : '#6B7280'} />
+            </TouchableOpacity>
+          </View>
+
+          {/* Content */}
+          <ScrollView 
+            showsVerticalScrollIndicator={false} 
+            style={styles.scrollContainer}
+            contentContainerStyle={styles.scrollContent}
+          >
+            <View style={styles.section}>
+              <View style={styles.iconContainer}>
+                <Icon name="people" size={24} color={config.colors.primary} />
+              </View>
+              <Text style={[styles.sectionTitle, { color: c.text }]}>
+                How to Create a Group
+              </Text>
+              <Text style={[styles.sectionText, { color: c.textSecondary }]}>
+                1. Go to the main Chat screen and tap the plus icon (+) in the header.{'\n\n'}
+                2. Select members from the online users list (you can select multiple users by tapping on them).{'\n\n'}
+                3. Tap "Create" or "Add" button at the top (it will show "Create" if you don't have a group, or "Add" if you already have a group).{'\n\n'}
+                4. If creating a new group, enter a group name (required, max 50 characters) in the modal that appears.{'\n\n'}
+                5. Tap "Create Group" to finalize.{'\n\n'}
+                6. Selected members will receive invitations to join your group.
+              </Text>
+            </View>
+
+            <View style={styles.divider} />
+
+            <View style={styles.section}>
+              <View style={styles.iconContainer}>
+                <Icon name="information-circle" size={24} color={config.colors.primary} />
+              </View>
+              <Text style={[styles.sectionTitle, { color: c.text }]}>
+                Important Rules
+              </Text>
+              <Text style={[styles.sectionText, { color: c.textSecondary }]}>
+                • <Text style={styles.boldText}>One Group Limit:</Text> Each user can only be an admin/creator of one group at a time.{'\n\n'}
+                • <Text style={styles.boldText}>Minimum Members:</Text> A group must have at least 2 members (including yourself).{'\n\n'}
+                • <Text style={styles.boldText}>Maximum Members:</Text> Each group can have up to 50 members.{'\n\n'}
+                • <Text style={styles.boldText}>Group Admin:</Text> The creator is the admin. Admins can remove members and make other members admin.{'\n\n'}
+                • <Text style={styles.boldText}>Admin Transfer:</Text> If an admin (not creator) makes another member admin, they will revert to a regular member. The creator always remains admin.{'\n\n'}
+                • <Text style={styles.boldText}>Leaving Groups:</Text> Members can leave at any time. If an admin/creator leaves, a new admin is randomly selected. If the last member leaves, the group is deleted.{'\n\n'}
+                • <Text style={styles.boldText}>Invitations:</Text> Members must accept invitations before they can join.
+              </Text>
+            </View>
+
+            <View style={styles.divider} />
+
+            <View style={styles.section}>
+              <View style={styles.iconContainer}>
+                <Icon name="chatbubbles" size={24} color={config.colors.primary} />
+              </View>
+              <Text style={[styles.sectionTitle, { color: c.text }]}>
+                Group Features
+              </Text>
+              <Text style={[styles.sectionText, { color: c.textSecondary }]}>
+                • Send text messages, images, and pets (up to 18 pets per message).{'\n\n'}
+                • See who's online in your group.{'\n\n'}
+                • View group members and their roles.{'\n\n'}
+                • Receive notifications for new messages when you're not active in the chat.
+              </Text>
+            </View>
+          </ScrollView>
+
+          {/* Close Button */}
+          <TouchableOpacity
+            style={[styles.gotItButton, { backgroundColor: config.colors.primary }]}
+            onPress={onClose}
+          >
+            <Text style={styles.gotItButtonText}>Got It!</Text>
+          </TouchableOpacity>
+        </View>
+      </View>
+    </Modal>
+  );
+};
+
+const getStyles = (isDarkMode, c = getThemeColors(isDarkMode)) =>
+  StyleSheet.create({
+    overlay: {
+      flex: 1,
+      backgroundColor: 'rgba(0, 0, 0, 0.5)',
+      justifyContent: 'center',
+      alignItems: 'center',
+    },
+    modalContent: {
+      width: '90%',
+      height: '85%',
+      borderRadius: 20,
+      padding: SPACE.xxxl,
+      shadowColor: c.shadow,
+      shadowOffset: { width: 0, height: 2 },
+      shadowOpacity: 0.25,
+      shadowRadius: 4,
+      elevation: 5,
+      justifyContent: 'space-between',
+    },
+    modalHeader: {
+      flexDirection: 'row',
+      justifyContent: 'space-between',
+      alignItems: 'center',
+      marginBottom: SPACE.xxxl,
+    },
+    modalTitle: {
+      fontSize: SIZE.title,
+      fontFamily: FONT.bold,
+    },
+    closeButton: {
+      padding: SPACE.xs,
+    },
+    scrollContainer: {
+      flex: 1,
+      marginBottom: SPACE.xxxl,
+    },
+    scrollContent: {
+      paddingBottom: SPACE.lg,
+    },
+    section: {
+      marginBottom: SPACE.xxxl,
+    },
+    iconContainer: {
+      marginBottom: SPACE.xl,
+    },
+    sectionTitle: {
+      fontSize: SIZE.subtitle,
+      fontFamily: FONT.bold,
+      marginBottom: SPACE.xl,
+    },
+    sectionText: {
+      fontSize: SIZE.body,
+      fontFamily: FONT.regular,
+      lineHeight: 22,
+    },
+    boldText: {
+      fontFamily: FONT.bold,
+      color: config.colors.primary,
+    },
+    divider: {
+      height: 1,
+      backgroundColor: isDarkMode ? config.colors.surfaceElevatedDark : '#E5E7EB',
+      marginVertical: SPACE.xxxl,
+    },
+    gotItButton: {
+      paddingVertical: 14,
+      paddingHorizontal: 30,
+      borderRadius: 10,
+      alignItems: 'center',
+      marginTop: SPACE.lg,
+    },
+    gotItButtonText: {
+      color: c.textInverse,
+      fontSize: SIZE.subtitle,
+      fontFamily: FONT.bold,
+    },
+  });
+
+export default GroupsGuideModal;
+
