@@ -42,6 +42,7 @@ import ProfileBottomDrawer from '../ChatScreen/GroupChat/BottomDrawer';
 import { GAME } from '../config/game';
 import { STATUS } from './tokens';
 import { FONT } from './tokens';
+import { ModalKeyboardView } from '../Helper/keyboardAvoidingContainer';
 
 const { width: SCREEN_WIDTH, height: SCREEN_HEIGHT } = Dimensions.get('window');
 const BUBBLE_SIZE = 64;
@@ -1146,7 +1147,7 @@ const StatusFeed = ({ user, firestoreDB, appdatabase, isDarkMode, onRequireSignI
 
       {/* ── Status Creator Modal ── */}
       <Modal visible={showCreator} transparent animationType="slide" onRequestClose={() => setShowCreator(false)}>
-        <View style={styles.creatorOverlay}>
+        <ModalKeyboardView style={styles.creatorOverlay}>
           <View style={[styles.creatorCard, { backgroundColor: isDarkMode ? config.colors.surfaceDark : '#FFF' }]}>
             <View style={styles.creatorHeader}>
               <Text style={[styles.creatorTitle, { color: textColor }]}>New Status</Text>
@@ -1203,7 +1204,7 @@ const StatusFeed = ({ user, firestoreDB, appdatabase, isDarkMode, onRequireSignI
               )}
             </TouchableOpacity>
           </View>
-        </View>
+        </ModalKeyboardView>
       </Modal>
     </View>
   );

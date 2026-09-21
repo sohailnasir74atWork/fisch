@@ -31,7 +31,6 @@ import { useTranslation } from 'react-i18next';
 import { mixpanel } from '../../AppHelper/MixPenel';
 import InterstitialAdManager from '../../Ads/IntAd';
 import BannerAdComponent from '../../Ads/bannerAds';
-import { BANNER_HEIGHT } from '../../Helper/floatingButtonLayout';
 import { logoutUser } from '../../Firebase/UserLogics';
 import { showMessage } from 'react-native-flash-message';
 import config from '../../Helper/Environment';
@@ -98,7 +97,7 @@ const bannerBottomPos = 0; // tab bar is docked (in layout flow), so screen bott
 // Is the banner actually showing an ad right now? The spacer below the input
 // used to reserve the banner's height unconditionally, so a no-fill (or a Pro
 // user) left a dead gap between the message input and the tab bar.
-const [isBannerShowing, setIsBannerShowing] = useState(false);
+const [bannerHeight, setBannerHeight] = useState(0); // measured, 0 when no ad is on screen
 
   // ✅ Track last sent message to prevent duplicates (session-based, no Firebase cost)
   const lastSentMessageRef = useRef(null);
@@ -854,7 +853,7 @@ const handleSendMessage = async (replyToArg, trimmedInputArg, fruits, emojiUrl) 
               fill (or on Pro) the banner occupies nothing, and the tab bar is
               docked in the layout flow, so anything reserved here is dead space
               between the message input and the tab bar. */}
-          <View style={{ height: isBannerShowing ? bannerBottomPos + BANNER_HEIGHT : 0 }} />
+          <View style={{ height: bannerHeight ? bannerBottomPos + bannerHeight : 0 }} />
 
           <SignInDrawer
             visible={isSigninDrawerVisible}
@@ -876,7 +875,7 @@ const handleSendMessage = async (replyToArg, trimmedInputArg, fruits, emojiUrl) 
       </GestureHandlerRootView>
       {!localState.isPro && (
         <View style={{ position: 'absolute', bottom: bannerBottomPos, left: 0, right: 0, alignItems: 'center', zIndex: 5 }}>
-          <BannerAdComponent onLoadedChange={setIsBannerShowing} />
+          <BannerAdComponent onHeightChange={setBannerHeight} />
         </View>
       )}
     </>

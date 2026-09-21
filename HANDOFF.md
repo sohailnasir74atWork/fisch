@@ -1,3 +1,5 @@
+> **19 September 2026 data correction:** Read [FISCH-DATA-CONTRACT.md](FISCH-DATA-CONTRACT.md) first. It supersedes the historical pricing, eligibility, cache and publishing rules below. The corrected CDN candidate is validated but publication awaits local Bunny credentials.
+
 # Fisch Values — handover
 
 **Status: a signed release AAB exists, and it actually runs.** `versionCode 4`,

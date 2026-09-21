@@ -452,6 +452,11 @@ const getStyles = (isDarkMode, c = getThemeColors(isDarkMode)) =>
     },
     textContainer: {
       flex: 1,
+      // The row draws its avatar with <FramedAvatar>, which takes no style, so
+      // the `marginRight` on `avatar` above never applied to anything and the
+      // name and last message sat flush against the picture. The gap belongs
+      // on the text column instead.
+      marginLeft: SPACE.xl,
     },
     userName: {
       fontSize: SIZE.body,
@@ -467,6 +472,8 @@ const getStyles = (isDarkMode, c = getThemeColors(isDarkMode)) =>
       borderRadius: 12,
       minWidth: 24,
       height: 24,
+      paddingHorizontal: SPACE.sm,
+      marginLeft: SPACE.md,
       justifyContent: 'center',
       alignItems: 'center',
     },

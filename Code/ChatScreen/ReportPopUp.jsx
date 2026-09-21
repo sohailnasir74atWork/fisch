@@ -18,6 +18,7 @@ import { DEFAULT_CHANNEL } from './chatChannels';
 import { SIZE } from '../Design/tokens';
 import { SPACE } from '../Design/tokens';
 import { FONT } from '../Design/tokens';
+import { ModalKeyboardView } from '../Helper/keyboardAvoidingContainer';
 
 
 const ReportPopup = ({ visible, message, onClose, channelPath = DEFAULT_CHANNEL.path }) => {
@@ -110,7 +111,7 @@ const ReportPopup = ({ visible, message, onClose, channelPath = DEFAULT_CHANNEL.
 
   return (
     <Modal visible={visible} transparent animationType="fade" onRequestClose={onClose}>
-      <View style={styles.overlay}>
+      <ModalKeyboardView style={styles.overlay}>
         <View style={styles.popup}>
           <Text style={styles.title}>{t("report_popup.title")}</Text>
           <Text style={styles.messageText}>{`${t("report_popup.message_label")}: "${message?.text}"`}</Text>
@@ -192,7 +193,7 @@ const ReportPopup = ({ visible, message, onClose, channelPath = DEFAULT_CHANNEL.
             </TouchableOpacity>
           </View>
         </View>
-      </View>
+      </ModalKeyboardView>
     </Modal>
   );
 };

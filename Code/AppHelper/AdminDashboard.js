@@ -682,7 +682,15 @@ const AdminDashboard = () => {
 
       {/* ── POLLS ── */}
       {tab === 'polls' && (
-        <ScrollView contentContainerStyle={{ padding: SPACE.xl, paddingBottom: 60 }} keyboardShouldPersistTaps="handled">
+        <ScrollView
+          contentContainerStyle={{ padding: SPACE.xl, paddingBottom: 60 }}
+          keyboardShouldPersistTaps="handled"
+          // The iOS half of keyboard handling for this form. Android already
+          // resizes the window (adjustResize in AndroidManifest), but on iOS a
+          // field low in this scroller would sit under the keyboard with no way
+          // to scroll it clear. No-op on Android.
+          automaticallyAdjustKeyboardInsets
+        >
           <View style={s.pollForm}>
             <Text style={[s.name, { marginBottom: SPACE.lg }]}>New poll</Text>
 
@@ -784,7 +792,15 @@ const AdminDashboard = () => {
 
       {/* ── CHATS ── */}
       {tab === 'chats' && isAdmin && (
-        <ScrollView contentContainerStyle={{ padding: SPACE.xl, paddingBottom: 60 }} keyboardShouldPersistTaps="handled">
+        <ScrollView
+          contentContainerStyle={{ padding: SPACE.xl, paddingBottom: 60 }}
+          keyboardShouldPersistTaps="handled"
+          // The iOS half of keyboard handling for this form. Android already
+          // resizes the window (adjustResize in AndroidManifest), but on iOS a
+          // field low in this scroller would sit under the keyboard with no way
+          // to scroll it clear. No-op on Android.
+          automaticallyAdjustKeyboardInsets
+        >
           <Text style={s.sectionLabel}>Private conversation between two users</Text>
           <TextInput value={p1} onChangeText={setP1} placeholder="User ID 1"
             placeholderTextColor={c.textMuted} autoCapitalize="none" autoCorrect={false} style={[s.input, { marginBottom: SPACE.md }]} />

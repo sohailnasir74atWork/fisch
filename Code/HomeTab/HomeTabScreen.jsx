@@ -1,3 +1,5 @@
+import { formatMarketValue, resolveItem, canTrade, sourceLabel, summarizeItems as summarizeMarketItems } from '../Helper/valueSources';
+import { quantityOf } from '../Helper/feedContract';
 /**
  * HomeTabScreen — home: cosmetics, status feed, XP + portfolio
  *
@@ -12,6 +14,7 @@ import {
   Platform, Share, StatusBar, Modal, TextInput,
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
+import HomeIcon from './HomeIcons';
 import FontAwesome from 'react-native-vector-icons/FontAwesome6';
 import { useGlobalState } from '../GlobelStats';
 import { useLocalState } from '../LocalGlobelStats';
@@ -57,21 +60,13 @@ const LANGUAGES = [
 // band is to stop being the same colour as the content under it. Both tones are
 // dark enough to carry white text, so the header reads identically light or
 // dark and the status bar icons never have to change with the theme.
-const HEADER_BG = LIGHT.primary;              // #0E7C94 — the app's primary sea
+const HEADER_BG = LIGHT.primaryPressed;              // #0E7C94 — the app's primary sea
 const HEADER_BG_PRESSED = LIGHT.primaryPressed; // #0A5E70 — deeper, for the band edge
 const HEADER_TEXT = '#FFFFFF';
 const HEADER_TEXT_DIM = 'rgba(255,255,255,0.78)';
 const HEADER_BTN_BG = 'rgba(255,255,255,0.16)';
 
-const fmt = (v) => {
-  if (!v || typeof v !== 'number') return '0';
-  const smart = (n, u) => { const s = n.toFixed(1); return (s.endsWith('.0') ? n.toFixed(0) : s) + u; };
-  if (v >= 1e9) return smart(v / 1e9, 'B');
-  if (v >= 1e6) return smart(v / 1e6, 'M');
-  if (v >= 1e3) return smart(v / 1e3, 'K');
-  if (v < 1) return v.toFixed(2);
-  return v % 1 === 0 ? v.toLocaleString() : v.toFixed(1);
-};
+const fmt = formatMarketValue;
 
 
 const HomeTabScreen = ({ selectedTheme }) => {
@@ -166,8 +161,7 @@ const HomeTabScreen = ({ selectedTheme }) => {
     if (!user?.id || !firestoreDB) return;
     (async () => {
       try {
-        let s = await getDoc(doc(firestoreDB, 'user_profiles', user.id));
-        if (!s.exists()) s = await getDoc(doc(firestoreDB, 'reviews', user.id));
+        const s = await getDoc(doc(firestoreDB, 'reviews', user.id));
         if (s.exists()) setOwned(Array.isArray(s.data()?.ownedPets) ? s.data().ownedPets : []);
       } catch {}
     })();
@@ -204,14 +198,10 @@ const HomeTabScreen = ({ selectedTheme }) => {
   // See Code/Helper/valueSources.js.
   const lookupVal = useCallback((item) => {
     if (!item?.name) return 0;
-    const n = (item.name || '').toLowerCase().trim();
-    const f = parsedData.find(d => (d?.name || '').toLowerCase().trim() === n);
-    const priced = priceOf(f || item, valueSource);
-    // isSummable takes the ITEM, not the price. Passing the price result here
-    // made it look up `trade` on an object that has no such field, so it
-    // returned false for everything and this total was permanently 0.
-    if (isSummable(f || item, valueSource)) return priced.value || 0;
-    return 0;
+    const resolved = resolveItem(parsedData, item);
+    if (!resolved) return null;
+    const priced = priceOf(resolved, valueSource);
+    return priced.missing || priced.stale ? null : priced.value * quantityOf(resolved);
   }, [parsedData, valueSource]);
 
   const portfolio = useMemo(() => owned.reduce((s, p) => s + lookupVal(p), 0), [owned, lookupVal]);
@@ -236,8 +226,9 @@ const HomeTabScreen = ({ selectedTheme }) => {
           of the screen instead of leaving a strip of page background above. */}
       <View style={[$.headerBand, { backgroundColor: HEADER_BG, paddingTop: insets.top }]}>
         {isFocused && <StatusBar barStyle="light-content" />}
+        <View pointerEvents="none" style={$.headerBubble} />
         <View style={$.header}>
-          <View style={{ flex: 1 }}>
+          <View style={{ flex: 1, minWidth: 0 }}>
             <Text style={[$.sub11, { color: HEADER_TEXT_DIM }]}>{greet}</Text>
             <Text style={[$.h1, { color: HEADER_TEXT }]} numberOfLines={1}>
               {user?.displayName || t('home.trader')}
@@ -246,22 +237,22 @@ const HomeTabScreen = ({ selectedTheme }) => {
           {canOpenModeration && (
             <TouchableOpacity
               onPress={() => nav.navigate('Admin')}
-              style={[$.iconBtn, { backgroundColor: HEADER_BTN_BG, marginRight: SPACE.md }]}
+              style={[$.iconBtn, { backgroundColor: HEADER_BTN_BG, marginRight: 0 }]}
               activeOpacity={0.8}
               accessibilityLabel="Open moderation dashboard"
             >
-              <FontAwesome name="shield-halved" size={16} color={HEADER_TEXT} />
+              <FontAwesome name="shield-halved" size={22} color={HEADER_TEXT} />
             </TouchableOpacity>
           )}
-          <TouchableOpacity onPress={() => setShowLangPicker(true)} style={[$.iconBtn, { backgroundColor: HEADER_BTN_BG }]}>
-            <Text style={{ fontSize: SIZE.subtitle }}>{curLang.flag}</Text>
+          <TouchableOpacity accessibilityRole="button" accessibilityLabel="Change language" onPress={() => setShowLangPicker(true)} style={[$.iconBtn, { backgroundColor: HEADER_BTN_BG }]}>
+            <Text style={{ fontSize: 26 }}>{curLang.flag}</Text>
           </TouchableOpacity>
-          <TouchableOpacity onPress={() => nav.navigate('Setting')} activeOpacity={0.8}>
+          <TouchableOpacity accessibilityRole="button" accessibilityLabel="Open profile and settings" style={$.profileTouch} onPress={() => nav.navigate('Setting')} activeOpacity={0.8}>
             <FramedAvatar
               avatarUri={user?.avatar || GAME.defaultAvatar}
               frame={myCosmetics?.profileFrame || null}
               isDarkMode={dark}
-              avatarSize={36}
+              avatarSize={46}
               forceDetail
             />
           </TouchableOpacity>
@@ -269,7 +260,14 @@ const HomeTabScreen = ({ selectedTheme }) => {
         </View>
       </View>
 
-      <ScrollView showsVerticalScrollIndicator={false} contentContainerStyle={{ paddingBottom: 220 }} bounces>
+      <ScrollView showsVerticalScrollIndicator={false} keyboardShouldPersistTaps="handled" contentContainerStyle={{ paddingBottom: 100 }} bounces>
+        <View style={$.introRow}>
+          <View style={{ flex: 1 }}>
+            <Text style={[$.sectionTitle, { color: C.text }]}>{t("home.explore_title", { defaultValue: "Your Fisch adventure" })}</Text>
+            <Text style={[$.introSub, { color: C.textSecondary }]}>{t("home.explore_sub", { defaultValue: "Find favorites. Explore values." })}</Text>
+          </View>
+          <View style={[$.introIcon, { backgroundColor: accentFor("lagoon", dark).tint }]}><HomeIcon name="fish" size={30} color={C.primary} /></View>
+        </View>
 
 
         {/* ── Search: the app's primary job, previously absent from Home ──
@@ -277,8 +275,8 @@ const HomeTabScreen = ({ selectedTheme }) => {
             first screen offered no way to ask, and you had to know to tap
             Values first. The query rides through as a route param so this
             lands on results, not on an empty list. */}
-        <View style={[$.searchBar, { backgroundColor: C.bgAlt, borderColor: C.border }]}>
-          <FontAwesome name="magnifying-glass" size={14} color={C.textSecondary} />
+        <View style={[$.searchBar, { backgroundColor: C.card, borderColor: C.border }]}>
+          <FontAwesome name="magnifying-glass" size={18} color={C.primary} />
           <TextInput
             style={[$.searchInput, { color: C.text }]}
             value={homeQuery}
@@ -287,7 +285,7 @@ const HomeTabScreen = ({ selectedTheme }) => {
                across the translation files as a generic "Search...", and a
                defaultValue only applies when the key is MISSING — so reusing it
                silently threw this copy away. */
-            placeholder={t('home.search_values', { defaultValue: 'Search any item value…' })}
+            placeholder={t('home.search_values', { defaultValue: 'Find a fish, rod or item…' })}
             placeholderTextColor={C.textSecondary}
             returnKeyType="search"
             onSubmitEditing={() => {
@@ -344,27 +342,33 @@ const HomeTabScreen = ({ selectedTheme }) => {
             half tiles fit on screen — so Rods, which is ~32% of all Fisch
             search demand, sat past the fold and was effectively undiscoverable.
             A grid also lets the row carry a subtitle, which a pill cannot. */}
+        <Text style={[$.sectionTitle, $.sectionSpacing, { color: C.text }]}>{t("home.explore_tools", { defaultValue: "Explore & discover" })}</Text>
         <View style={$.toolGrid}>
           {[
             // One hue per tool. Colour is doing work here, not decoration: the
             // grid becomes scannable by colour before it is read, so a
             // returning user reaches for position + colour instead of
             // re-reading four labels.
-            { icon: 'tags', accent: 'lagoon', label: t('home.values'), sub: t('home.values_sub', { defaultValue: 'Every item, priced' }), onPress: () => nav.navigate('Values') },
-            { icon: 'fish', accent: 'coral', label: t('home.rods', { defaultValue: 'Rods' }), sub: t('home.rods_sub', { defaultValue: 'Compare 262 rods' }), onPress: () => nav.navigate('Rods') },
-            { icon: 'scale-balanced', accent: 'kelp', label: t('home.fish_value', { defaultValue: 'Fish Value' }), sub: t('home.fish_value_sub', { defaultValue: 'Exact catch math' }), onPress: () => nav.navigate('FishValue') },
-            { icon: 'clock', accent: 'violet', label: t('home.timers', { defaultValue: 'Timers' }), sub: t('home.timers_sub', { defaultValue: 'Market & events' }), onPress: () => nav.navigate('Timers') },
+            { icon: 'values', accent: 'lagoon', label: t('home.values'), sub: t('home.market_quotes_sub', { defaultValue: 'See trading prices' }), onPress: () => nav.navigate('Values') },
+            { icon: 'rod', accent: 'coral', label: t('home.rods', { defaultValue: 'Rods' }), sub: t('home.rod_guide_sub', { defaultValue: 'Find your next rod' }), onPress: () => nav.navigate('Rods') },
+            { icon: 'fish', accent: 'kelp', label: t('home.fish_value', { defaultValue: 'Fish Value' }), sub: t('home.npc_sale_sub', { defaultValue: 'Estimate NPC sale · C$' }), onPress: () => nav.navigate('FishValue') },
+            { icon: 'timer', accent: 'violet', label: t('home.timers', { defaultValue: 'Timers' }), sub: t('home.timers_sub', { defaultValue: 'See what’s happening' }), onPress: () => nav.navigate('Timers') },
           ].map((tool) => {
             const a = accentFor(tool.accent, dark);
             return (
               <TouchableOpacity
                 key={tool.label}
+                accessibilityRole="button"
+                accessibilityLabel={tool.label + '. ' + tool.sub}
                 style={[$.toolCard, { backgroundColor: a.tint, borderColor: a.tint }]}
                 onPress={tool.onPress}
                 activeOpacity={0.8}
               >
-                <View style={[$.toolIcon, { backgroundColor: a.color }]}>
-                  <FontAwesome name={tool.icon} size={15} color={dark ? C.bg : '#FFFFFF'} solid />
+                <View style={$.toolTopRow}>
+                <View style={[$.toolIcon, { backgroundColor: dark ? '#FFFFFF0D' : '#FFFFFFB3' }]}>
+                  <HomeIcon name={tool.icon} size={32} color={a.color} />
+                </View>
+                <FontAwesome name="arrow-up-right-from-square" size={12} color={a.color} />
                 </View>
                 <Text style={[$.toolLabel, { color: C.text }]} numberOfLines={1}>{tool.label}</Text>
                 <Text style={[$.toolSub, { color: a.color }]} numberOfLines={1}>{tool.sub}</Text>
@@ -382,14 +386,14 @@ const HomeTabScreen = ({ selectedTheme }) => {
           style={[$.myStuffCard, { backgroundColor: accentFor('kelp', dark).tint, borderColor: accentFor('kelp', dark).tint }]}
         >
           <View style={$.myStuffCardInner}>
-            <View style={{ flexDirection: 'row', alignItems: 'center', gap: SPACE.md }}>
-              <FontAwesome name="box-open" size={16} color={accentFor('kelp', dark).color} solid />
-              <Text style={[$.b14, { color: C.text }]}>{t('home.my_stuff_worth')}</Text>
+            <View style={{ flexDirection: 'row', alignItems: 'center', gap: SPACE.md, flexShrink: 1 }}>
+              <HomeIcon name="inventory" size={23} color={accentFor('kelp', dark).color} solid />
+              <Text style={[$.b14, { color: C.text, flexShrink: 1 }]}>{t('home.my_stuff_worth')}</Text>
             </View>
             <View style={{ flexDirection: 'row', alignItems: 'center', gap: SPACE.md }}>
               <View style={[$.worthPill, { backgroundColor: accentFor('kelp', dark).color }]}>
-                <FontAwesome name="tags" size={10} color={dark ? C.bg : '#FFFFFF'} solid />
-                <Text style={[$.worthText, { color: dark ? C.bg : '#FFFFFF' }]}>{fmt(portfolio)}</Text>
+                <HomeIcon name="values" size={14} color={dark ? C.bg : '#FFFFFF'} solid />
+                <Text style={[$.worthText, { color: dark ? C.bg : '#FFFFFF' }]}>{sourceLabel(valueSource)} {fmt(portfolio)}{owned.some(i => lookupVal(i) == null) ? ' · subtotal' : ''}</Text>
               </View>
               <FontAwesome name="chevron-right" size={12} color={accentFor('kelp', dark).color} />
             </View>
@@ -400,23 +404,25 @@ const HomeTabScreen = ({ selectedTheme }) => {
             Deliberately smaller than the tool grid. These used to sit in the
             same pill row at identical weight, which told the user that Daily
             Stars and Rods were equally central. They are not. */}
+        <Text style={[$.sectionTitle, $.sectionSpacing, { color: C.text }]}>{t("home.more_to_explore", { defaultValue: "More to explore" })}</Text>
         <View style={$.pillRow}>
           {[
-            { emoji: '🌎', accent: 'lagoon', label: t('home.friends') || 'Friends', onPress: () => guard(() => nav.navigate('SocialDashboard'), 'Sign in') },
-            { emoji: '⭐', accent: 'amber', label: t('home.daily_stars'), onPress: () => guard(() => setShowDailyStars(true), 'Sign in') },
-            { emoji: '🏆', accent: 'rose', label: t('home.top_rated'), onPress: () => nav.navigate('Leaderboard') },
-            { emoji: '🎁', accent: 'kelp', label: t('home.codes', { defaultValue: 'Codes' }), onPress: () => setShowCodes(true) },
-            { emoji: '🛡️', accent: 'violet', label: t('home.our_team', { defaultValue: 'Our Team' }), onPress: () => nav.navigate('ModsScreen') },
+            { icon: 'friends', accent: 'lagoon', label: t('home.friends') || 'Friends', onPress: () => guard(() => nav.navigate('SocialDashboard'), 'Sign in') },
+            { icon: 'star', accent: 'amber', label: t('home.daily_stars'), onPress: () => guard(() => setShowDailyStars(true), 'Sign in') },
+            { icon: 'trophy', accent: 'rose', label: t('home.top_rated'), onPress: () => nav.navigate('Leaderboard') },
+            { icon: 'gift', accent: 'kelp', label: t('home.codes', { defaultValue: 'Codes' }), onPress: () => setShowCodes(true) },
+            { icon: 'shield', accent: 'violet', label: t('home.our_team', { defaultValue: 'Our Team' }), onPress: () => nav.navigate('ModsScreen') },
           ].map((p) => {
             const a = accentFor(p.accent, dark);
             return (
               <TouchableOpacity
                 key={p.label}
+                accessibilityRole="button" accessibilityLabel={p.label}
                 style={[$.navPill, { backgroundColor: a.tint, borderColor: a.tint }]}
                 onPress={p.onPress}
                 activeOpacity={0.7}
               >
-                <Text style={{ fontSize: SIZE.caption }}>{p.emoji}</Text>
+                <HomeIcon name={p.icon} size={24} color={a.color} />
                 <Text style={[$.navLabel, { color: a.color }]} numberOfLines={1}>{p.label}</Text>
               </TouchableOpacity>
             );
@@ -443,7 +449,7 @@ const HomeTabScreen = ({ selectedTheme }) => {
             onPress={() => guard(() => nav.navigate('MysteryEggScreen'), 'Sign in to open eggs')}
             activeOpacity={0.85}
           >
-            <FontAwesome name="egg" size={14} color={accentFor('rose', dark).color} solid />
+            <HomeIcon name="egg" size={22} color={accentFor('rose', dark).color} solid />
             <Text style={[$.cosmeticLabel, { color: accentFor('rose', dark).color }]} numberOfLines={1}>
               {t('home.win_cosmetics', { defaultValue: 'Win Cosmetics' })}
             </Text>
@@ -454,7 +460,7 @@ const HomeTabScreen = ({ selectedTheme }) => {
             onPress={() => guard(() => nav.navigate('MyCosmeticsScreen'), 'Sign in to see cosmetics')}
             activeOpacity={0.85}
           >
-            <FontAwesome name="shirt" size={14} color={accentFor('violet', dark).color} solid />
+            <HomeIcon name="cosmetics" size={22} color={accentFor('violet', dark).color} solid />
             <Text style={[$.cosmeticLabel, { color: accentFor('violet', dark).color }]} numberOfLines={1}>
               {t('home.my_cosmetics', { defaultValue: 'My Cosmetics' })}
             </Text>
@@ -497,19 +503,17 @@ const HomeTabScreen = ({ selectedTheme }) => {
         codes={codesData}
       />
 
-      <Modal visible={showLangPicker} animationType="fade" transparent>
+      <Modal visible={showLangPicker} animationType="fade" transparent onRequestClose={() => setShowLangPicker(false)}>
         <TouchableOpacity style={$.langOverlay} activeOpacity={1} onPress={() => setShowLangPicker(false)}>
           <TouchableOpacity activeOpacity={1} style={[$.langBox, { backgroundColor: dark ? config.colors.surfaceDark : '#fff' }]}>
             <Text style={[$.b16, { color: C.text, textAlign: 'center', marginBottom: 14 }]}>🌍 {t('home.language')}</Text>
             {LANGUAGES.map(l => {
               const on = i18n.language === l.code;
-              const isPro = l.code !== 'en';
               return (
                 <TouchableOpacity key={l.code} style={[$.langRow, on && { backgroundColor: '#7C3AED12' }]}
                   onPress={() => handleLangSelect(l.code)}>
                   <Text style={{ fontSize: SIZE.heading }}>{l.flag}</Text>
                   <Text style={[$.b14, { color: C.text, flex: 1, marginLeft: SPACE.lg, fontFamily: on ? FONT.bold : FONT.regular }]}>{l.name}</Text>
-                  {isPro && !localState.isPro && <Text style={{ fontSize: SIZE.label, color: STATUS.warning, fontFamily: FONT.bold }}>{t('home.pro')}</Text>}
                   {on && <FontAwesome name="check" size={12} color="#7C3AED" solid />}
                 </TouchableOpacity>
               );
@@ -525,15 +529,23 @@ const $ = StyleSheet.create({
   root: { flex: 1 },
   // Bottom edge gives the band a defined end instead of letting it bleed into
   // the first card.
-  headerBand: { borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: HEADER_BG_PRESSED },
+  headerBand: { borderBottomLeftRadius: 24, borderBottomRightRadius: 24, overflow: 'hidden', paddingBottom: 6 },
+  headerBubble: { position: 'absolute', width: 180, height: 180, borderRadius: 90, backgroundColor: HEADER_BTN_BG, right: -50, top: -65 },
+  introRow: { marginHorizontal: SPACE.xxl, marginTop: SPACE.xl, flexDirection: 'row', alignItems: 'center', gap: SPACE.lg },
+  introIcon: { width: 48, height: 48, borderRadius: 18, alignItems: 'center', justifyContent: 'center' },
+  introSub: { fontSize: SIZE.caption, fontFamily: FONT.regular, marginTop: 4 },
+  sectionTitle: { fontSize: SIZE.subtitle, fontFamily: FONT.bold },
+  sectionSpacing: { marginHorizontal: SPACE.xxl, marginTop: SPACE.xl },
+  toolTopRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: SPACE.md },
 
   // Header
-  header: { flexDirection: 'row', alignItems: 'center', paddingHorizontal: SPACE.xxl, paddingTop: SPACE.lg, paddingBottom: SPACE.sm, gap: SPACE.lg },
+  header: { minHeight: 88, flexDirection: 'row', alignItems: 'center', paddingHorizontal: SPACE.xxl, paddingVertical: 18, gap: 10 },
   h1: { fontSize: SIZE.heading, fontFamily: FONT.bold, letterSpacing: -0.5 },
   sub11: { fontSize: SIZE.small, fontFamily: FONT.regular },
   b14: { fontSize: SIZE.body, fontFamily: FONT.bold },
   b16: { fontSize: SIZE.subtitle, fontFamily: FONT.bold },
-  iconBtn: { width: 36, height: 36, borderRadius: 18, alignItems: 'center', justifyContent: 'center' },
+  profileTouch: { minWidth: 52, minHeight: 52, alignItems: 'center', justifyContent: 'center' },
+  iconBtn: { width: 52, height: 52, borderRadius: 18, alignItems: 'center', justifyContent: 'center' },
   // (removed profileBtn/profileAvatar — the header now uses FramedAvatar, which
   // must not be wrapped in a fixed-size `overflow: 'hidden'` box or the frame
   // decorations get clipped.)
@@ -541,7 +553,7 @@ const $ = StyleSheet.create({
   myStuffCard: {
     marginHorizontal: SPACE.xxl,
     marginTop: SPACE.xl,
-    paddingHorizontal: SPACE.xxl,
+    paddingHorizontal: SPACE.lg,
     paddingVertical: 14,
     borderRadius: 14,
     borderWidth: 1,
@@ -549,7 +561,7 @@ const $ = StyleSheet.create({
   myStuffCardInner: {
     flexDirection: 'row',
     justifyContent: 'space-between',
-    alignItems: 'center',
+    alignItems: 'center', gap: SPACE.md, flexWrap: 'wrap',
   },
   worthPill: {
     flexDirection: 'row',
@@ -569,8 +581,8 @@ const $ = StyleSheet.create({
   searchBar: {
     flexDirection: 'row', alignItems: 'center', gap: SPACE.lg,
     marginHorizontal: SPACE.xxl, marginTop: SPACE.xl,
-    paddingHorizontal: SPACE.xl, height: 44,
-    borderRadius: 12, borderWidth: 1,
+    paddingHorizontal: SPACE.xl, minHeight: 52,
+    borderRadius: 18, borderWidth: 1,
   },
   searchInput: { fontSize: SIZE.body, fontFamily: FONT.regular, flex: 1, padding: 0 },
 
@@ -588,34 +600,34 @@ const $ = StyleSheet.create({
   // Tool grid — 2x2, every tile on screen at once.
   toolGrid: {
     flexDirection: 'row', flexWrap: 'wrap',
-    paddingHorizontal: SPACE.xxl, marginTop: SPACE.xl,
+    paddingHorizontal: SPACE.xxl, marginTop: SPACE.md,
     gap: SPACE.lg,
   },
   toolCard: {
     // 48% + gap lands exactly two per row at any phone width, without doing
     // arithmetic against Dimensions that breaks on rotation or split screen.
-    flexBasis: '48%', flexGrow: 1,
-    padding: SPACE.xl, borderRadius: 14, borderWidth: 1,
+    flexBasis: '45%', flexGrow: 1, minWidth: 0,
+    padding: SPACE.xl, borderRadius: 20, borderWidth: 1,
   },
   toolIcon: {
-    width: 30, height: 30, borderRadius: 15,
+    width: 46, height: 46, borderRadius: 16,
     alignItems: 'center', justifyContent: 'center',
-    marginBottom: SPACE.lg,
+    marginBottom: 0,
   },
   toolLabel: { fontSize: SIZE.body, fontFamily: FONT.bold },
-  toolSub: { fontSize: SIZE.label, fontFamily: FONT.bold, marginTop: 1 },
+  toolSub: { fontSize: SIZE.small, fontFamily: FONT.regular, marginTop: 4 },
 
   // Secondary pills — smaller than a tool card, on purpose.
   pillRow: {
     flexDirection: 'row', flexWrap: 'wrap',
-    paddingHorizontal: SPACE.xxl, marginTop: SPACE.xl, gap: SPACE.md,
+    paddingHorizontal: SPACE.xxl, marginTop: SPACE.md, gap: SPACE.md,
   },
   navPill: {
-    flexDirection: 'row', alignItems: 'center', gap: 5,
-    paddingHorizontal: SPACE.lg, paddingVertical: 7,
-    borderRadius: 10, borderWidth: 1,
+    flexDirection: 'row', alignItems: 'center', gap: SPACE.md, flexBasis: '45%', flexGrow: 1, minHeight: 52,
+    paddingHorizontal: SPACE.lg, paddingVertical: SPACE.md,
+    borderRadius: 16, borderWidth: 1,
   },
-  navLabel: { fontSize: SIZE.small, fontFamily: FONT.bold },
+  navLabel: { flexShrink: 1, fontSize: SIZE.caption, fontFamily: FONT.bold },
 
   // Section
   // Cosmetics — one quiet row.
@@ -625,8 +637,8 @@ const $ = StyleSheet.create({
   },
   cosmeticCard: {
     flex: 1, flexDirection: 'row', alignItems: 'center', gap: SPACE.md,
-    paddingHorizontal: SPACE.xl, paddingVertical: SPACE.xl,
-    borderRadius: 12, borderWidth: 1,
+    paddingHorizontal: SPACE.xl, paddingVertical: SPACE.xl, minHeight: 52,
+    borderRadius: 16, borderWidth: 1,
   },
   cosmeticLabel: { fontSize: SIZE.caption, fontFamily: FONT.bold, flex: 1 },
 

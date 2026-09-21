@@ -25,7 +25,6 @@ import config from '../../Helper/Environment';
 import ConditionalKeyboardWrapper from '../../Helper/keyboardAvoidingContainer';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import BannerAdComponent from '../../Ads/bannerAds';
-import { BANNER_HEIGHT } from '../../Helper/floatingButtonLayout';
 
 import PetModal from './PetsModel';
 import {
@@ -79,7 +78,7 @@ const bannerBottomPos = noTabBar ? Math.max(insets.bottom, 8) + 12 : 0; // with 
 // Is the banner actually showing an ad right now? The spacer below the input
 // used to reserve the banner's height unconditionally, so a no-fill (or a Pro
 // user) left a dead gap between the message input and the tab bar.
-const [isBannerShowing, setIsBannerShowing] = useState(false);
+const [bannerHeight, setBannerHeight] = useState(0); // measured, 0 when no ad is on screen
 
   // ✅ Read receipts: listen to other user's lastRead timestamp
   const otherLastRead = useOtherLastRead(chatKey, selectedUserId);
@@ -885,7 +884,7 @@ useEffect(() => {
           {noTabBar ? (
             <View style={{ height: Math.max(insets.bottom, 8) }} />
           ) : (
-            <View style={{ height: isBannerShowing ? bannerBottomPos + BANNER_HEIGHT : 0 }} />
+            <View style={{ height: bannerHeight ? bannerBottomPos + bannerHeight : 0 }} />
           )}
 
         </View>
@@ -982,7 +981,7 @@ useEffect(() => {
 )}
       {!localState.isPro && !noTabBar && (
         <View style={{ position: 'absolute', bottom: bannerBottomPos, left: 0, right: 0, alignItems: 'center', zIndex: 5 }}>
-          <BannerAdComponent onLoadedChange={setIsBannerShowing} />
+          <BannerAdComponent onHeightChange={setBannerHeight} />
         </View>
       )}
       <ProfileBottomDrawer

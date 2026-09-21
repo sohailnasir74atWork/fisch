@@ -1,5 +1,9 @@
 <resources>
     <style name="AppTheme" parent="Theme.AppCompat.DayNight.NoActionBar">
+        <item name="android:navigationBarColor">@color/app_window_background</item>
+        <item name="android:windowLightNavigationBar">true</item>
+        <item name="android:enforceNavigationBarContrast">false</item>
+        <item name="android:navigationBarDividerColor">@android:color/transparent</item>
         <!-- Customize your theme here. -->
         <item name="android:editTextBackground">@drawable/rn_edit_text_material</item>
         <!-- Opaque window background prevents parent screen showing through during transitions -->
@@ -8,6 +12,10 @@
     </style>
 
     <style name="BootTheme" parent="Theme.BootSplash">
+        <item name="android:navigationBarColor">@color/bootsplash_background</item>
+        <item name="android:windowLightNavigationBar">true</item>
+        <item name="android:enforceNavigationBarContrast">false</item>
+        <item name="android:navigationBarDividerColor">@android:color/transparent</item>
         <item name="android:statusBarColor">@color/bootsplash_background</item>
         <!-- The splash background is near-white here, so the status bar icons
              have to be dark or the clock and battery vanish for its duration. -->

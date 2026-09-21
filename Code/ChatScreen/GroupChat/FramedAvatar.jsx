@@ -196,6 +196,18 @@ const heartPath = (cx, cy, s) =>
 //  FRAME DEFINITIONS — decoration configs per frame
 // ════════════════════════════════════════════════════════════
 const FRAME_DEFS = {
+  reef_treasure: { borderWidth: 2.8, gap: 1.6, glowOpacity: 0.55, decorScale: 1.2, decorations: ["shell", "pearls"], scalloped: true, doubleBorder: true, doubleBorderWidth: 1 },
+  pearl_tide: { borderWidth: 2.8, gap: 1.6, glowOpacity: 0.55, decorScale: 1.2, decorations: ["pearls", "sparkles"], scalloped: false, doubleBorder: true, doubleBorderWidth: 1 },
+  kraken_crown: { borderWidth: 2.8, gap: 1.6, glowOpacity: 0.55, decorScale: 1.2, decorations: ["crown5", "fins", "gems"], scalloped: false, doubleBorder: true, doubleBorderWidth: 1 },
+  sunfin_royal: { borderWidth: 2.8, gap: 1.6, glowOpacity: 0.55, decorScale: 1.2, decorations: ["fins", "crown3", "sparkles"], scalloped: true, doubleBorder: true, doubleBorderWidth: 1 },
+  glacier_fins: { borderWidth: 2.8, gap: 1.6, glowOpacity: 0.55, decorScale: 1.2, decorations: ["fins", "gems"], scalloped: false, doubleBorder: true, doubleBorderWidth: 1 },
+  moonlit_lagoon: { borderWidth: 2.8, gap: 1.6, glowOpacity: 0.55, decorScale: 1.2, decorations: ["halo", "pearls"], scalloped: false, doubleBorder: true, doubleBorderWidth: 1 },
+  citrus_splash: { borderWidth: 2.8, gap: 1.6, glowOpacity: 0.55, decorScale: 1.2, decorations: ["pearls"], scalloped: true, doubleBorder: true, doubleBorderWidth: 1 },
+  berry_blossom: { borderWidth: 2.8, gap: 1.6, glowOpacity: 0.55, decorScale: 1.2, decorations: ["hearts", "vines"], scalloped: true, doubleBorder: true, doubleBorderWidth: 1 },
+  solar_sailor: { borderWidth: 2.8, gap: 1.6, glowOpacity: 0.55, decorScale: 1.2, decorations: ["orbit", "gems"], scalloped: false, doubleBorder: true, doubleBorderWidth: 1 },
+  abyss_guardian: { borderWidth: 2.8, gap: 1.6, glowOpacity: 0.55, decorScale: 1.2, decorations: ["fins", "crown5", "pearls"], scalloped: false, doubleBorder: true, doubleBorderWidth: 1 },
+  jade_drift: { borderWidth: 2.8, gap: 1.6, glowOpacity: 0.55, decorScale: 1.2, decorations: ["laurel"], scalloped: false, doubleBorder: true, doubleBorderWidth: 1 },
+  starlight_sorbet: { borderWidth: 2.8, gap: 1.6, glowOpacity: 0.55, decorScale: 1.2, decorations: ["orbit", "hearts", "sparkles"], scalloped: true, doubleBorder: true, doubleBorderWidth: 1 },
   // ═══ COMMON — simple gradient ring ═══
   hot_pink_ring:      { borderWidth: 2.2, gap: 1.2, decorations: [] },
   electric_blue_ring: { borderWidth: 2.2, gap: 1.2, decorations: [] },
@@ -610,6 +622,30 @@ const renderDecorations = ({
 
   decorations.forEach((dec) => {
     switch (dec) {
+      // Marine ornaments sit outside the portrait and simplify away in lists.
+      case 'pearls': {
+        elements.push(<G key="pearls">{Array.from({ length: 8 }, (_, i) => {
+          const a = i * Math.PI / 4;
+          const x = cx + (borderR + 2 * sf) * Math.cos(a);
+          const y = cy + (borderR + 2 * sf) * Math.sin(a);
+          return <G key={i}><SvgCircle cx={x} cy={y} r={2.8 * sf} fill={colors[i % colors.length]} stroke={secondary} strokeWidth={0.5} /><SvgCircle cx={x - sf * 0.7} cy={y - sf * 0.8} r={0.8 * sf} fill="#FFFFFF" opacity={0.85} /></G>;
+        })}</G>);
+        break;
+      }
+      case 'fins': {
+        elements.push(<G key="fins">{[-1, 1].map(side => {
+          const x = cx + side * borderR;
+          const w = 9 * sf;
+          return <G key={side}><Path d={`M ${x} ${cy - 10 * sf} Q ${x + side * w * 1.8} ${cy - 17 * sf} ${x + side * w} ${cy} Q ${x + side * w * 1.6} ${cy + 12 * sf} ${x} ${cy + 10 * sf} Z`} fill={`url(#${gradId})`} stroke={secondary} strokeWidth={0.8 * sf} /><Path d={`M ${x} ${cy} L ${x + side * w} ${cy - 8 * sf} M ${x} ${cy} L ${x + side * w} ${cy + 6 * sf}`} stroke={secondary} strokeWidth={0.8 * sf} fill="none" /></G>;
+        })}</G>);
+        break;
+      }
+      case 'shell': {
+        const y = cy + borderR;
+        const w = 10 * sf;
+        elements.push(<G key="shell"><Path d={`M ${cx} ${y + 5 * sf} C ${cx - w * 2} ${y - 3 * sf} ${cx - w} ${y - 17 * sf} ${cx} ${y - 8 * sf} C ${cx + w} ${y - 17 * sf} ${cx + w * 2} ${y - 3 * sf} ${cx} ${y + 5 * sf} Z`} fill={`url(#${gradId})`} stroke={secondary} strokeWidth={sf} /><Path d={`M ${cx} ${y + 4 * sf} L ${cx} ${y - 7 * sf} M ${cx} ${y + 4 * sf} L ${cx - w * 0.7} ${y - 6 * sf} M ${cx} ${y + 4 * sf} L ${cx + w * 0.7} ${y - 6 * sf}`} stroke={secondary} strokeWidth={0.7 * sf} /></G>);
+        break;
+      }
       // ── CROWN (3 points) ──
       case 'crown3': {
         const crownW = avatarR * 1.0 * sf;

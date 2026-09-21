@@ -10,7 +10,7 @@ import {
   collection, doc, setDoc, deleteDoc, serverTimestamp,
   query, orderBy, limit, getDocs, writeBatch,
 } from '@react-native-firebase/firestore';
-import { resolveItemImage } from '../Helper/valueSources';
+import { serializeTradeItem, createTradeSnapshot, catchDescription } from '../Helper/valueSources';
 
 export const JOURNAL_RESULTS = ['win', 'fair', 'loss'];
 
@@ -21,26 +21,13 @@ let journalRevision = 0;
 export const getJournalRevision = () => journalRevision;
 
 /** Normalize a calculator/inventory item to the slim shape stored on an entry. */
-export const slimItem = (it) => {
-  // resolveItemImage returns `undefined` for a row with no art — correct for
-  // render sites, fatal here: Firestore rejects `undefined` and the whole
-  // setDoc below fails with "Unsupported field value: undefined", so logging a
-  // trade containing an art-less item silently failed. Every other field on
-  // this shape is already defaulted; this one was the exception.
-  const image = resolveItemImage(it) ?? '';
-  return {
-    name: it?.name || it?.Name || 'Unknown',
-    type: it?.type || it?.Type || it?.Category || '',
-    value: Number(it?.Value ?? it?.value) || 0,
-    image,
-  };
-};
+export const slimItem = (item, scale = 'value') => serializeTradeItem(item, scale);
 
 /** Comma-joined item names, with xN for duplicates: "Chroma Lightbringer x2, Candy" */
 export const summarizeItems = (items) => {
   const counts = new Map();
   (Array.isArray(items) ? items : []).forEach((it) => {
-    const name = it?.name || it?.Name || it?.title;
+    const name = [it?.name || it?.Name || it?.title, catchDescription(it)].filter(Boolean).join(' · ');
     if (!name) return;
     counts.set(name, (counts.get(name) || 0) + 1);
   });
@@ -66,24 +53,25 @@ export const summarizeItems = (items) => {
 export const addJournalEntry = async (firestoreDB, uid, entry = {}) => {
   if (!firestoreDB || !uid) throw new Error('You need to be signed in to log a trade.');
 
-  const givenValue = Number(entry.givenValue) || 0;
-  const receivedValue = Number(entry.receivedValue) || 0;
-
-  // Normalize to the journal's vocabulary — the calculator says 'lose', the
-  // journal keys off 'loss', and a mismatch silently renders as "fair".
-  const raw = entry.result === 'lose' ? 'loss' : entry.result;
-  const result = JOURNAL_RESULTS.includes(raw)
-    ? raw
-    : receivedValue > givenValue ? 'win'
-    : receivedValue < givenValue ? 'loss'
-    : 'fair';
-
-  const gave = (Array.isArray(entry.givenItems) ? entry.givenItems : []).filter(Boolean).map(slimItem);
-  const got = (Array.isArray(entry.receivedItems) ? entry.receivedItems : []).filter(Boolean).map(slimItem);
+  const scale = entry.valueSource || 'value';
+  const givenItems = (entry.givenItems || []).filter(Boolean);
+  const receivedItems = (entry.receivedItems || []).filter(Boolean);
+  const valuation = createTradeSnapshot(givenItems, receivedItems, scale);
+  const givenValue = valuation.has.total, receivedValue = valuation.wants.total;
+  const verdict = valuation.evaluation.verdict;
+  const result = verdict === 'lose' ? 'loss' : verdict || 'not_evaluated';
+  const rawRating = entry.result === 'lose' ? 'loss' : entry.result;
+  const userRating = JOURNAL_RESULTS.includes(rawRating) ? rawRating : null;
+  const gave = givenItems.map(item => slimItem(item, scale));
+  const got = receivedItems.map(item => slimItem(item, scale));
 
   const ref = doc(collection(firestoreDB, 'trade_journal', uid, 'trades'));
   await setDoc(ref, {
     result,
+    userRating,
+    valuation,
+    valueSource: valuation.scale,
+    unit: valuation.unit,
     // Joined-name strings — what the My Stuff → History rows render
     given: summarizeItems(entry.givenItems),
     givenValue,

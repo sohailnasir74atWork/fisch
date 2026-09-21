@@ -83,8 +83,8 @@ android {
         applicationId "com.fischvaluescalc"
         minSdkVersion rootProject.ext.minSdkVersion
         targetSdkVersion rootProject.ext.targetSdkVersion
-        versionCode 6
-        versionName "1.1.0"
+        versionCode 7
+        versionName "1.1.1"
 
         ndk {
             // x86_64 is required, not optional: without it SoLoader on an

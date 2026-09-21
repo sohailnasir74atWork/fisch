@@ -1,17 +1,4 @@
-/**
- * FishValueScreen — what a specific catch is actually worth.
- *
- * This is NOT the W/F/L trade calculator and must not be confused with it. That
- * one weighs two sides of a trade against community consensus. This one answers
- * "I just caught a 412 kg Shiny Midas Megalodon, what is it worth?" with the
- * game's own arithmetic:
- *
- *   value = ceil( ceil(base_value / base_weight x weight) x Π mutations )
- *
- * Validated against all 1,659 fish — see Code/Helper/fischValue.js. That makes
- * it the most defensible number in the app: every other figure here is somebody's
- * opinion, and this one is the game's.
- */
+/* NPC sale estimates in C$; separate from community market quotes. */
 import React, { useMemo, useState, useCallback } from 'react';
 import {
   View, Text, TextInput, FlatList, TouchableOpacity, Image,
@@ -23,7 +10,7 @@ import { useLocalState } from '../LocalGlobelStats';
 import { useUI } from '../Design/ui';
 import { SPACE, SIZE, TYPE, RADIUS, SHADOW, STATUS, RARITY } from '../Design/tokens';
 import { unwrapFeed, resolveItemImage } from '../Helper/valueSources';
-import { fishValue, mutationTable, weightRange, formatFishValue } from '../Helper/fischValue';
+import { fishValue, mutationTable, weightRange, formatFishValue, selectModifier, sizeLabel } from '../Helper/fischValue';
 
 const FishValueScreen = () => {
   const ui = useUI();
@@ -81,12 +68,12 @@ const FishValueScreen = () => {
     const withMult = allMutations.filter((m) => table[m.name] !== undefined);
     const list = q ? withMult.filter((m) => m.name?.toLowerCase().includes(q)) : withMult;
     // Strongest first: the multiplier is the only reason to pick one.
-    return [...list].sort((a, b) => (table[b.name] || 0) - (table[a.name] || 0));
+    return [...list].sort((a, b) => table[b.name].max - table[a.name].max);
   }, [allMutations, mutQuery, table]);
 
   const toggleMutation = useCallback((name) => {
-    setPicked((prev) => (prev.includes(name) ? prev.filter((n) => n !== name) : [...prev, name]));
-  }, []);
+    setPicked(prev => selectModifier(prev, name, table));
+  }, [table]);
 
   const s = useMemo(() => makeStyles(c), [c]);
 
@@ -142,9 +129,9 @@ const FishValueScreen = () => {
             {!!range && (
               <View style={s.shortcuts}>
                 {[
-                  { label: 'Min', v: range.min },
+                  { label: 'Normal min', v: range.min },
                   { label: 'Average', v: range.avg },
-                  { label: 'Max', v: range.max },
+                  { label: 'Normal max', v: range.max },
                 ].map((p) => (
                   <TouchableOpacity
                     key={p.label}
@@ -160,7 +147,7 @@ const FishValueScreen = () => {
             )}
             {!!range && Number(weight) > range.max && (
               <Text style={s.warn}>
-                Heavier than this fish can be — max is {Number(range.max.toFixed(1)).toLocaleString('en-US')} kg.
+                {sizeLabel(fish, weight)} catch — size is reflected in its weight.
               </Text>
             )}
           </>
@@ -169,7 +156,7 @@ const FishValueScreen = () => {
         {/* ── 3. Mutations ── */}
         {!!fish && (
           <>
-            <Text style={s.step}>3 · Mutations {picked.length > 0 ? `(${picked.length})` : ''}</Text>
+            <Text style={s.step}>3 · One mutation + attributes {picked.length > 0 ? `(${picked.length})` : ''}</Text>
             <View style={s.searchWrap}>
               <Icon name="search" size={SIZE.body} color={c.textMuted} />
               <TextInput
@@ -191,7 +178,7 @@ const FishValueScreen = () => {
                     activeOpacity={0.8}
                   >
                     <Text style={[s.mutName, on && s.mutNameOn]}>{m.name}</Text>
-                    <Text style={[s.mutMult, on && s.mutNameOn]}>x{table[m.name]}</Text>
+                    <Text style={[s.mutMult, on && s.mutNameOn]}>x{table[m.name].min === table[m.name].max ? table[m.name].min : table[m.name].min + '–' + table[m.name].max}</Text>
                   </TouchableOpacity>
                 );
               })}
@@ -205,26 +192,14 @@ const FishValueScreen = () => {
         {/* ── Result ── */}
         {!!fish && (
           <View style={s.result}>
-            <Text style={s.resultLabel}>Value</Text>
+            <Text style={s.resultLabel}>NPC sale estimate · C$</Text>
             <Text style={s.resultValue}>
-              {result.value == null ? '—' : formatFishValue(result.value)}
+              {result.range ? formatFishValue(result.range.min) + '–' + formatFishValue(result.range.max) : formatFishValue(result.value)}
             </Text>
-            {result.value == null ? (
-              <Text style={s.resultHint}>Enter a weight above 0 to calculate.</Text>
-            ) : (
-              <>
-                <Text style={s.resultExact}>{result.value.toLocaleString('en-US')}</Text>
-                <Text style={s.resultHint}>
-                  {Number(result.perKg.toFixed(2)).toLocaleString('en-US')} per kg
-                  {picked.length > 0
-                    ? ` · x${picked.reduce((a, n) => a * (table[n] || 1), 1).toFixed(2)} from ${picked.length} mutation${picked.length > 1 ? 's' : ''}`
-                    : ''}
-                </Text>
-              </>
-            )}
-            <Text style={s.formula}>
-              Game formula, not a community estimate — verified against all {allFish.length} fish.
+            <Text style={s.resultHint}>
+              {result.error || (result.range ? 'Variable multiplier: actual sale value can fall within this range.' : picked.join(' · ') || 'No mutation or attributes')}
             </Text>
+            <Text style={s.formula}>Uses wiki sale rules and the entered weight. This is not a trade value in S$ or Proto.</Text>
           </View>
         )}
       </ScrollView>
@@ -260,6 +235,7 @@ const FishValueScreen = () => {
                 activeOpacity={0.7}
                 onPress={() => {
                   setFish(item);
+                  setPicked([]);
                   // Pre-fill the average so the screen shows a real number
                   // immediately rather than a dash.
                   const r = weightRange(item);
@@ -276,7 +252,7 @@ const FishValueScreen = () => {
                   </Text>
                 </View>
                 <Text style={s.fishRowAvg}>
-                  ~{formatFishValue(item.avg_value)}
+                  C$ ~{formatFishValue(item.avg_value)}
                 </Text>
               </TouchableOpacity>
             )}

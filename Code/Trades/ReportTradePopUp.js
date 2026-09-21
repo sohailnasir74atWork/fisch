@@ -15,6 +15,7 @@ import { ref, push } from "@react-native-firebase/database";
 import { SIZE } from '../Design/tokens';
 import { SPACE } from '../Design/tokens';
 import { FONT } from '../Design/tokens';
+import { ModalKeyboardView } from '../Helper/keyboardAvoidingContainer';
 
 const ReportTradePopup = ({ visible, trade, onClose }) => {
   const [selectedReason, setSelectedReason] = useState("Inappropriate");
@@ -67,7 +68,7 @@ const ReportTradePopup = ({ visible, trade, onClose }) => {
 
   return (
     <Modal visible={visible} transparent animationType="fade" onRequestClose={onClose}>
-      <View style={styles.overlay}>
+      <ModalKeyboardView style={styles.overlay}>
         <View style={styles.popup}>
           <Text style={styles.title}>Report Trade</Text>
           <Text style={styles.messageText}>{`Trade ID: ${trade?.id || "Anonymous"}`}</Text>
@@ -145,7 +146,7 @@ const ReportTradePopup = ({ visible, trade, onClose }) => {
             </TouchableOpacity>
           </View>
         </View>
-      </View>
+      </ModalKeyboardView>
     </Modal>
   );
 };

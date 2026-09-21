@@ -1,6 +1,7 @@
+import CatalogueImage from '../Components/CatalogueImage';
 import React, { useEffect, useMemo, useRef, useState, useCallback } from 'react';
 import {
-  View, Text, TouchableOpacity, StyleSheet, ScrollView, Modal, FlatList, TextInput, Image, Pressable, Platform, ActivityIndicator } from 'react-native';
+  View, Text, TouchableOpacity, StyleSheet, ScrollView, Modal, FlatList, TextInput, Image, Pressable, Platform, ActivityIndicator, useWindowDimensions } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useNavigation } from '@react-navigation/native';
 import Icon from 'react-native-vector-icons/Ionicons';
@@ -11,7 +12,8 @@ import { GestureHandlerRootView } from 'react-native-gesture-handler';
 import config from '../Helper/Environment';
 import {
   resolveItemImage, summarizeItems, buildItemPool, unwrapFeed, newestGeneratedAt, matchesFilter,
-  priceOf, displayValueText, isSummable, VALUE_SOURCE, DEFAULT_VALUE_SOURCE, sourceLabel,
+  priceOf, displayValueText, isSummable, VALUE_SOURCE, DEFAULT_VALUE_SOURCE, sourceLabel, canTrade, resolveItem, itemKey, normalizeScale, evaluateTrade,
+  createTradeSnapshot, serializeTradeItem, catchDescription, formatMarketValue, pickerQuote, pickerValueText,
 } from '../Helper/valueSources';
 import ConditionalKeyboardWrapper from '../Helper/keyboardAvoidingContainer';
 import { useHaptic } from '../Helper/HepticFeedBack';
@@ -26,6 +28,10 @@ import InterstitialAdManager from '../Ads/IntAd';
 import BannerAdComponent from '../Ads/bannerAds';
 import Share from 'react-native-share';
 import ShareTradeModal from '../Trades/ShareTradeModal';
+import { verdictLabel, marketQuote } from '../Helper/feedContract';
+import HomeIcon from '../HomeTab/HomeIcons';
+import TradeItemDetails from './TradeItemDetails';
+import RefreshIndicator from './RefreshIndicator';
 import TradeCompletion from '../Engagement/TradeCompletion';
 import { addDoc, collection, serverTimestamp, doc, getDoc, setDoc } from '@react-native-firebase/firestore';
 import SubscriptionScreen from '../SettingScreen/OfferWall';
@@ -36,11 +42,8 @@ import { SPACE } from '../Design/tokens';
 import { CALC_FILTERS, GAME } from '../config/game';
 import { FONT } from '../Design/tokens';
 
-// Nine per side is the game's actual trade window (Fisch opens a 9-slot trade
-// menu), and it matches the Adopt Me build. The MM2 default of 4 was that
-// game's limit, not this one's — it capped the calculator below what a player
-// could actually put in a trade.
-const GRID_STEPS = [9, 12, 15, 18];
+// Product limit, independent of the in-game trading window.
+const GRID_STEPS = [GAME.trade.maxPerSide];
 
 // Notice tones. Environment.js carries no semantic good/caution pair, and the
 // MM2 theme maps hasBlockGreen and wantBlockRed both to the brand colour, so
@@ -59,126 +62,25 @@ const createEmptySlots = (count) => Array(count).fill(null);
 
 // ✅ MM2: Removed getItemValue function - MM2 uses simple value field
 
-// Items a total cannot honestly include: `modeled` values are ordinal ranks
-// derived from bundle pricing, `none` has no price at all.
-// See Code/Helper/valueSources.js.
-// ONLY genuinely unpriced items belong in the "Unpriced" row. Two other kinds
-// of item used to land here and both were mislabelled:
-//   - fish, which carry a real C$ figure (their own row)
-//   - anything on the Proto scale, which is an ordinal rank and cannot be
-//     summed, but is very much priced (its own row too)
-// A Proto-priced rod skin reading "Unpriced" is exactly backwards.
-const excludedCount = (summary) => summary?.unpriced || 0;
-const notSummableCount = (summary) => summary?.notSummable || 0;
-const excludedLabel = (summary) => {
-  const n = excludedCount(summary);
-  return n ? `${n} item${n === 1 ? '' : 's'}` : '—';
-};
-
-// Value and demand are different things, and the community's most-repeated
-// lesson is that a high-value, low-demand item will not actually trade. An
-// even-on-value deal where you receive the harder-to-move side is a worse deal
-// than the number says.
-//
-// This ADVISES; it deliberately does not change the WIN/FAIR/LOSE verdict.
-// That verdict is stored as `status` on every trade document and drives the
-// badge on 8,799 existing trades — redefining it would make new trades
-// incomparable with old ones.
-const DEMAND_GAP_THRESHOLD = 1.5;
-
-// Returns { text, tone } so an advisory line can be coloured by what it
-// actually means for the user instead of every notice looking alike.
-// gap = (demand of what you GIVE) - (demand of what you RECEIVE):
-//
-//   gap > 0   you hand over the liquid side and take back the illiquid one.
-//             Runs against you -> caution.
-//   gap < 0   you offload the illiquid side and take back liquid items.
-//             Runs in your favour -> good.
-//
-// Both strings are the originals; only the tone is new. Still advisory only --
-// it deliberately does not touch the WIN/FAIR/LOSE verdict, which is stored as
-// `status` on 8,799 existing trades.
-const getDemandAdvice = (hasAvg, wantsAvg) => {
-  const a = Number(hasAvg);
-  const b = Number(wantsAvg);
-  if (!Number.isFinite(a) || !Number.isFinite(b)) return null;
-  const gap = a - b;
-  if (Math.abs(gap) < DEMAND_GAP_THRESHOLD) return null;
-  return gap > 0
-    ? { text: 'Their side is harder to trade on', tone: 'caution' }
-    : { text: 'Your side is harder to trade on', tone: 'good' };
-};
-
-/**
- * The W/F/L verdict, or `null` when there is nothing to judge.
- *
- * The MM2 version took two totals and opened on WIN, reasoning that 0 vs 0 is
- * the initial state. That is wrong here in a way it never was there: in Fisch
- * a 0 total ALSO means "every item on this side is unpriced" — fish are valued
- * by arithmetic, not consensus, and the Proto scale is ordinal and never
- * summable. So the empty calculator and a real trade of nine unpriced items
- * produced the same confident green WIN.
- *
- * A verdict needs at least one priced, summable item somewhere. Below that,
- * return null and let all three pills sit inactive — an honest "no reading"
- * rather than a flattering guess.
- */
-const getTradeStatus = (hasSummary, wantsSummary) => {
-  const priced = (hasSummary?.observed || 0) + (wantsSummary?.observed || 0);
-  if (priced === 0) return null;
-
-  // A verdict is only as good as its coverage, and the coverage here is
-  // genuinely patchy: of 666 quoted cosmetics, 354 carry both figures, 99 are
-  // S$-only and 213 are Proto-only. So a third of quoted items are invisible
-  // on S$ and 15% are invisible on Proto — whichever scale you pick, some item
-  // in a real trade will have no figure on it.
-  //
-  // Previously ANY single priced item produced a confident WIN/FAIR/LOSE, so a
-  // trade of one priced boat against eight unpriced skins read as a clean win.
-  // That is the worst failure this app can have: a wrong verdict carries more
-  // authority than no verdict, and someone loses items to it.
-  //
-  // Summing across the two scales instead is NOT the fix — that is the named
-  // Fisch scam. One scale per trade; when it cannot see the whole trade, the
-  // verdict is still shown but flagged PROVISIONAL (see `verdictPartial`), for
-  // two reasons:
-  //   - Fish are excluded from S$ totals by design (they are C$), and fish are
-  //     the most traded thing in the game. Withholding the verdict whenever one
-  //     is present would disable the calculator for its commonest use.
-  //   - game.guide, the incumbent, shows a verdict with N/A items too and warns
-  //     only in an FAQ. Matching its capability while putting the warning
-  //     INLINE, next to the number, is strictly better than hiding it.
-  const hasTotal = hasSummary?.total || 0;
-  const wantsTotal = wantsSummary?.total || 0;
-
-  // You give more than you get.
-  if (hasTotal > wantsTotal) return 'lose';
-  if (hasTotal < wantsTotal) return 'win';
-  return 'fair';
-};
-
-// ✅ Format values as simple numbers with commas
-const formatValue = (value) => {
-  if (value === null || value === undefined || value === 0) return '0';
-  const numValue = Number(value);
-  if (isNaN(numValue)) return '0';
-  // Show fractional values as-is (e.g. 0.33), integers with commas (e.g. 500,000,000)
-  if (numValue % 1 !== 0) return numValue.toFixed(2).replace(/\.?0+$/, '');
-  return numValue.toLocaleString();
-};
+const excludedCount = summary => (summary?.unpriced || 0) + (summary?.stale || 0);
+const excludedLabel = summary => excludedCount(summary) ? excludedCount(summary) + ' items' : '—';
+const formatValue = formatMarketValue;
 
 const HomeScreen = ({ selectedTheme }) => {
-  const { theme, user, firestoreDB, appdatabase, single_offer_wall, reload } = useGlobalState();
+  const { theme, user, firestoreDB, appdatabase, single_offer_wall, reload, loading: catalogueLoading } = useGlobalState();
   const tradesCollection = collection(firestoreDB, 'trades_new');
   const [gridStepIndex, setGridStepIndex] = useState(0); // 0 -> 9, 1 -> 12, 2 -> 15, 3 -> 18
   const [hasItems, setHasItems] = useState(() => createEmptySlots(GRID_STEPS[0]));
   const [wantsItems, setWantsItems] = useState(() => createEmptySlots(GRID_STEPS[0]));
 
   const [fruitRecords, setFruitRecords] = useState([]);
-  const [selectedPetType, setSelectedPetType] = useState('INVENTORY');
+  const [selectedPetType, setSelectedPetType] = useState('ALL');
+  const [pricedOnly, setPricedOnly] = useState(true);
   // const [wantsItems, setWantsItems] = useState(INITIAL_ITEMS);
   const [isDrawerVisible, setIsDrawerVisible] = useState(false);
   const [selectedSection, setSelectedSection] = useState(null);
+  const [detailItem, setDetailItem] = useState(null);
+  const [editingIndex, setEditingIndex] = useState(null);
   const [searchText, setSearchText] = useState('');
   const { triggerHapticFeedback } = useHaptic();
   const { localState, updateLocalState } = useLocalState();
@@ -186,7 +88,13 @@ const HomeScreen = ({ selectedTheme }) => {
   // Which catalogue prices this screen. The picker pool stays MM2 — the toggle
   // changes what items are WORTH, never which items exist, so nothing can
   // vanish from the grid mid-trade. See Code/Helper/valueSources.js.
-  const valueSource = localState?.valueSource || DEFAULT_VALUE_SOURCE;
+  const valueSource = normalizeScale(localState?.valueSource);
+  useEffect(() => {
+    if (!fruitRecords.length) return;
+    const refresh = items => items.map(item => item ? resolveItem(fruitRecords, item) || { ...item, trade: null, tradeability: { allowed: false } } : null);
+    setHasItems(refresh);
+    setWantsItems(refresh);
+  }, [fruitRecords]);
 
   // Totals are DERIVED from the grids, not accumulated alongside them. They
   // used to be state bumped by an updateTotal() call next to every mutation,
@@ -212,8 +120,11 @@ const HomeScreen = ({ selectedTheme }) => {
   const [type, setType] = useState(null);
   const platform = Platform.OS.toLowerCase();
   const { t } = useTranslation();
+  const { fontScale } = useWindowDimensions();
   const isDarkMode = theme === 'dark';
   const c = getThemeColors(isDarkMode);
+  const isGG = localState.isGG;
+  const styles = useMemo(() => getStyles(isDarkMode, isGG, undefined, fontScale), [isDarkMode, isGG, fontScale]);
   const insets = useSafeAreaInsets();
   const bannerBottomPos = 0; // tab bar is docked (in layout flow), so screen bottom == tab bar top; banner sits flush above it
   const viewRef = useRef();
@@ -283,7 +194,14 @@ const HomeScreen = ({ selectedTheme }) => {
     triggerHapticFeedback('impactLight');
     setRefreshing(true);
     try {
-      await reload();
+      // Keep the animation visible for at least 3 seconds without delaying the request.
+      const [result] = await Promise.allSettled([
+        Promise.resolve().then(() => reload()),
+        new Promise(resolve => setTimeout(resolve, 3000)),
+      ]);
+      if (result.status === 'rejected') throw result.reason;
+      const snapshot = result.value;
+      if (!snapshot) throw new Error('Catalogue refresh failed');
       if (!isMountedRef.current) return;
       // No stamping here: lastUpdatedTime is derived from the refreshed feed.
       showSuccessMessage(t('home.alert.success'), t('home.alert.values_reloaded', { defaultValue: 'Values updated!' }));
@@ -302,19 +220,9 @@ const HomeScreen = ({ selectedTheme }) => {
     return CALC_FILTERS;
   }, []);
 
-  const tradeStatus = useMemo(() =>
-    getTradeStatus(hasSummary, wantsSummary)
-    , [hasSummary, wantsSummary]);
-
-  // True when the active scale could not price part of the trade, so the
-  // verdict above was computed from an incomplete picture. Measured: of 666
-  // quoted cosmetics only 354 carry both figures — 213 are Proto-only and 99
-  // are S$-only — so this is the normal case, not an edge case.
-  const verdictPartial = useMemo(
-    () => excludedCount(hasSummary) + excludedCount(wantsSummary) > 0,
-    [hasSummary, wantsSummary],
-  );
-
+  const valuation = useMemo(() => createTradeSnapshot(hasItems, wantsItems, valueSource), [hasItems, wantsItems, valueSource]);
+  const tradeStatus = valuation.evaluation.verdict;
+  const verdictPartial = valuation.evaluation.status === 'incomplete';
 
   useEffect(() => {
     const timeout = setTimeout(() => {
@@ -391,20 +299,13 @@ const HomeScreen = ({ selectedTheme }) => {
   );
 
 
-  const selectItem = useCallback(
+  const addSelectedItem = useCallback(
     (item) => {
-      if (!item || !selectedSection) return;
+      if (!item || !selectedSection || !canTrade(item)) return;
 
       triggerHapticFeedback('impactLight');
 
-      // ✅ MM2: Use Value directly (no modifiers needed)
-      const value = Number(item.Value || 0);
-
-      const selectedItem = {
-        ...item,
-        selectedValue: value,
-        Value: value,
-      };
+      const selectedItem = item;
 
       // Work on copies of both sides so we can decide expansion
       const nextHasItems = [...hasItems];
@@ -413,7 +314,7 @@ const HomeScreen = ({ selectedTheme }) => {
       const targetArray =
         selectedSection === 'has' ? nextHasItems : nextWantsItems;
 
-      let nextEmptyIndex = targetArray.indexOf(null);
+      let nextEmptyIndex = editingIndex ?? targetArray.indexOf(null);
 
       // No empty slot left even at 18 → do nothing
       if (nextEmptyIndex === -1) {
@@ -425,6 +326,8 @@ const HomeScreen = ({ selectedTheme }) => {
       // This will also expand 9→12→15→18 if needed
       maybeExpandGrid(nextHasItems, nextWantsItems);
 
+      setDetailItem(null);
+      setEditingIndex(null);
       setIsDrawerVisible(false);
     },
     [
@@ -433,68 +336,42 @@ const HomeScreen = ({ selectedTheme }) => {
       selectedSection,
       triggerHapticFeedback,
       maybeExpandGrid,
+      editingIndex,
     ]
   );
 
 
+  const selectItem = useCallback(item => {
+    if (!selectedSection || !canTrade(item)) return;
+    const side = selectedSection === 'has' ? hasItems : wantsItems;
+    if (!side.includes(null)) {
+      showErrorMessage('Trade full', 'This app supports up to ' + GAME.trade.maxPerSide + ' item rows per side.');
+      return;
+    }
+    setIsDrawerVisible(false);
+    setEditingIndex(null);
+    setDetailItem(item);
+  }, [selectedSection, hasItems, wantsItems]);
+
   const handleCellPress = useCallback((index, isHas) => {
     const items = isHas ? hasItems : wantsItems;
-
-    const callbackfunction = () => { };
-
+    setSelectedSection(isHas ? 'has' : 'wants');
+    triggerHapticFeedback('impactLight');
     if (items[index]) {
-      triggerHapticFeedback('impactLight');
-      const updatedItems = [...items];
-      updatedItems[index] = null;
-
-      if (isHas) {
-        setHasItems(updatedItems);
-      } else {
-        setWantsItems(updatedItems);
-      }
+      setEditingIndex(index);
+      setDetailItem(items[index]);
     } else {
-      triggerHapticFeedback('impactLight');
-      setSelectedSection(isHas ? 'has' : 'wants');
+      setEditingIndex(null);
+      setSearchText('');
+      setDebouncedSearchText('');
       setIsDrawerVisible(true);
-
-      // ✅ Store timeout and animation frame IDs for cleanup
-      const rafKey1 = `cellPress_${Date.now()}_1`;
-      const timeoutKey1 = `cellPress_${Date.now()}_2`;
-      const rafKey2 = `cellPress_${Date.now()}_3`;
-      const timeoutKey2 = `cellPress_${Date.now()}_4`;
-
-      rafRefs.current[rafKey1] = requestAnimationFrame(() => {
-        if (!isMountedRef.current) return;
-
-        timeoutRefs.current[timeoutKey1] = setTimeout(() => {
-          if (!isMountedRef.current) return;
-
-          if (!adShowen && index === 1 && !localState.isPro && !isHas) {
-            rafRefs.current[rafKey2] = requestAnimationFrame(() => {
-              if (!isMountedRef.current) return;
-
-              timeoutRefs.current[timeoutKey2] = setTimeout(() => {
-                if (!isMountedRef.current) return;
-
-                try {
-                  callbackfunction();
-                } catch (err) {
-                  console.warn('[AdManager] Failed to show ad:', err);
-                  callbackfunction();
-                }
-                // Clean up after execution
-                delete timeoutRefs.current[timeoutKey2];
-              }, 400);
-            });
-          } else {
-            callbackfunction();
-          }
-          // Clean up after execution
-          delete timeoutRefs.current[timeoutKey1];
-        }, 500);
-      });
     }
-  }, [hasItems, wantsItems, triggerHapticFeedback, adShowen, localState.isPro]);
+  }, [hasItems, wantsItems, triggerHapticFeedback]);
+
+  const removeTradeItem = (index, isHas) => {
+    const setter = isHas ? setHasItems : setWantsItems;
+    setter(items => items.map((item, i) => i === index ? null : item));
+  };
 
   // ✅ MM2: Removed mode change effect - MM2 doesn't use Shark/Frost mode
   // ✅ MM2: Simplified toggleFavorite (no type needed)
@@ -531,6 +408,8 @@ const HomeScreen = ({ selectedTheme }) => {
 
   // ✅ MM2: Simplified filteredData (no value types/modifiers needed)
   const filteredData = useMemo(() => {
+    // Hidden picker work must not block the tab transition.
+    if (!isDrawerVisible) return [];
     let list;
     if (selectedPetType === 'INVENTORY') {
       // ✅ INVENTORY = the user's My Stuff list (same list as MyStuffScreen /
@@ -540,13 +419,7 @@ const HomeScreen = ({ selectedTheme }) => {
       list = myItems
         .map(owned => {
           // Match saved items with current fruitRecords to get latest values
-          const foundItem = fruitRecords.find(
-            item => item && (
-              (owned.id && item.id === owned.id) ||
-              (owned.name && item.name &&
-                item.name.toLowerCase() === owned.name.toLowerCase())
-            )
-          );
+          const foundItem = resolveItem(fruitRecords, owned);
           return foundItem || null;
         })
         .filter(Boolean)
@@ -569,12 +442,19 @@ const HomeScreen = ({ selectedTheme }) => {
         // `collection`, which is what buildItemPool actually tags rows with.
         return matchesSearch && matchesFilter(item, selectedPetType);
       })
-      .sort((a, b) => (b.Value || 0) - (a.Value || 0));
+      .map(item => ({ item, quote: pickerQuote(item, valueSource) }))
+      .filter(entry => !pricedOnly || !entry.quote.missing)
+      .map(entry => ({ item: entry.item, value: entry.quote.value ?? 0 }))
+      .sort((a, b) => b.value - a.value)
+      .map(entry => entry.item);
   }, [
+    isDrawerVisible,
+    pricedOnly,
     fruitRecords,
     debouncedSearchText,
     selectedPetType,
     localState.ownedPets,
+    valueSource,
   ]);
   // ✅ MM2: Removed badge handlers - MM2 doesn't use badges
 
@@ -587,7 +467,7 @@ const HomeScreen = ({ selectedTheme }) => {
     // still read as its MM2 value in the inventory list.
     const priced = priceOf(item, valueSource);
     const currentValue = priced.value;
-    const valueLabel = displayValueText(item, valueSource) || formatValue(currentValue);
+    const valueLabel = pickerValueText(item, valueSource);
     // Supreme declines to price leaderboard awards, and that is where the most
     // valuable items in the game sit. "Award only" alone would hide that this
     // is a 500,000,000 item, so MM2's figure rides along, labelled as MM2's.
@@ -596,27 +476,7 @@ const HomeScreen = ({ selectedTheme }) => {
       : '';
 
     // Handler to add item to calculator
-    const handleAddToCalculator = () => {
-      if (!selectedSection) return;
-      triggerHapticFeedback('impactLight');
-
-      const selectedItem = {
-        ...item,
-        selectedValue: currentValue,
-        Value: currentValue,
-      };
-
-      const nextHasItems = [...hasItems];
-      const nextWantsItems = [...wantsItems];
-      const targetArray = selectedSection === 'has' ? nextHasItems : nextWantsItems;
-      let nextEmptyIndex = targetArray.indexOf(null);
-
-      if (nextEmptyIndex === -1) return;
-
-      targetArray[nextEmptyIndex] = selectedItem;
-      maybeExpandGrid(nextHasItems, nextWantsItems);
-      setIsDrawerVisible(false);
-    };
+    const handleAddToCalculator = () => selectItem(item);
 
     return (
       <View style={styles.favoriteRowItem}>
@@ -628,7 +488,7 @@ const HomeScreen = ({ selectedTheme }) => {
         >
           <View style={styles.favoriteImageContainer}>
             {imageUrl ? (
-              <Image source={{ uri: imageUrl }} style={styles.favoriteItemImage} />
+              <CatalogueImage item={item} source={{ uri: imageUrl }} style={styles.favoriteItemImage} />
             ) : (
               <View style={[styles.favoriteItemImage, { backgroundColor: isDarkMode ? config.colors.surfaceElevatedDark : config.colors.dividerLight, justifyContent: 'center', alignItems: 'center' }]}>
                 <Icon name="image-outline" size={18} color={isDarkMode ? config.colors.textTertiaryDark : config.colors.textTertiaryLight} />
@@ -659,7 +519,7 @@ const HomeScreen = ({ selectedTheme }) => {
         </TouchableOpacity>
       </View>
     );
-  }, [selectedSection, hasItems, wantsItems, maybeExpandGrid, triggerHapticFeedback, toggleFavorite, isDarkMode, getImageUrl, valueSource]);
+  }, [styles, selectItem, selectedSection, hasItems, wantsItems, maybeExpandGrid, triggerHapticFeedback, toggleFavorite, isDarkMode, getImageUrl, valueSource]);
 
   // ✅ MM2: Simplified grid item render
   const renderGridItem = useCallback(({ item }) => {
@@ -683,7 +543,7 @@ const HomeScreen = ({ selectedTheme }) => {
         }}
       >
         {imageUrl ? (
-          <Image
+          <CatalogueImage item={item}
             source={{ uri: imageUrl }}
             style={styles.gridItemImage}
           />
@@ -695,19 +555,19 @@ const HomeScreen = ({ selectedTheme }) => {
         <Text numberOfLines={1} style={styles.gridItemText}>
           {item.name || item.Name}
         </Text>
-        <Text numberOfLines={1} style={styles.gridItemValue}>
+        <Text numberOfLines={1} style={[styles.gridItemValue, pickerQuote(item, valueSource).missing && styles.unquotedText]}>
           {/* The source's own words when it has no real price — "Priceless",
               "Award only", "x3 T1 Legendaries" — all beat a derived 0.024.
               See Code/Helper/valueSources.js. */}
-          {displayValueText(item, valueSource) || formatValue(priceOf(item, valueSource).value)}
+          {pickerValueText(item, valueSource)}
         </Text>
         {priceOf(item, valueSource).referenceValue ? (
           <Text numberOfLines={1} style={[styles.referenceValue, { textAlign: 'center' }]}>
             MM2: {formatValue(priceOf(item, valueSource).referenceValue)}
           </Text>
         ) : null}
-        {item.demand != null && item.demand !== 'N/A' && (
-          <Text style={styles.gridItemDemand}>{item.demand}/10</Text>
+        {item.trade?.demand && (
+          <Text style={styles.gridItemDemand}>{item.trade?.demand}</Text>
         )}
         {isAddingToFavorites && (
           <TouchableOpacity
@@ -771,23 +631,7 @@ const HomeScreen = ({ selectedTheme }) => {
     return null;
   }, [selectedPetType, localState.ownedPets, navigation]);
 
-  // Memoize key extractor
-  const keyExtractor = useCallback((item, index) =>
-    item.id?.toString() || `${item.name}-${item.type}-${index}`, []);
-
-
-  // Optimize FlatList performance
-  const getItemLayout = useCallback((data, index) => {
-    // For favorites: row layout with larger height, for grid: smaller height
-    const itemHeight = selectedPetType === 'INVENTORY' && !isAddingToFavorites ? 100 : 100;
-    return {
-      length: itemHeight,
-      offset: itemHeight * index,
-      index,
-    };
-  }, [selectedPetType, isAddingToFavorites]);
-
-
+  const keyExtractor = useCallback((item, index) => itemKey(item, index), []);
 
   // ✅ MM2: Removed factor fetching - MM2 doesn't use Shark/Frost mode factor
 
@@ -826,7 +670,7 @@ const HomeScreen = ({ selectedTheme }) => {
         // no one could ever complete in-game. The Values screen still lists
         // them; browsing a rod's stats is a different job. See config/game.js.
         const tradeableOnly = items.filter(
-          (i) => i?.collection && GAME.tradeable.includes(i.collection),
+          canTrade,
         );
         if (isMounted) setFruitRecords(tradeableOnly);
       } catch (err) {
@@ -868,6 +712,10 @@ const HomeScreen = ({ selectedTheme }) => {
         return;
       }
 
+      if (![...hasItems, ...wantsItems].filter(Boolean).every(canTrade)) {
+        showErrorMessage('Cannot post', 'Remove items that cannot be traded.');
+        return;
+      }
       setType('create');
       setModalVisible(true);
       // Clean up after execution
@@ -924,51 +772,9 @@ const HomeScreen = ({ selectedTheme }) => {
         typeof user?.lastGameWinAt === 'number' &&
         now - user.lastGameWinAt <= 24 * 60 * 60 * 1000; // last win within 24h
 
-      // ✅ MM2: Simplified trade item mapping - save full URL for backward compatibility with old apps
-      const mapTradeItem = item => {
-        // An absolute URL is stored on every trade item, because old app
-        // versions read it verbatim. An item with no art must land as '' —
-        // better a missing image than a permanently broken URL baked into the
-        // document.
-        //
-        // resolveItemImage returns `undefined` for those rows on purpose (its
-        // callers spread it into `source={{ uri }}`, which warns on ''), so it
-        // is a RENDER helper. Firestore rejects `undefined` outright — writing
-        // it raised "Unsupported field value: undefined" and failed the whole
-        // addDoc, so a trade containing any art-less item could not be posted
-        // at all. Coalesce here, at the storage boundary.
-        // See Code/Helper/valueSources.js.
-        const imageUrl = resolveItemImage(item) ?? '';
-
-        // Price from the catalogue the user was actually looking at. Taking
-        // item.Value here instead would store MM2 prices under a Supreme total,
-        // and the per-item values would not add up to hasTotal.
-        const priced = priceOf(item, valueSource);
-
-        return {
-          name: item.name || item.Name,
-          // Same Firestore rule as `image` above: a row carrying none of the
-          // three spellings would otherwise write `undefined` and reject the
-          // document. Matches slimItem() in Code/Engagement/journalUtils.js.
-          type: item.type || item.Category || item.Type || '',
-          value: priced.value,
-          image: imageUrl, // ✅ Save full URL like old app expects
-          // ✅ Include deprecated names if available
-          deprecatedNames: item.deprecatedNames || item.deprecated_names || null,
-          deprecatedName: item.deprecatedName || item.deprecated_name || null,
-          // Additive, and null for anything that predates it. Without this the
-          // trade cannot tell a real 25 from a bundle-tier 0.024 when it is
-          // read back, and `value` alone would be summed as currency forever.
-          // Readers must treat a missing field as summable — see isSummable().
-          valueConfidence: priced.valueConfidence || null,
-          valueText: priced.valueText || null,
-        };
-      };
-
-      // ✅ Calculate trade status and convert to single letter: 'w' (win), 'l' (lose), 'f' (fair)
-      const tradeStatus = getTradeStatus(hasSummary, wantsSummary);
-      // No verdict (nothing priced) logs as 'f' — neutral, not a claimed win.
-      const statusLetter = tradeStatus === 'win' ? 'w' : tradeStatus === 'lose' ? 'l' : 'f';
+      const mapTradeItem = item => serializeTradeItem(item, valueSource);
+      const snapshot = createTradeSnapshot(hasItems, wantsItems, valueSource);
+      const statusLetter = { win: 'w', lose: 'l', fair: 'f' }[snapshot.evaluation.verdict] || 'u';
 
       const mappedHasItems = hasItems.filter(item => item && (item.name || item.Name)).map(mapTradeItem);
       const mappedWantsItems = wantsItems.filter(item => item && (item.name || item.Name)).map(mapTradeItem);
@@ -994,6 +800,9 @@ const HomeScreen = ({ selectedTheme }) => {
         // there was. Without it a Supreme-priced trade is indistinguishable
         // from an MM2 one, and the two disagree on 70% of shared items.
         valueSource,
+        valuation: snapshot,
+        listingKind: snapshot.kind,
+        schemaVersion: 2,
         description: description || "",
         timestamp: timestamp, // ✅ Use serverTimestamp for Firestore
         status: statusLetter, // ✅ Trade status: 'w' (win), 'l' (lose), 'f' (fair)
@@ -1086,7 +895,7 @@ const HomeScreen = ({ selectedTheme }) => {
     } finally {
       setIsSubmitting(false);
     }
-  }, [isSubmitting, user, localState.isPro, hasItems, wantsItems, description, type, lastTradeTime, tradesCollection, t, resetState]);
+  }, [valueSource, hasTotal, wantsTotal, firestoreDB, isSubmitting, user, localState.isPro, hasItems, wantsItems, description, type, lastTradeTime, tradesCollection, t, resetState]);
 
   // ── Open the Log Trade sheet ──
   // Unlike "Create Trade" this posts nothing public — TradeCompletion records
@@ -1145,15 +954,14 @@ const HomeScreen = ({ selectedTheme }) => {
     setIsShareModalVisible(true);
   }, [hasItems, wantsItems, t]);
 
+  const summaryUnit = valueSource === VALUE_SOURCE.PROTO ? 'P' : '$';
   const profitLoss = wantsTotal - hasTotal;
   // Proto totals do not exist; see the em-dash comments in the header.
-  const isProtoScale = valueSource === VALUE_SOURCE.PROTO;
+  const isProtoScale = false;
   const isProfit = profitLoss >= 0;
   const neutral = profitLoss === 0;
 
-  const isGG = localState.isGG
 
-  const styles = useMemo(() => getStyles(isDarkMode, isGG), [isDarkMode, isGG]);
 
   const lastFilledIndexHas = useMemo(() =>
     hasItems.reduce((lastIndex, item, index) => (item ? index : lastIndex), -1)
@@ -1163,25 +971,9 @@ const HomeScreen = ({ selectedTheme }) => {
     wantsItems.reduce((lastIndex, item, index) => (item ? index : lastIndex), -1)
     , [wantsItems]);
 
-  // ✅ Aggregate demand for each side
-  const hasAvgDemand = useMemo(() => {
-    const items = hasItems.filter(i => i && i.demand != null && typeof i.demand === 'number');
-    if (items.length === 0) return null;
-    const avg = Math.min(10, items.reduce((sum, i) => sum + i.demand, 0) / items.length);
-    return avg % 1 === 0 ? avg.toFixed(0) : avg.toFixed(1);
-  }, [hasItems]);
-
-  const wantsAvgDemand = useMemo(() => {
-    const items = wantsItems.filter(i => i && i.demand != null && typeof i.demand === 'number');
-    if (items.length === 0) return null;
-    const avg = Math.min(10, items.reduce((sum, i) => sum + i.demand, 0) / items.length);
-    return avg % 1 === 0 ? avg.toFixed(0) : avg.toFixed(1);
-  }, [wantsItems]);
-
-  const demandAdvice = useMemo(
-    () => getDemandAdvice(hasAvgDemand, wantsAvgDemand),
-    [hasAvgDemand, wantsAvgDemand],
-  );
+  const hasAvgDemand = [...new Set(hasItems.filter(Boolean).map(i => i.trade?.demand).filter(Boolean))].join(' · ');
+  const wantsAvgDemand = [...new Set(wantsItems.filter(Boolean).map(i => i.trade?.demand).filter(Boolean))].join(' · ');
+  const demandAdvice = null;
 
   return (
     <>
@@ -1189,399 +981,78 @@ const HomeScreen = ({ selectedTheme }) => {
         <View style={styles.container} key={language}>
           <ScrollView showsVerticalScrollIndicator={false} contentContainerStyle={{ paddingBottom: bannerBottomPos + 80 }}>
             <ViewShot ref={viewRef} style={styles.screenshotView}>
-              {config.isNoman && (
-                <View style={styles.summaryContainer}>
-                  <View style={styles.summaryInner}>
-                    {/* Scale toggle. Changes what items are worth, not which
-                        items exist, so switching can never empty the grid.
-                        The two scales are NOT comparable: Proto is an ordinal
-                        rank predating S$ pricing, three to four orders of
-                        magnitude smaller. The whole trade stays on whichever
-                        is selected — mixing them is the named Fisch scam. */}
-                    <View style={styles.sourceToggleRow}>
-                      {[VALUE_SOURCE.VALUE, VALUE_SOURCE.PROTO].map((src) => {
-                        const active = valueSource === src;
-                        return (
-                          <TouchableOpacity
-                            key={src}
-                            style={[styles.sourceToggleButton, active && styles.sourceToggleButtonActive]}
-                            activeOpacity={0.8}
-                            onPress={() => {
-                              if (active) return;
-                              triggerHapticFeedback('impactLight');
-                              updateLocalState('valueSource', src);
-                            }}
-                          >
-                            <Text style={[styles.sourceToggleText, active && styles.sourceToggleTextActive]}>
-                              {sourceLabel(src)}
-                            </Text>
-                          </TouchableOpacity>
-                        );
-                      })}
-                    </View>
-                    <View style={styles.topSection}>
-                      {/* Proto is ordinal — there is no such thing as a Proto
-                          total, so showing "0" claims a number that does not
-                          exist. An em dash says "not applicable" instead. */}
-                      <Text style={styles.bigNumber} numberOfLines={1} adjustsFontSizeToFit>
-                        {isProtoScale ? '—' : (formatValue(hasTotal) || '0')}
-                      </Text>
-                      <View style={styles.statusContainer}>
-                        <Text style={[
-                          styles.statusText,
-                          tradeStatus === 'win' ? {
-                            ...styles.statusActive,
-                            backgroundColor: STATUS.success // Green for win
-                          } : styles.statusInactive
-                        ]}>{t('home.win')}</Text>
-                        <Text style={[
-                          styles.statusText,
-                          tradeStatus === 'fair' ? {
-                            ...styles.statusActive,
-                            backgroundColor: config.colors.secondary // Blue for fair
-                          } : styles.statusInactive
-                        ]}>{t('home.fair')}</Text>
-                        <Text style={[
-                          styles.statusText,
-                          tradeStatus === 'lose' ? {
-                            ...styles.statusActive,
-                            backgroundColor: config.colors.primary // Primary color for lose
-                          } : styles.statusInactive
-                        ]}>{t('home.lose')}</Text>
-                      </View>
-                      <Text style={styles.bigNumber} numberOfLines={1} adjustsFontSizeToFit>
-                        {isProtoScale ? '—' : (formatValue(wantsTotal) || '0')}
-                      </Text>
-                    </View>
-                    {/* <View style={styles.progressContainer}>
-                      <View style={styles.progressBar}>
-                        <View
-                          style={[
-                            styles.progressLeft,
-                            { width: progressBarStyle.left }
-                          ]}
-                        />
-                        <View
-                          style={[
-                            styles.progressRight,
-                            { width: progressBarStyle.right }
-                          ]}
-                        />
-                      </View>
-                    </View> */}
-
-                    {/* ✅ Aggregate demand row */}
-                    {(hasAvgDemand || wantsAvgDemand) && (
-                      <View style={styles.demandSummaryRow}>
-                        <View style={styles.demandSummaryPill}>
-                          <Text style={styles.demandSummaryText}>{hasAvgDemand || '—'}/10</Text>
-                        </View>
-                        <Text style={styles.demandSummaryLabel}>Demand</Text>
-                        <View style={styles.demandSummaryPill}>
-                          <Text style={styles.demandSummaryText}>{wantsAvgDemand || '—'}/10</Text>
-                        </View>
-                      </View>
-                    )}
-
-                    {/* Fish are valued by the game in C$, not by community
-                        consensus in S$, so they cannot join the total above —
-                        the Scrip Vendor's one-way C$100,000 -> S$1 sink would
-                        price an average Megalodon at S$0.32 against skins worth
-                        thousands. Adding a fish used to change nothing on this
-                        header, which read as a broken calculator. It now gets
-                        its own line, in its own currency. */}
-                    {/* Priced, but on a scale that cannot be added up. On Proto
-                        this is every item: it is a rank, not a currency. These
-                        used to be counted as "Unpriced", which told a trader
-                        their perfectly well-quoted skin had no value. */}
-                    {(notSummableCount(hasSummary) > 0 || notSummableCount(wantsSummary) > 0) && (
-                      <View style={styles.demandSummaryRow}>
-                        <Text style={styles.excludedText}>
-                          {notSummableCount(hasSummary) ? `${notSummableCount(hasSummary)} item${notSummableCount(hasSummary) === 1 ? '' : 's'}` : '—'}
-                        </Text>
-                        <Text style={styles.demandSummaryLabel}>
-                          {t('home.ranked_not_summed', { defaultValue: 'Ranked, not summed' })}
-                        </Text>
-                        <Text style={styles.excludedText}>
-                          {notSummableCount(wantsSummary) ? `${notSummableCount(wantsSummary)} item${notSummableCount(wantsSummary) === 1 ? '' : 's'}` : '—'}
-                        </Text>
-                      </View>
-                    )}
-
-                    {(hasSummary.cashCount > 0 || wantsSummary.cashCount > 0) && (
-                      <View style={styles.demandSummaryRow}>
-                        <Text style={styles.excludedText}>{hasSummary.cashTotalText || '—'}</Text>
-                        <Text style={styles.demandSummaryLabel}>
-                          {t('home.fish_cash_total', { defaultValue: 'Fish (C$)' })}
-                        </Text>
-                        <Text style={styles.excludedText}>{wantsSummary.cashTotalText || '—'}</Text>
-                      </View>
-                    )}
-
-                    {/* What the total leaves out. A modeled value is a
-                        bundle-tier rank, not a price, so it cannot be summed —
-                        without this row a trade of cheap items just reads "0".
-                        See Code/Helper/valueSources.js. */}
-                    {(excludedCount(hasSummary) > 0 || excludedCount(wantsSummary) > 0) && (
-                      <>
-                        <View style={styles.demandSummaryRow}>
-                          <Text style={styles.excludedText}>{excludedLabel(hasSummary)}</Text>
-                          <Text style={styles.demandSummaryLabel}>Unpriced</Text>
-                          <Text style={styles.excludedText}>{excludedLabel(wantsSummary)}</Text>
-                        </View>
-                        {/* The caveat belongs NEXT TO the verdict, not in a help
-                            page. game.guide shows a verdict with N/A items and
-                            explains the consequence only in its FAQ; a trader
-                            reading a green WIN is not reading an FAQ. */}
-                        {!!tradeStatus && verdictPartial && (
-                          <Text style={styles.partialNote}>
-                            {t('home.verdict_partial', {
-                              defaultValue:
-                                'Verdict ignores unpriced items — check those before you trade',
-                            })}
-                          </Text>
-                        )}
-                      </>
-                    )}
-
-                    <View style={styles.profitLossBox}>
-                      <Text numberOfLines={1} adjustsFontSizeToFit style={[styles.bigNumber2, { color: isProfit ? config.colors.hasBlockGreen : config.colors.wantBlockRed }]}>
-                        {isProtoScale ? '—' : formatValue(Math.abs(profitLoss))}
-                      </Text>
-                      <View style={[styles.divider, { position: 'absolute', right: 0, bottom: 0 }]}>
-                        <Image
-                          source={require('../../assets/reset.png')}
-                          style={{ width: 18, height: 18, tintColor: 'white' }}
-                          onTouchEnd={resetState}
-                        />
-                      </View>
-                    </View>
-                  </View>
+              <View style={styles.compareCard}>
+                <View style={styles.compareToolbar}>
+                  <View style={styles.compareTitle}><HomeIcon name="values" size={18} color={config.colors.primary} /><Text style={styles.compareHeading}>Market</Text></View>
+                <View style={styles.sourceToggleRow}>
+                  {[VALUE_SOURCE.VALUE, VALUE_SOURCE.PROTO].map(src => <TouchableOpacity key={src}
+                    accessibilityRole="button" accessibilityState={{ selected: valueSource === src }}
+                    style={[styles.sourceToggleButton, valueSource === src && styles.sourceToggleButtonActive]}
+                    onPress={() => updateLocalState('valueSource', src)}>
+                    <Text style={[styles.sourceToggleText, valueSource === src && styles.sourceToggleTextActive]}>{sourceLabel(src)}</Text>
+                  </TouchableOpacity>)}
                 </View>
-              )}
-
-              {/* Demand advice, moved OUT of the summary card so that one card
-                  is not carrying every piece of information at once. Still
-                  shown only when the gap clears DEMAND_GAP_THRESHOLD, now toned
-                  by whether it runs for or against the user. */}
-              {demandAdvice ? (
-                <View style={[
-                  styles.notice,
-                  demandAdvice.tone === 'good' ? styles.noticeGood : styles.noticeCaution,
-                ]}>
-                  <Icon
-                    name={demandAdvice.tone === 'good' ? 'trending-up-outline' : 'alert-circle-outline'}
-                    size={15}
-                    color={demandAdvice.tone === 'good' ? NOTICE_GOOD_FG : NOTICE_CAUTION_FG}
-                    style={{ marginRight: 7 }}
-                  />
-                  <Text style={[
-                    styles.noticeText,
-                    { color: demandAdvice.tone === 'good' ? NOTICE_GOOD_FG : NOTICE_CAUTION_FG },
-                  ]}>{demandAdvice.text}</Text>
+                  <TouchableOpacity accessibilityLabel="Clear trade" onPress={resetState} style={styles.iconAction}><Icon name="refresh-outline" size={18} color={c.textSecondary} /></TouchableOpacity>
                 </View>
-              ) : null}
-
-              <View style={styles.labelContainer}>
-                <Text style={styles.offerLabel}>{t('home.me')}</Text>
-                <Text style={styles.dividerText}></Text>
-                <Text style={styles.offerLabel}>{t('home.you')}</Text>
+                <View style={styles.compareTotals}>
+                  {[['You give', hasSummary], ['You receive', wantsSummary]].map(([label, summary]) => <View key={label} style={[styles.totalColumn, label === 'You give' ? styles.giveTint : styles.receiveTint]}>
+                    <Text style={styles.cardCaption}>{label}</Text>
+                    <Text style={[styles.totalNumber, label === 'You give' ? styles.giveText : styles.receiveText]} numberOfLines={1} adjustsFontSizeToFit>{summaryUnit}: {formatValue(summary.total)}</Text>
+                    {summary.count > 0 && !summary.complete && <Text style={styles.cardCaption}>Priced subtotal</Text>}
+                  </View>)}
+                </View>
+                <View style={[styles.resultPill, tradeStatus === 'win' && { backgroundColor: '#DDF4E8' }, tradeStatus === 'lose' && { backgroundColor: '#FCE5E4' }]}>
+                  <Text style={[styles.resultText, tradeStatus === 'win' && { color: '#176342' }, tradeStatus === 'lose' && { color: '#983B36' }]}>{valuation.evaluation.status === 'incomplete' ? 'Value incomplete' : verdictLabel(valuation.evaluation)}</Text>
+                  {tradeStatus && <Text style={styles.cardCaption}>{profitLoss >= 0 ? '+' : '−'}{summaryUnit}: {formatValue(Math.abs(profitLoss))} received</Text>}
+                </View>
+                <Text style={styles.sourceCaption}>Game.Guide estimates · {GAME.trade.fairBandPercent}% fair range</Text>
+                {verdictPartial && <Text style={styles.sourceCaption}>Unpriced / stale: give {excludedLabel(hasSummary)} · receive {excludedLabel(wantsSummary)}</Text>}
+                {(refreshing || catalogueLoading) && <RefreshIndicator colors={c} primary={config.colors.primary} />}
+                {!refreshing && !catalogueLoading && !!localState.valuesError && <TouchableOpacity onPress={handleRefresh} style={styles.refreshNotice}><Icon name="cloud-offline-outline" size={16} color={c.textSecondary} /><Text style={styles.cardCaption}>Using saved data · Tap to retry</Text></TouchableOpacity>}
               </View>
-              <View style={{ flexDirection: 'row', justifyContent: 'space-between' }}>
-                <View style={styles.itemRow}>
-                  {hasItems?.map((item, index) => {
-                    return (
-                      <TouchableOpacity
-                        key={index}
-                        style={styles.addItemBlockNew}
-                        onPress={() => handleCellPress(index, true)}
-                      >
-                        {item ? (
-                          <>
-                            {/* Art is never dimmed. The active source not
-                                pricing an item is still signalled -- by the
-                                unpricedBadge just below -- but fading the
-                                artwork made the whole grid look washed out on
-                                Supreme, where 62% of items are modeled or
-                                unpriced against MM2's 44%. */}
-                            <Image
-                              source={{ uri: getImageUrl(item) }}
-                              style={styles.itemImageOverlay}
-                            />
-                            {!isSummable(item, valueSource) && (
-                              <View style={styles.unpricedBadge}>
-                                <Text style={styles.unpricedBadgeText}>
-                                  {priceOf(item, valueSource).missing ? '—' : '?'}
-                                </Text>
-                              </View>
-                            )}
-                            {/* ✅ MM2: Show demand pill if demand >= 5 */}
-                            {item.demand != null && item.demand >= 5 && (
-                              <View style={styles.calcDemandOverlay}>
-                                <View style={[styles.calcDemandPill, item.demand >= 8 && { backgroundColor: '#EF4444CC' }]}>
-                                  <Text style={styles.calcDemandPillText}>{item.demand}/10</Text>
-                                </View>
-                              </View>
-                            )}
-                          </>
-                        ) : (
-                          <Icon
-                            name="add"
-                            // An empty slot is an invitation, not a control that
-                            // needs to compete with the items beside it. Muted
-                            // token at 40% rather than two hardcoded hexes.
-                            size={18}
-                            color={c.textMuted + '66'}
-                          />
-                        )}
-                      </TouchableOpacity>
-                    );
-                  })}
-                </View>
-                <View style={[styles.itemRow]}>
-                  {wantsItems?.map((item, index) => {
-                    return (
-                      <TouchableOpacity
-                        key={index}
-                        style={styles.addItemBlockNew}
-                        onPress={() => handleCellPress(index, false)}
-                      >
-                        {item ? (
-                          <>
-                            {/* Art is never dimmed. The active source not
-                                pricing an item is still signalled -- by the
-                                unpricedBadge just below -- but fading the
-                                artwork made the whole grid look washed out on
-                                Supreme, where 62% of items are modeled or
-                                unpriced against MM2's 44%. */}
-                            <Image
-                              source={{ uri: getImageUrl(item) }}
-                              style={styles.itemImageOverlay}
-                            />
-                            {!isSummable(item, valueSource) && (
-                              <View style={styles.unpricedBadge}>
-                                <Text style={styles.unpricedBadgeText}>
-                                  {priceOf(item, valueSource).missing ? '—' : '?'}
-                                </Text>
-                              </View>
-                            )}
-                            {/* ✅ MM2: Show demand pill if demand >= 5 */}
-                            {item.demand != null && item.demand >= 5 && (
-                              <View style={styles.calcDemandOverlay}>
-                                <View style={[styles.calcDemandPill, item.demand >= 8 && { backgroundColor: '#EF4444CC' }]}>
-                                  <Text style={styles.calcDemandPillText}>{item.demand}/10</Text>
-                                </View>
-                              </View>
-                            )}
-                          </>
-                        ) : (
-                          <Icon
-                            name="add"
-                            // An empty slot is an invitation, not a control that
-                            // needs to compete with the items beside it. Muted
-                            // token at 40% rather than two hardcoded hexes.
-                            size={18}
-                            color={c.textMuted + '66'}
-                          />
-                        )}
-                      </TouchableOpacity>
-                    );
-                  })}
-                </View>
+              <View style={styles.tradeSides}>
+                {[['You give', hasItems, true], ['You receive', wantsItems, false]].map(([label, items, isHas]) => <View key={label} style={styles.tradeSide}>
+                  <View style={styles.sideHeader}><Text style={[styles.sideTitle, isHas ? styles.giveText : styles.receiveText]}>{label}</Text><Text style={styles.cardCaption}>({items.filter(Boolean).length}/{GAME.trade.maxPerSide})</Text></View>
+                  <View style={styles.sideGrid}>
+                  {items.map((item, index) => item && <View key={index} style={[styles.selectedCard, isHas ? styles.giveTint : styles.receiveTint]}>
+                    <TouchableOpacity onPress={() => handleCellPress(index, isHas)} accessibilityRole="button" accessibilityLabel={'Edit ' + item.name} accessibilityHint="Opens quantity and catch details" style={styles.tileBody}>
+                      <CatalogueImage item={item} source={{ uri: getImageUrl(item) }} style={styles.selectedImage} resizeMode="contain" />
+                      <Text style={styles.selectedName} numberOfLines={1}>{item.name}</Text>
+                      <Text style={[styles.selectedValue, isHas ? styles.giveText : styles.receiveText, priceOf(item, valueSource).missing && styles.unquotedText]} numberOfLines={1}>{displayValueText(item, valueSource)}</Text>
+                      <Text style={styles.itemCaption} numberOfLines={1}>{catchDescription(item) || '×1'}</Text>
+                    </TouchableOpacity>
+                    <TouchableOpacity onPress={() => removeTradeItem(index, isHas)} accessibilityRole="button"
+                      accessibilityLabel={'Remove ' + item.name} style={styles.tileRemove} hitSlop={4}>
+                      <Icon name="close" size={14} color={c.textSecondary} />
+                    </TouchableOpacity>
+                  </View>)}
+                  {items.map((item, index) => item === null ? index : -1).filter(index => index >= 0)
+                    .slice(0, Math.max(1, 2 - items.filter(Boolean).length)).map(index => <TouchableOpacity key={'empty-' + index}
+                      accessibilityLabel={'Add item to ' + label.toLowerCase()} style={[styles.addCard, isHas ? styles.giveTint : styles.receiveTint]}
+                      onPress={() => handleCellPress(index, isHas)}>
+                      <View style={styles.addCircle}><Icon name="add" size={24} color={isHas ? (isDarkMode ? '#68DCCC' : '#087F78') : (isDarkMode ? '#C3ACFF' : '#7250BA')} /></View>
+                      <Text style={[styles.addLabel, isHas ? styles.giveText : styles.receiveText]}>Add item</Text>
+                    </TouchableOpacity>)}
+                  </View>
+                </View>)}
               </View>
-              {/* ✅ MM2: Removed Shark/Frost mode toggle - MM2 doesn't use these modes */}
-
-              {!config.isNoman && (
-                <View style={styles.summaryContainer}>
-                  <View style={[styles.summaryBox, styles.hasBox]}>
-                    <View style={{ width: '90%', backgroundColor: '#e0e0e0', alignSelf: 'center', }} />
-                    <View style={{ justifyContent: 'space-between', flexDirection: 'row' }} >
-                      <Text style={styles.priceValue}>{t('home.value')}:</Text>
-                      <Text style={styles.priceValue}>${formatValue(hasTotal)}</Text>
-                    </View>
-                  </View>
-                  <View style={[styles.summaryBox, styles.wantsBox]}>
-                    <View style={{ width: '90%', backgroundColor: '#e0e0e0', alignSelf: 'center', }} />
-                    <View style={{ justifyContent: 'space-between', flexDirection: 'row' }} >
-                      <Text style={styles.priceValue}>{t('home.value')}:</Text>
-                      <Text style={styles.priceValue}>${formatValue(wantsTotal)}</Text>
-                    </View>
-                  </View>
-                </View>
-              )}
             </ViewShot>
-            <View style={styles.createtrade}>
-              <TouchableOpacity
-                style={styles.createtradeButton}
-                onPress={() => handleCreateTradePress()}
-              >
-                <Text style={styles.tradeBtnText} numberOfLines={1}>{t('home.create_trade')}</Text>
-              </TouchableOpacity>
-              <TouchableOpacity
-                style={styles.logTradeButton}
-                onPress={handleLogTradePress}
-              >
-                <Icon name="book-outline" size={13} color="#fff" style={{ marginRight: SPACE.xs }} />
-                <Text style={styles.tradeBtnText} numberOfLines={1}>
-                  {t('home.log_trade', { defaultValue: 'Log Trade' })}
-                </Text>
-              </TouchableOpacity>
-              <TouchableOpacity
-                style={styles.shareTradeButton}
-                onPress={handleShareTrade}
-              >
-                <Text style={styles.tradeBtnText} numberOfLines={1}>{t('home.share_trade')}</Text>
-              </TouchableOpacity>
-            </View>
-            {!localState.isPro && <View style={styles.createtradeAds}>
-              <TouchableOpacity
-                style={styles.removeAdsButton}
-                activeOpacity={0.9}
-                onPress={() => setShowofferwall(true)}
-              >
-                <View style={styles.removeAdsContent}>
-                  {/* Crown icon / image */}
-                  <View style={styles.crownWrapper}>
-                    {/* <Icon name="trophy" size={18} color="#3b2500" /> */}
-
-                    <Image
-                      source={require('../../assets/pro.png')}
-                      style={{ width: 20, height: 20 }}
-                      resizeMode="contain"
-                    />
-
-                  </View>
-
-                  <View style={styles.removeAdsTextWrapper}>
-                    <Text style={styles.removeAdsTitle}>{t('home.remove_ads')}</Text>
-                    {/* <Text style={styles.removeAdsSubtitle}>Unlock a clean experience</Text> */}
-                  </View>
-                </View>
-              </TouchableOpacity>
-            </View>}
-
-            {/* ✅ Last Updated / Refresh Button */}
-            <TouchableOpacity
-              style={styles.lastUpdatedContainer}
-              onPress={handleRefresh}
-              disabled={refreshing}
-              activeOpacity={0.7}
-            >
-              <View style={styles.lastUpdatedContent}>
-                {refreshing ? (
-                  <ActivityIndicator size="small" color={config.colors.primary} style={{ marginRight: SPACE.sm }} />
-                ) : (
-                  <Icon name="time-outline" size={14} color={isDarkMode ? '#aaa' : '#888'} style={{ marginRight: SPACE.sm }} />
-                )}
-                <Text style={[styles.lastUpdatedText, { color: c.textSecondary }]}>
-                  {refreshing ? t('home.updating', { defaultValue: 'Updating...' }) : `${t('home.updated_prefix', { defaultValue: 'Updated ' })}${getLastUpdatedText()}`}
-                </Text>
-                {!refreshing && (
-                  <Icon name="refresh-outline" size={14} color={config.colors.primary} style={{ marginLeft: SPACE.sm }} />
-                )}
+            <View style={styles.actionArea}>
+              <TouchableOpacity style={styles.primaryAction} onPress={handleCreateTradePress}><Icon name="swap-horizontal-outline" size={20} color="#fff" /><Text style={styles.primaryActionText}>{t('home.create_trade')}</Text></TouchableOpacity>
+              <View style={styles.secondaryActions}>
+                <TouchableOpacity style={styles.secondaryAction} onPress={handleLogTradePress}><Icon name="book-outline" size={18} color={config.colors.primary} /><Text style={styles.secondaryActionText}>{t('home.log_trade', { defaultValue: 'Log Trade' })}</Text></TouchableOpacity>
+                <TouchableOpacity style={styles.secondaryAction} onPress={handleShareTrade}><Icon name="share-outline" size={18} color={config.colors.primary} /><Text style={styles.secondaryActionText}>{t('home.share_trade')}</Text></TouchableOpacity>
               </View>
-            </TouchableOpacity>
-
+            </View>
+            <View style={styles.utilityRow}>
+              <TouchableOpacity onPress={handleRefresh} disabled={refreshing || catalogueLoading} style={styles.utilityAction}>
+                <Icon name="refresh-outline" size={14} color={c.textSecondary} />
+                <Text style={styles.cardCaption}>{refreshing || catalogueLoading ? 'Refreshing…' : 'Refresh values'}</Text>
+              </TouchableOpacity>
+              {!localState.isPro && <TouchableOpacity onPress={() => setShowofferwall(true)} style={styles.utilityAction}>
+                <Icon name="shield-checkmark-outline" size={14} color={c.textSecondary} /><Text style={styles.cardCaption}>Remove ads</Text>
+              </TouchableOpacity>}
+            </View>
           </ScrollView>
           <Modal
             visible={isDrawerVisible}
@@ -1607,9 +1078,20 @@ const HomeScreen = ({ selectedTheme }) => {
                 </TouchableOpacity>
               </View>
 
+              <View style={{ flexDirection: 'row', gap: 8, marginBottom: 8 }}>
+                {[[true, 'With prices'], [false, 'All tradeable']].map(([only, label]) => <TouchableOpacity key={label}
+                  accessibilityRole="button" accessibilityState={{ selected: pricedOnly === only }}
+                  onPress={() => setPricedOnly(only)} style={[styles.categoryButton, pricedOnly === only && styles.categoryButtonActive]}>
+                  <Text style={[styles.categoryButtonText, pricedOnly === only && styles.categoryButtonTextActive]}>{label}</Text>
+                </TouchableOpacity>)}
+              </View>
+              <Text style={[styles.cardCaption, { marginBottom: 8 }]}>{pricedOnly
+                ? sourceLabel(valueSource) + ' quotes · stale prices cannot give a verdict'
+                : 'Unpriced items can be offered; their value is unknown.'}</Text>
               <View style={styles.drawerContent}>
                 <ScrollView
-                  showsVerticalScrollIndicator={false}
+                  horizontal
+                  showsHorizontalScrollIndicator={false}
                   style={styles.categoryListScroll}
                   contentContainerStyle={styles.categoryList}
                 >
@@ -1639,14 +1121,18 @@ const HomeScreen = ({ selectedTheme }) => {
                         style={[
                           styles.categoryButtonText,
                           selectedPetType === category && styles.categoryButtonTextActive
-                        ]}>{category}</Text>
+                        ]}>{category === 'SKINS' ? 'Rod skins' : category === 'INVENTORY' ? 'My inventory' : category.charAt(0) + category.slice(1).toLowerCase()}</Text>
                     </TouchableOpacity>
                   ))}
                 </ScrollView>
 
                 <View style={styles.gridContainer}>
+                  <Text style={styles.lastUpdatedText} accessibilityLiveRegion="polite">
+                    {filteredData.length.toLocaleString()} items{searchText.trim() ? ' matching search' : ''}
+                  </Text>
                   {renderFavoritesHeader()}
                   <FlatList
+                    keyboardShouldPersistTaps="handled"
                     key={`${selectedPetType}-${isAddingToFavorites ? 'add' : 'view'}-${(localState.favorites || []).length}`}
                     data={filteredData}
                     keyExtractor={keyExtractor}
@@ -1656,8 +1142,10 @@ const HomeScreen = ({ selectedTheme }) => {
                     initialNumToRender={12}
                     maxToRenderPerBatch={12}
                     windowSize={5}
-                    removeClippedSubviews={true}
-                    getItemLayout={selectedPetType === 'INVENTORY' && !isAddingToFavorites ? undefined : getItemLayout}
+                    removeClippedSubviews={false}
+                    ListEmptyComponent={<Text style={styles.lastUpdatedText}>
+                      {searchText.trim() ? 'No matching items. Clear your search or choose another category.' : pricedOnly ? 'No quotes on this scale. Try Proto or All tradeable.' : 'No items in this category.'}
+                    </Text>}
                   />
                   {selectedPetType === 'INVENTORY' ? renderFavoritesFooter() : null}
                   {/* ✅ MM2: Removed badge buttons (N, F, M, R, D) - MM2 doesn't use value type/modifier badges */}
@@ -1725,6 +1213,9 @@ const HomeScreen = ({ selectedTheme }) => {
           <BannerAdComponent collapsible />
         </View>
       )}
+      {!!detailItem && <TradeItemDetails key={itemKey(detailItem)} item={detailItem} editing={editingIndex !== null}
+        mutations={unwrapFeed(localState.data)?.mutations || []} scale={valueSource}
+        onClose={() => setDetailItem(null)} onSave={addSelectedItem} />}
       <ShareTradeModal
         visible={isShareModalVisible}
         onClose={() => setIsShareModalVisible(false)}
@@ -1733,6 +1224,7 @@ const HomeScreen = ({ selectedTheme }) => {
         hasTotal={hasTotal}
         wantsTotal={wantsTotal}
         description={description}
+        valueSource={valueSource}
       />
       <TradeCompletion
         visible={showTradeCompletion}
@@ -1742,15 +1234,62 @@ const HomeScreen = ({ selectedTheme }) => {
         uid={user?.id}
         hasItems={hasItems}
         wantsItems={wantsItems}
-        tradeResult={tradeStatus ?? 'fair'}
+        tradeResult={tradeStatus}
+        valueSource={valueSource}
+        valuation={valuation}
         t={t}
       />
     </>
   );
 };
 
-const getStyles = (isDarkMode, isGG, c = getThemeColors(isDarkMode)) =>
+const getStyles = (isDarkMode, isGG, c = getThemeColors(isDarkMode), fontScale = 1) =>
   StyleSheet.create({
+    utilityRow: { flexDirection: 'row', justifyContent: 'center', gap: 24, marginHorizontal: 12 },
+    utilityAction: { minHeight: 40, flexDirection: 'row', alignItems: 'center', gap: 6 },
+    compareCard: { margin: 12, padding: 12, borderRadius: 16, backgroundColor: isDarkMode ? '#182536' : '#FFFFFF', borderWidth: 1, borderColor: c.border },
+    compareToolbar: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
+    compareTitle: { flex: 1, flexDirection: 'row', alignItems: 'center', gap: 6 },
+    compareHeading: { color: c.text, fontFamily: FONT.bold, fontSize: 13 },
+    iconAction: { flex: 1, padding: 6, alignItems: 'flex-end' },
+    compareTotals: { flexDirection: 'row', marginVertical: 8, gap: 10 },
+    totalColumn: { flex: 1, gap: 2, paddingVertical: 8, borderRadius: 12, alignItems: 'center' },
+    totalNumber: { color: c.text, fontFamily: FONT.bold, fontSize: 21, textAlign: 'center' },
+    cardCaption: { fontFamily: FONT.regular, color: c.textSecondary, fontSize: 11, lineHeight: 16 },
+    resultPill: { padding: 8, borderRadius: 12, backgroundColor: c.bg, alignItems: 'center', gap: 4 },
+    resultText: { color: c.text, fontFamily: FONT.bold, fontSize: 12 },
+    sourceCaption: { fontFamily: FONT.regular, color: c.textSecondary, fontSize: 10, textAlign: 'center', marginTop: 6 },
+    refreshNotice: { flexDirection: 'row', justifyContent: 'center', alignItems: 'center', gap: 6, paddingTop: 10 },
+    tradeSides: { flexDirection: 'row', gap: 10, paddingHorizontal: 12 },
+    giveTint: { backgroundColor: isDarkMode ? '#143B3B' : '#E3F5F0', borderColor: isDarkMode ? '#285653' : '#BFE6DB' },
+    receiveTint: { backgroundColor: isDarkMode ? '#302644' : '#F0EAFC', borderColor: isDarkMode ? '#514068' : '#DFD2F2' },
+    giveText: { color: isDarkMode ? '#68DCCC' : '#087F78' },
+    receiveText: { color: isDarkMode ? '#C3ACFF' : '#7250BA' },
+    tradeSide: { flex: 1 },
+    sideGrid: { flexDirection: 'row', flexWrap: 'wrap', justifyContent: 'space-between', rowGap: 8, alignItems: 'flex-start' },
+    unquotedText: { color: c.textSecondary, fontFamily: FONT.regular },
+    itemCaption: { fontFamily: FONT.regular, color: c.textSecondary, fontSize: 10, lineHeight: 13, height: 13 * fontScale, includeFontPadding: false, textAlign: 'center', textAlignVertical: 'center' },
+    sideHeader: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 6, marginBottom: 8 },
+    sideTitle: { fontFamily: FONT.bold, fontSize: 12, color: c.text },
+    tileBody: { paddingTop: 12 },
+    tileRemove: { position: 'absolute', top: 1, right: 1, width: 28, height: 28, borderRadius: 14, alignItems: 'center', justifyContent: 'center', backgroundColor: 'transparent' },
+    selectedCard: { width: '48%', padding: 5, borderRadius: 10, borderWidth: 1, borderColor: c.border, backgroundColor: c.bgAlt },
+    selectedImage: { height: 32, width: '100%', marginBottom: 4 },
+    selectedName: { fontFamily: FONT.bold, fontSize: 11, lineHeight: 14, height: 14 * fontScale, textAlignVertical: 'center', includeFontPadding: false, textAlign: 'center', color: c.text, marginBottom: 2 },
+    selectedValue: { color: config.colors.primary, fontFamily: FONT.bold, fontSize: 10, lineHeight: 13, height: 13 * fontScale, textAlignVertical: 'center', includeFontPadding: false, textAlign: 'center', marginBottom: 2 },
+    cardActions: { flexDirection: 'row', justifyContent: 'space-between', borderTopWidth: 1, borderTopColor: c.border, marginTop: 4 },
+    cardAction: { flex: 1, minHeight: 36, minWidth: 0, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 4 },
+    editLabel: { color: config.colors.primary, fontSize: 12 },
+    addCard: { width: '48%', minHeight: 84, flexDirection: 'column', borderWidth: 1, borderStyle: 'solid', borderColor: c.border, backgroundColor: c.bgAlt, borderRadius: 10, alignItems: 'center', justifyContent: 'center', gap: 4, padding: 6 },
+    addCircle: { padding: 4, backgroundColor: isDarkMode ? '#FFFFFF08' : '#FFFFFF88', borderRadius: 24 },
+    addLabel: { color: config.colors.primary, fontFamily: FONT.bold, fontSize: 11, textAlign: 'center' },
+    actionArea: { margin: 12, gap: 8 },
+    primaryAction: { backgroundColor: config.colors.primary, borderRadius: 12, padding: 12, flexDirection: 'row', justifyContent: 'center', alignItems: 'center', gap: 8 },
+    primaryActionText: { color: '#fff', fontFamily: FONT.bold, fontSize: 14 },
+    secondaryActions: { flexDirection: 'row', gap: 10 },
+    secondaryAction: { flex: 1, padding: 10, backgroundColor: c.bgAlt, borderRadius: 12, flexDirection: 'row', justifyContent: 'center', alignItems: 'center', gap: 8 },
+    secondaryActionText: { color: config.colors.primary, fontFamily: FONT.regular, fontSize: 12 },
+
     container: {
       flex: 1,
       backgroundColor: isDarkMode ? config.colors.backgroundDark : config.colors.backgroundLight,
@@ -1825,17 +1364,17 @@ const getStyles = (isDarkMode, isGG, c = getThemeColors(isDarkMode)) =>
       flexDirection: 'row',
       alignSelf: 'center',
       borderRadius: 8,
-      padding: SPACE.hair,
-      marginBottom: SPACE.md,
+      padding: 2,
+      marginBottom: 0,
       backgroundColor: isDarkMode ? config.colors.surfaceElevatedDark : config.colors.dividerLight,
     },
     sourceToggleButton: {
-      paddingHorizontal: SPACE.xxl,
-      paddingVertical: SPACE.xs,
+      paddingHorizontal: 14,
+      paddingVertical: 6,
       borderRadius: 6,
     },
     sourceToggleButtonActive: {
-      backgroundColor: config.colors.secondary,
+      backgroundColor: config.colors.primary,
     },
     sourceToggleText: {
       fontSize: SIZE.caption,
@@ -2082,26 +1621,18 @@ const getStyles = (isDarkMode, isGG, c = getThemeColors(isDarkMode)) =>
     },
     drawerContent: {
       flex: 1,
-      flexDirection: 'row',
+      flexDirection: 'column',
     },
-    categoryListScroll: {
-      // INVENTORY and LANTERNS wrapped to two lines here. SIZE.label is 10pt,
-      // already the smallest step on the type scale, so the fix is room rather
-      // than a smaller font: trimming the gutter gives the labels ~8pt more,
-      // and the Text above is numberOfLines={1} + adjustsFontSizeToFit so a
-      // device with large system font scaling shrinks instead of wrapping.
-      maxWidth: '25%',
-      width: '25%',
-      paddingRight: SPACE.md,
-    },
+    categoryListScroll: { flexGrow: 0, flexShrink: 0, marginBottom: 12, maxHeight: 48 },
     categoryList: {
+      alignItems: 'center',
       paddingVertical: SPACE.hair,
     },
     categoryButton: {
       marginVertical: SPACE.hair,
       marginHorizontal: SPACE.xs,
       paddingVertical: SPACE.md,
-      paddingHorizontal: SPACE.xs,
+      paddingHorizontal: 14,
       backgroundColor: c.bgAlt,
       borderRadius: 6,
       alignItems: 'center',
@@ -2141,8 +1672,12 @@ const getStyles = (isDarkMode, isGG, c = getThemeColors(isDarkMode)) =>
     },
     gridItem: {
       flex: 1,
-      margin: SPACE.xs,
+      maxWidth: '33.333%',
+      padding: 10,
+      marginBottom: 8,
       alignItems: 'center',
+      borderRadius: 12,
+      backgroundColor: c.bgAlt,
     },
     gridItemImage: {
       width: 70,
@@ -2150,6 +1685,8 @@ const getStyles = (isDarkMode, isGG, c = getThemeColors(isDarkMode)) =>
       borderRadius: 10,
     },
     gridItemText: {
+      fontFamily: FONT.bold,
+      textAlign: 'center',
       fontSize: SIZE.small,
       marginTop: SPACE.xs,
       color: c.text,
@@ -2254,8 +1791,7 @@ const getStyles = (isDarkMode, isGG, c = getThemeColors(isDarkMode)) =>
       color: 'white',
     },
     screenshotView: {
-      padding: SPACE.lg,
-      flex: 1,
+      padding: 0,
     },
 
 

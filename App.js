@@ -66,8 +66,8 @@ function App() {
   const isDark = theme === 'dark';
 
   useEffect(() => {
-    SystemNavigationBar.setNavigationColor(isDark ? '#000000' : '#FFFFFF', !isDark);
-    SystemNavigationBar.setBarMode(isDark ? 'dark' : 'light');
+    if (Platform.OS !== 'android') return;
+    SystemNavigationBar.setNavigationColor(isDark ? '#000000' : '#F4F9FB', isDark ? 'light' : 'dark', 'navigation');
   }, [isDark]);
 
   const selectedTheme = useMemo(() => {

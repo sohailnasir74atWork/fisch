@@ -43,6 +43,19 @@ export const COSMETIC_TYPE = {
 //  duration: days (-1 = permanent)
 // ════════════════════════════════════════════════════════════
 export const FRAMES = {
+  // Fisch collection: lightweight vector art, full detail on profile previews.
+  reef_treasure: { id: "reef_treasure", name: "🪸 Reef Treasure", type: COSMETIC_TYPE.FRAME, rarity: RARITY.RARE, renderType: "svg", duration: 7, borderColors: ["#FF775E", "#FFD277", "#19BAAF"], borderWidth: 6, glowColor: "#FF775E80" },
+  pearl_tide: { id: "pearl_tide", name: "🐚 Pearl Tide", type: COSMETIC_TYPE.FRAME, rarity: RARITY.RARE, renderType: "svg", duration: 7, borderColors: ["#A1EAF5", "#FFF8E5", "#C5B4FA"], borderWidth: 6, glowColor: "#A1EAF580" },
+  kraken_crown: { id: "kraken_crown", name: "🐙 Kraken Crown", type: COSMETIC_TYPE.FRAME, rarity: RARITY.EXCLUSIVE, renderType: "svg", duration: -1, borderColors: ["#BB72F5", "#39E8C9", "#5843A9"], borderWidth: 6, glowColor: "#BB72F580" },
+  sunfin_royal: { id: "sunfin_royal", name: "🐠 Sunfin Royal", type: COSMETIC_TYPE.FRAME, rarity: RARITY.LEGENDARY, renderType: "svg", duration: 30, borderColors: ["#FFB52E", "#FF675D", "#FFF1A1"], borderWidth: 6, glowColor: "#FFB52E80" },
+  glacier_fins: { id: "glacier_fins", name: "🧊 Glacier Fins", type: COSMETIC_TYPE.FRAME, rarity: RARITY.RARE, renderType: "svg", duration: 7, borderColors: ["#7DE6FF", "#DDF9FF", "#4888E8"], borderWidth: 6, glowColor: "#7DE6FF80" },
+  moonlit_lagoon: { id: "moonlit_lagoon", name: "🌙 Moonlit Lagoon", type: COSMETIC_TYPE.FRAME, rarity: RARITY.LEGENDARY, renderType: "svg", duration: 30, borderColors: ["#8793FF", "#E1C7FF", "#47DCCC"], borderWidth: 6, glowColor: "#8793FF80" },
+  citrus_splash: { id: "citrus_splash", name: "🍋 Citrus Splash", type: COSMETIC_TYPE.FRAME, rarity: RARITY.UNCOMMON, renderType: "svg", duration: 3, borderColors: ["#B6E746", "#FFD95C", "#22B8A6"], borderWidth: 6, glowColor: "#B6E74680" },
+  berry_blossom: { id: "berry_blossom", name: "🌺 Berry Blossom", type: COSMETIC_TYPE.FRAME, rarity: RARITY.RARE, renderType: "svg", duration: 7, borderColors: ["#EE63AB", "#FFE0B3", "#9D70E4"], borderWidth: 6, glowColor: "#EE63AB80" },
+  solar_sailor: { id: "solar_sailor", name: "☀️ Solar Sailor", type: COSMETIC_TYPE.FRAME, rarity: RARITY.LEGENDARY, renderType: "svg", duration: 30, borderColors: ["#FFBD45", "#FA7373", "#FFE9A6"], borderWidth: 6, glowColor: "#FFBD4580" },
+  abyss_guardian: { id: "abyss_guardian", name: "🔱 Abyss Guardian", type: COSMETIC_TYPE.FRAME, rarity: RARITY.EXCLUSIVE, renderType: "svg", duration: -1, borderColors: ["#29DDD5", "#6885FF", "#EBC16C"], borderWidth: 6, glowColor: "#29DDD580" },
+  jade_drift: { id: "jade_drift", name: "🍃 Jade Drift", type: COSMETIC_TYPE.FRAME, rarity: RARITY.UNCOMMON, renderType: "svg", duration: 3, borderColors: ["#4ECEA7", "#D9EF9A", "#209B93"], borderWidth: 6, glowColor: "#4ECEA780" },
+  starlight_sorbet: { id: "starlight_sorbet", name: "🌠 Starlight Sorbet", type: COSMETIC_TYPE.FRAME, rarity: RARITY.LEGENDARY, renderType: "svg", duration: 30, borderColors: ["#F788C7", "#9AA6FF", "#FFDA87"], borderWidth: 6, glowColor: "#F788C780" },
   // ── COMMON (6) — CSS border rings ──
   hot_pink_ring: {
     id: 'hot_pink_ring',
@@ -535,6 +548,18 @@ export const FRAMES = {
 //  duration: days (-1 = permanent)
 // ════════════════════════════════════════════════════════════
 export const TEXT_COLORS = {
+  lagoon_ink: { id: "lagoon_ink", name: "🫧 Lagoon Ink", type: COSMETIC_TYPE.TEXT_COLOR, rarity: RARITY.COMMON, duration: 1, color: "#168C91" },
+  reef_ruby: { id: "reef_ruby", name: "🪸 Reef Ruby", type: COSMETIC_TYPE.TEXT_COLOR, rarity: RARITY.UNCOMMON, duration: 3, color: "#D64B68" },
+  iris_ink: { id: "iris_ink", name: "🪻 Iris Ink", type: COSMETIC_TYPE.TEXT_COLOR, rarity: RARITY.RARE, duration: 7, color: "#8B68D9" },
+  amber_ink: { id: "amber_ink", name: "🌞 Amber Ink", type: COSMETIC_TYPE.TEXT_COLOR, rarity: RARITY.COMMON, duration: 1, color: "#AD790D" },
+  jade_ink: { id: "jade_ink", name: "🍀 Jade Ink", type: COSMETIC_TYPE.TEXT_COLOR, rarity: RARITY.UNCOMMON, duration: 3, color: "#348B59" },
+  ocean_cobalt: { id: "ocean_cobalt", name: "🌊 Ocean Cobalt", type: COSMETIC_TYPE.TEXT_COLOR, rarity: RARITY.RARE, duration: 7, color: "#557FE0" },
+  orchid_ink: { id: "orchid_ink", name: "🌺 Orchid Ink", type: COSMETIC_TYPE.TEXT_COLOR, rarity: RARITY.COMMON, duration: 1, color: "#B755B2" },
+  copper_ink: { id: "copper_ink", name: "🍂 Copper Ink", type: COSMETIC_TYPE.TEXT_COLOR, rarity: RARITY.UNCOMMON, duration: 3, color: "#B86F38" },
+  slate_pearl: { id: "slate_pearl", name: "🦪 Slate Pearl", type: COSMETIC_TYPE.TEXT_COLOR, rarity: RARITY.RARE, duration: 7, color: "#748298" },
+  dragonfruit_ink: { id: "dragonfruit_ink", name: "🍉 Dragonfruit", type: COSMETIC_TYPE.TEXT_COLOR, rarity: RARITY.COMMON, duration: 1, color: "#C54E87" },
+  arctic_teal: { id: "arctic_teal", name: "🧊 Arctic Teal", type: COSMETIC_TYPE.TEXT_COLOR, rarity: RARITY.UNCOMMON, duration: 3, color: "#2D8B7B" },
+  royal_indigo: { id: "royal_indigo", name: "🔮 Royal Indigo", type: COSMETIC_TYPE.TEXT_COLOR, rarity: RARITY.RARE, duration: 7, color: "#7C73D8" },
   pastel_pink: {
     id: 'pastel_pink',
     name: '🩷 Bubblegum',

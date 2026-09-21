@@ -164,31 +164,13 @@ export const GAME = {
   // ---- Catalogue shape ----------------------------------------------------
   // Mirrors the pipeline's 18 collections.
   collections: [
-    'fish', 'rods', 'skins', 'bobbers', 'boats', 'lanterns', 'gliders',
+    'fish', 'rods', 'skins', 'bobbers', 'boats', 'lanterns', 'gliders', 'booths', 'halos',
     'baits', 'mutations', 'effects', 'accessories', 'harpoons', 'spears',
     'companions', 'npcs', 'events', 'versions', 'codes',
   ],
-  /**
-   * What the GAME lets you put in a trade. Verified against the official wiki's
-   * Trading page (fischipedia.org/wiki/Trading), which states the trading menu
-   * accepts "any fish, bobber, boat, or rod skin", and the Trade Plaza Sales
-   * Booth "Skins, Bobbers, Gliders, etc."; game.guide's trading hub independently
-   * lists "boats, rod skins, bobbers, gliders". Lanterns are included because
-   * they carry real community quotes with demand and trend data.
-   *
-   * NOTE: rods themselves are NOT tradeable — only rod SKINS. Nor are baits,
-   * mutations (they are properties of a caught fish, not items), effects,
-   * accessories, companions, harpoons or spears. Offering any of those would
-   * advertise a trade that cannot be completed in-game.
-   */
-  tradeable: ['fish', 'skins', 'boats', 'bobbers', 'lanterns', 'gliders'],
-
-  /**
-   * The subset the COMMUNITY actually quotes a price for. Measured on the live
-   * feed: all 667 community quotes sit in these five. Fish are tradeable but
-   * never community-quoted — their worth is the game's own arithmetic.
-   */
-  communityPriced: ['skins', 'boats', 'bobbers', 'lanterns', 'gliders'],
+  // Actual rods are reference data. Eligibility is also checked per item.
+  tradeable: ['fish', 'skins', 'boats', 'bobbers', 'lanterns', 'gliders', 'booths', 'halos'],
+  communityPriced: ['fish', 'skins', 'boats', 'bobbers', 'lanterns', 'gliders', 'booths', 'halos'],
 
   // Fish rarity ladder, from Module:Fish List on the official wiki.
   rarities: [
@@ -196,48 +178,14 @@ export const GAME = {
     'Mythical', 'Exotic', 'Secret', 'Relic', 'Fragment',
   ],
 
-  // ---- Trading ------------------------------------------------------------
-  // Fisch has a real two-sided, both-confirm trade window (both players level
-  // 15+), which is why the W/F/L calculator applies here at all. The incumbent
-  // value site uses nine slots a side; the grid steps below already bracket it.
+  // App limit per side; not a claim about the in-game slot limit.
   trade: {
     maxPerSide: 9,
     fairBandPercent: 10,
-    // ── The two currencies, per the official wiki ────────────────────────
-    //
-    //   C$  Cash. The primary in-game currency, earned from selling fish.
-    //   S$  Shady Scrips. A SECONDARY currency, used only in The Shady Bazaar
-    //       and the Trade Plaza — which is exactly where trading happens, so
-    //       it is the currency community trade values are quoted in.
-    //
-    // They are convertible at the Scrip Vendor: **C$100,000 -> S$1, ONE WAY**
-    // (fischipedia.org/wiki/S$). Do NOT be tempted to use that rate to fold
-    // fish values into an S$ trade total. It is a deliberate sink, not a market
-    // rate: an average Megalodon sells for ~C$32,000, which converts to S$0.32,
-    // against traded skins worth thousands of S$. Converting would price every
-    // fish at effectively zero. Fish therefore display in C$ and are excluded
-    // from S$ totals — see isSummable() in Code/Helper/valueSources.js.
-    //
-    // ── Proto ────────────────────────────────────────────────────────────
-    //
-    // Proto is NOT a currency and not a rank. It is a separate community-run
-    // value spreadsheet (tabs for Skins, Boats, Miscellaneous) that game.guide
-    // publishes as a third column beside its own TrueVal (S$) and Trade Hub
-    // figures. Neither game.guide nor the wiki defines it on-page.
-    //
-    // Measured on the live feed, which corroborates that description exactly:
-    // Proto appears ONLY on cosmetics — skins 355, boats 193, gliders 11,
-    // bobbers 7, lanterns 1 — and on ZERO of the 1,659 fish. Its numbers run
-    // 0-7,200 with no fixed relationship to S$ (the value/proto ratio spans
-    // 50 to 283,333), so the two are different scales, not different units of
-    // one thing. A total must stay on one scale for a whole trade; quoting a
-    // Proto figure as S$ is the named Fisch scam.
-    //
-    // Do not treat Proto as the lesser list. For skins it covers MORE items
-    // than S$ does (355 vs 212), which is the main reason to keep the toggle.
+    // Independent community scales. NPC fish sale estimates are C$.
     scales: [
       { id: 'value', label: 'S$', comparable: true },
-      { id: 'proto', label: 'Proto', comparable: false },
+      { id: 'proto', label: 'Proto', comparable: true },
     ],
   },
 };
@@ -317,7 +265,7 @@ export const GOOGLE_WEB_CLIENT_ID =
  */
 export const ITEM_FILTERS = [
   'ALL', 'RODS', 'FISH', 'SKINS', 'BOBBERS', 'BOATS',
-  'LANTERNS', 'GLIDERS', 'BAITS', 'MUTATIONS', 'ACCESSORIES',
+  'LANTERNS', 'GLIDERS', 'BOOTHS', 'HALOS', 'BAITS', 'MUTATIONS', 'ACCESSORIES',
   'HARPOONS', 'SPEARS', 'COMPANIONS', 'EFFECTS',
 ];
 

@@ -1,3 +1,5 @@
+import { resolveItem, canTrade, sourceLabel, summarizeItems as summarizeMarketItems } from '../Helper/valueSources';
+import { quantityOf } from '../Helper/feedContract';
 /**
  * MyStuffScreen — "My Items" + "My Goals" inventory manager
  * Compact 4-col grid for items, intelligent goal cards with progress bars.
@@ -43,7 +45,7 @@ const fmt = (v) => {
   if (v >= 1e9) return smart(v / 1e9, 'B');
   if (v >= 1e6) return smart(v / 1e6, 'M');
   if (v >= 1e3) return smart(v / 1e3, 'K');
-  if (v < 1) return v.toFixed(2);
+  if (v < 1) return v.toLocaleString('en-US', { maximumFractionDigits: 8 });
   return v % 1 === 0 ? v.toLocaleString() : v.toFixed(1);
 };
 
@@ -57,6 +59,7 @@ const TABS = [
 const RESULT_META = {
   win:  { emoji: '🏆', label: 'Win',  color: STATUS.success },
   fair: { emoji: '🤝', label: 'Fair', color: STATUS.warning },
+  not_evaluated: { emoji: '—', label: 'Not evaluated', color: '#64748b' },
   loss: { emoji: '📉', label: 'Loss', color: STATUS.danger },
 };
 
@@ -150,14 +153,10 @@ const MyStuffScreen = ({ selectedTheme }) => {
   // See Code/Helper/valueSources.js.
   const lookupVal = useCallback((item) => {
     if (!item?.name) return 0;
-    const n = (item.name || '').toLowerCase().trim();
-    const f = parsedData.find(d => (d?.name || '').toLowerCase().trim() === n);
-    const priced = priceOf(f || item, valueSource);
-    // isSummable takes the ITEM, not the price. Passing the price result here
-    // made it look up `trade` on an object that has no such field, so it
-    // returned false for everything and this total was permanently 0.
-    if (isSummable(f || item, valueSource)) return priced.value || 0;
-    return 0;
+    const resolved = resolveItem(parsedData, item);
+    if (!resolved) return null;
+    const priced = priceOf(resolved, valueSource);
+    return priced.missing || priced.stale ? null : priced.value * quantityOf(resolved);
   }, [parsedData, valueSource]);
 
   /**
@@ -168,11 +167,7 @@ const MyStuffScreen = ({ selectedTheme }) => {
    * copies that may predate `collection`, so fall back to `type` and finally
    * assume tradeable rather than demoting an item we simply cannot classify.
    */
-  const isTradeable = useCallback((item) => {
-    const c = (item?.collection || item?.type || '').toLowerCase();
-    if (!c) return true;
-    return GAME.tradeable.includes(c);
-  }, []);
+  const isTradeable = useCallback(item => canTrade(resolveItem(parsedData, item)), [parsedData]);
 
   // Portfolio stats
   const stats = useMemo(() => {
@@ -182,7 +177,7 @@ const MyStuffScreen = ({ selectedTheme }) => {
     // a total next to a raw item count implies every item contributed, so a
     // rod-heavy inventory looked like the app had lost the money.
     const tradeable = items.filter((p) => isTradeable(p)).length;
-    return { count: items.length, total, tradeable, gear: items.length - tradeable };
+    return { count: items.length, total, tradeable, gear: items.length - tradeable, incomplete: items.some(p => lookupVal(p) == null) };
   }, [activeTab, ownedPets, wishlistPets, lookupVal, isTradeable]);
 
   // Goal progress stats
@@ -193,6 +188,7 @@ const MyStuffScreen = ({ selectedTheme }) => {
     let reachable = 0;
     wishlistPets.forEach(p => {
       const v = lookupVal(p);
+      if (v == null) return false;
       if (v > 0 && bestVal >= v) reachable++;
     });
     return { reachable, total: wishlistPets.length };
@@ -273,7 +269,7 @@ const MyStuffScreen = ({ selectedTheme }) => {
         {val > 0 ? (
           <View style={[$.cardValueBadge, { backgroundColor: config.colors.primary + '18' }]}>
             <Text style={[$.cardValueText, { color: config.colors.primary }]}>
-              {fmt(val)}
+              {val == null ? 'Unpriced' : sourceLabel(valueSource) + ' ' + fmt(val)}
             </Text>
           </View>
         ) : !tradeable ? (
@@ -288,7 +284,7 @@ const MyStuffScreen = ({ selectedTheme }) => {
         ) : null}
       </View>
     );
-  }, [lookupVal, C, removeOwnedPet]);
+  }, [lookupVal, valueSource, C, removeOwnedPet]);
 
   // ── Intelligent Goal Card ──
   const renderGoalCard = useCallback(({ item }) => {
@@ -349,7 +345,7 @@ const MyStuffScreen = ({ selectedTheme }) => {
             <View style={{ flexDirection: 'row', alignItems: 'center', gap: SPACE.xs, marginTop: 3, flexWrap: 'wrap' }}>
               {petVal > 0 && (
                 <View style={[$.pill, { backgroundColor: C.bg }]}>
-                  <Text style={[$.pillText, { color: STATUS.primary }]}>💎 {fmt(petVal)}</Text>
+                  <Text style={[$.pillText, { color: STATUS.primary }]}>💎 {petVal == null ? 'Unpriced' : sourceLabel(valueSource) + ' ' + fmt(petVal)}</Text>
                 </View>
               )}
               <View style={[$.pill, { backgroundColor: difficulty.bg }]}>
@@ -385,7 +381,7 @@ const MyStuffScreen = ({ selectedTheme }) => {
         )}
       </View>
     );
-  }, [lookupVal, ownedPets, C, removeWishlistPet, t]);
+  }, [lookupVal, valueSource, ownedPets, C, removeWishlistPet, t]);
 
   // ── Trade history: Firestore trade_journal/{uid}/trades, newest first ──
   const fetchHistory = useCallback(async (reset = false) => {
@@ -437,13 +433,15 @@ const MyStuffScreen = ({ selectedTheme }) => {
   const historyStats = useMemo(() => {
     const s = { total: history.length, win: 0, fair: 0, loss: 0, given: 0, received: 0 };
     history.forEach(h => {
+      if (h.valuation?.version !== 2) return;
       if (s[h.result] !== undefined) s[h.result]++;
+      if (h.valuation.scale !== valueSource || h.valuation.evaluation.status !== 'complete') return;
       s.given += Number(h.givenValue) || 0;
       s.received += Number(h.receivedValue) || 0;
     });
     s.net = s.received - s.given;
     return s;
-  }, [history]);
+  }, [history, valueSource]);
 
   // Remove a single logged trade. Optimistic: the row disappears immediately
   // and is restored if the delete fails, so the list never lies about what's
@@ -553,18 +551,19 @@ const MyStuffScreen = ({ selectedTheme }) => {
 
         <View style={[$.statsDivider, { backgroundColor: C.border }]} />
 
+        <Text style={[$.statsFootnote, { color: C.textSecondary }]}>Complete market estimates on {sourceLabel(valueSource)} only.</Text>
         <View style={$.statsValueRow}>
           <Text style={[$.statsValueLabel, { color: C.textSecondary }]}>{t('mystuff.value_given', { defaultValue: 'Value Given' })}</Text>
-          <Text style={[$.statsValueNum, { color: STATUS.danger }]}>{fmt(given)}</Text>
+          <Text style={[$.statsValueNum, { color: STATUS.danger }]}>{sourceLabel(valueSource)} {fmt(given)}</Text>
         </View>
         <View style={$.statsValueRow}>
           <Text style={[$.statsValueLabel, { color: C.textSecondary }]}>{t('mystuff.value_received', { defaultValue: 'Value Received' })}</Text>
-          <Text style={[$.statsValueNum, { color: STATUS.success }]}>{fmt(received)}</Text>
+          <Text style={[$.statsValueNum, { color: STATUS.success }]}>{sourceLabel(valueSource)} {fmt(received)}</Text>
         </View>
         <View style={$.statsValueRow}>
           <Text style={[$.statsValueLabel, { color: C.text, fontFamily: FONT.bold }]}>{t('mystuff.net', { defaultValue: 'Net' })}</Text>
           <Text style={[$.statsValueNum, { color: net >= 0 ? STATUS.success : STATUS.danger, fontFamily: FONT.bold }]}>
-            {net >= 0 ? '+' : '−'}{fmt(Math.abs(net))}
+            {sourceLabel(valueSource)} {net >= 0 ? '+' : '−'}{fmt(Math.abs(net))}
           </Text>
         </View>
 
@@ -593,10 +592,10 @@ const MyStuffScreen = ({ selectedTheme }) => {
         </TouchableOpacity>
       </View>
     );
-  }, [historyStats, historyHasMore, C, t, handleClearHistory, clearingHistory]);
+  }, [historyStats, historyHasMore, valueSource, C, t, handleClearHistory, clearingHistory]);
 
   const renderHistoryCard = useCallback(({ item }) => {
-    const meta = RESULT_META[item.result] || RESULT_META.fair;
+    const meta = item.valuation?.version === 2 ? RESULT_META[item.result] || RESULT_META.not_evaluated : RESULT_META.not_evaluated;
     const date = item.createdAt?.toDate
       ? item.createdAt.toDate().toLocaleDateString()
       : '';
@@ -622,16 +621,17 @@ const MyStuffScreen = ({ selectedTheme }) => {
           <View style={{ flex: 1 }}>
             <Text style={[$.histSideLabel, { color: C.textSecondary }]}>{t('mystuff.gave', { defaultValue: 'Gave' })}</Text>
             <Text style={[$.histItems, { color: C.text }]} numberOfLines={2}>{item.given || '—'}</Text>
-            <Text style={[$.histValue, { color: STATUS.danger }]}>{fmt(Number(item.givenValue) || 0)}</Text>
+            <Text style={[$.histValue, { color: STATUS.danger }]}>{item.valuation?.version === 2 ? item.valuation.unit + ' ' + fmt(item.givenValue) + (item.valuation.has.complete ? '' : ' subtotal') : '—'}</Text>
           </View>
           <FontAwesome name="right-left" size={12} color={C.textSecondary} solid style={{ alignSelf: 'center', marginHorizontal: SPACE.md }} />
           <View style={{ flex: 1 }}>
             <Text style={[$.histSideLabel, { color: C.textSecondary }]}>{t('mystuff.got', { defaultValue: 'Got' })}</Text>
             <Text style={[$.histItems, { color: C.text }]} numberOfLines={2}>{item.received || '—'}</Text>
-            <Text style={[$.histValue, { color: STATUS.success }]}>{fmt(Number(item.receivedValue) || 0)}</Text>
+            <Text style={[$.histValue, { color: STATUS.success }]}>{item.valuation?.version === 2 ? item.valuation.unit + ' ' + fmt(item.receivedValue) + (item.valuation.wants.complete ? '' : ' subtotal') : '—'}</Text>
           </View>
         </View>
 
+        {!!item.userRating && <Text style={[$.histNote, { color: C.textSecondary }]}>Your rating: {item.userRating}</Text>}
         {!!item.note && (
           <Text style={[$.histNote, { color: C.textSecondary }]} numberOfLines={2}>📝 {item.note}</Text>
         )}
@@ -683,7 +683,7 @@ const MyStuffScreen = ({ selectedTheme }) => {
               {activeTab === 'items' ? t('mystuff.inventory_value') : t('mystuff.goals_value')}
             </Text>
             <Text style={[$.summaryValue, { color: C.text }]}>
-              💎 {stats.total.toLocaleString()}
+              {sourceLabel(valueSource)} {stats.total.toLocaleString('en-US', { maximumFractionDigits: 8 })}{stats.incomplete ? ' · subtotal' : ''}
             </Text>
           </View>
           <View style={[$.summaryDivider, { backgroundColor: C.border }]} />

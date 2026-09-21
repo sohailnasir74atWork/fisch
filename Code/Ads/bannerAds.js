@@ -26,12 +26,18 @@ const BannerAdComponent = ({
   // whose input bar sits directly above the banner, and NEVER render a banner
   // inside the arrow game at all.
   collapsible = false,
-  // Called with true/false whenever this banner starts/stops actually showing
-  // an ad. The banner is absolutely positioned, so screens reserve its space
-  // with a spacer View of their own — without this they reserve it even on a
-  // no-fill, leaving a visible dead gap. See BANNER_HEIGHT in
-  // Code/Helper/floatingButtonLayout.js.
-  onLoadedChange,
+  // Called with the banner's MEASURED height in dp whenever it changes, and
+  // with 0 whenever nothing is on screen (no-fill, Pro member, hidden slot,
+  // unmount). The banner is absolutely positioned, so screens reserve its
+  // space with a spacer View of their own; reporting the real height means
+  // that spacer is always exactly right.
+  //
+  // A constant will not do here. ANCHORED_ADAPTIVE_BANNER resolves to
+  // AdSize.getCurrentOrientationAnchoredAdaptiveBannerAdSize() natively, so
+  // the SDK picks the height per device at runtime — a fixed guess
+  // under-reserves on tall phones (content ends up behind the ad) and
+  // over-reserves on short ones (the dead gap comes back).
+  onHeightChange,
 }) => {
   const [isAdLoaded, setIsAdLoaded] = useState(false);
   const { localState } = useLocalState();
@@ -95,24 +101,28 @@ const BannerAdComponent = ({
 
   // Every reason this slot renders nothing at all: debug builds, Pro users,
   // and an explicitly hidden slot. Computed (not early-returned) so the
-  // onLoadedChange effects below still run and tell the screen to collapse
+  // onHeightChange effects below still run and tell the screen to collapse
   // its reserved space — an early return would leave a stale `true` behind.
+  // What the ad actually rendered as. The collapsed wrapper measures 0, so
+  // this is 0 until an ad loads and exactly the ad's height afterwards.
+  const [measuredHeight, setMeasuredHeight] = useState(0);
+
   const suppressed = !adsEnabled() || !!localState?.isPro || !visible;
   const showingAd = !suppressed && isAdLoaded;
 
   // Hold the callback in a ref so an inline arrow from the parent can't make
   // the reporting effect re-fire on every render.
-  const onLoadedChangeRef = useRef(onLoadedChange);
+  const onHeightChangeRef = useRef(onHeightChange);
   useEffect(() => {
-    onLoadedChangeRef.current = onLoadedChange;
-  }, [onLoadedChange]);
+    onHeightChangeRef.current = onHeightChange;
+  }, [onHeightChange]);
 
   useEffect(() => {
-    onLoadedChangeRef.current?.(showingAd);
-  }, [showingAd]);
+    onHeightChangeRef.current?.(showingAd ? measuredHeight : 0);
+  }, [showingAd, measuredHeight]);
 
   // Banner going away entirely (screen unmounted) — reclaim the space.
-  useEffect(() => () => onLoadedChangeRef.current?.(false), []);
+  useEffect(() => () => onHeightChangeRef.current?.(0), []);
 
   if (suppressed) return null;
 
@@ -128,7 +138,10 @@ const BannerAdComponent = ({
     : { height: 0, overflow: 'hidden' };
 
   return (
-    <View style={containerStyle}>
+    <View
+      style={containerStyle}
+      onLayout={(e) => setMeasuredHeight(e.nativeEvent.layout.height)}
+    >
       <BannerAd
         key={reloadKey}
         unitId={unitId}

@@ -1,3 +1,4 @@
+import CatalogueImage from '../Components/CatalogueImage';
 import React, { useState, useRef, useMemo, useEffect, useCallback } from 'react';
 import { View, Text, Modal, TouchableOpacity, StyleSheet, Image, Platform, ScrollView } from 'react-native';
 import Icon from 'react-native-vector-icons/Ionicons';
@@ -9,53 +10,16 @@ import config from '../Helper/Environment';
 import { showErrorMessage } from '../Helper/MessageHelper';
 import { mixpanel } from '../AppHelper/MixPenel';
 import InterstitialAdManager from '../Ads/IntAd';
-import { resolveItemImage } from '../Helper/valueSources';
+import { resolveItemImage, createTradeSnapshot, formatMarketValue, sourceLabel, catchDescription } from '../Helper/valueSources';
+import { verdictLabel } from '../Helper/feedContract';
 import { getThemeColors } from '../Helper/themeColors';
 import { SIZE } from '../Design/tokens';
 import { SPACE } from '../Design/tokens';
 import { FONT } from '../Design/tokens';
 
-// ✅ Migration helper: Normalize hasTotal/wantsTotal to handle both old (object.value) and new (number) formats
-const normalizeTotal = (total) => {
-    if (total === null || total === undefined) return 0;
-    // Old format: { value: number }
-    if (typeof total === 'object' && total !== null && 'value' in total) {
-        return total.value || 0;
-    }
-    // New format: number
-    if (typeof total === 'number') {
-        return total;
-    }
-    return 0;
-};
+const formatValue = formatMarketValue;
 
-const getTradeStatus = (hasTotal, wantsTotal) => {
-    const hasValue = normalizeTotal(hasTotal);
-    const wantsValue = normalizeTotal(wantsTotal);
-    if (hasValue > 0 && wantsValue === 0) return 'lose';
-    if (hasValue === 0 && wantsValue > 0) return 'win';
-    return 'fair';
-};
-
-// ✅ Format values with K, M, B, T abbreviations
-const formatValue = (value) => {
-    if (!value || value === 0) return '0';
-    const numValue = Number(value);
-    
-    if (numValue >= 1_000_000_000_000) {
-        return `${(numValue / 1_000_000_000_000).toFixed(1)}T`; // Trillions
-    } else if (numValue >= 1_000_000_000) {
-        return `${(numValue / 1_000_000_000).toFixed(1)}B`; // Billions
-    } else if (numValue >= 1_000_000) {
-        return `${(numValue / 1_000_000).toFixed(1)}M`; // Millions
-    } else if (numValue >= 1_000) {
-        return `${(numValue / 1_000).toFixed(1)}K`; // Thousands
-    } else {
-        return numValue.toLocaleString(); // Default formatting for numbers < 1000
-    }
-};
-
-const ShareTradeModal = ({ visible, onClose, hasItems, wantsItems, hasTotal, wantsTotal, description }) => {
+const ShareTradeModal = ({ visible, onClose, hasItems, wantsItems, hasTotal, wantsTotal, description, valueSource = 'value' }) => {
     const viewRef = useRef();
     const { theme } = useGlobalState();
     const { localState } = useLocalState();
@@ -68,12 +32,11 @@ const ShareTradeModal = ({ visible, onClose, hasItems, wantsItems, hasTotal, wan
     const [showBadges, setShowBadges] = useState(true);
     // const [showNotes, setShowNotes] = useState(true);
 
-    // ✅ Migration: Normalize totals to handle both old and new formats
-    const hasTotalValue = useMemo(() => normalizeTotal(hasTotal), [hasTotal]);
-    const wantsTotalValue = useMemo(() => normalizeTotal(wantsTotal), [wantsTotal]);
-
+    const valuation = useMemo(() => createTradeSnapshot(hasItems, wantsItems, valueSource), [hasItems, wantsItems, valueSource]);
+    const hasTotalValue = valuation.has.total;
+    const wantsTotalValue = valuation.wants.total;
     const styles = useMemo(() => getStyles(isDarkMode), [isDarkMode]);
-    const tradeStatus = useMemo(() => getTradeStatus(hasTotal, wantsTotal), [hasTotal, wantsTotal]);
+    const tradeStatus = valuation.evaluation.verdict;
     const profitLoss = wantsTotalValue - hasTotalValue;
     const isProfit = profitLoss >= 0;
     // See Code/Helper/valueSources.js. It checks Image before image, so the
@@ -179,7 +142,7 @@ const ShareTradeModal = ({ visible, onClose, hasItems, wantsItems, hasTotal, wan
         
         return (
             <View style={styles.gridItem}>
-                <Image
+                <CatalogueImage item={item}
                     source={{ uri: getImageUrl(item) }}
                     style={styles.gridItemImage}
                     onError={(e) => {
@@ -260,11 +223,16 @@ const ShareTradeModal = ({ visible, onClose, hasItems, wantsItems, hasTotal, wan
                     </View>
 
                     <ViewShot ref={viewRef} options={{ format: 'png', quality: 0.8 }} style={{ backgroundColor: isDarkMode ? config.colors.backgroundDark : '#f2f2f7' , padding: SPACE.md,}}>
+                        <Text style={styles.offerLabel}>{sourceLabel(valueSource)} · {verdictLabel(valuation.evaluation)} · Game.Guide</Text>
+                        {valuation.evaluation.status === 'incomplete' && <Text style={styles.offerLabel}>Priced subtotals only. Unpriced or stale quotes are present.</Text>}
+                        {[['You give', hasItems], ['You receive', wantsItems]].map(([label, items]) => items.filter(i => i?.catch || i?.quantity > 1).map((item, index) =>
+                          <Text key={label + index} style={styles.offerLabel}>{label}: {item.name} · {catchDescription(item)}</Text>
+                        ))}
                         {showSummary && showLeftGrid && showRightGrid && (
                             <View style={styles.summaryContainer}>
                                 <View style={styles.summaryInner}>
                                     <View style={styles.topSection}>
-                                        <Text style={styles.bigNumber}>{formatValue(hasTotalValue)}</Text>
+                                        <Text style={styles.bigNumber}>{sourceLabel(valueSource)} {formatValue(hasTotalValue)}</Text>
                                         <View style={styles.statusContainer}>
                                             <Text style={[
                                                 styles.statusText,
@@ -279,7 +247,7 @@ const ShareTradeModal = ({ visible, onClose, hasItems, wantsItems, hasTotal, wan
                                                 tradeStatus === 'lose' ? styles.statusActive : styles.statusInactive
                                             ]}>LOSE</Text>
                                         </View>
-                                        <Text style={styles.bigNumber}>{formatValue(wantsTotalValue)}</Text>
+                                        <Text style={styles.bigNumber}>{sourceLabel(valueSource)} {formatValue(wantsTotalValue)}</Text>
                                     </View>
                                     <View style={styles.progressContainer}>
                                         <View style={styles.progressBar}>
@@ -296,13 +264,13 @@ const ShareTradeModal = ({ visible, onClose, hasItems, wantsItems, hasTotal, wan
                             </View>
                         )}
 
-                        {showProfitLoss && (
+                        {showProfitLoss && tradeStatus && showLeftGrid && showRightGrid && (
                             <View style={styles.profitLossBox}>
                                 <Text style={[
                                     styles.profitLossNumber,
                                     { color: isProfit ? config.colors.hasBlockGreen : config.colors.wantBlockRed }
                                 ]}>
-                                    {formatValue(Math.abs(profitLoss))}
+                                    {sourceLabel(valueSource)} {formatValue(Math.abs(profitLoss))}
                                 </Text>
                             </View>
                         )}

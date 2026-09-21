@@ -1,3 +1,7 @@
+import { tradePerspective } from './tradePerspective';
+import CatalogueImage from '../Components/CatalogueImage';
+import { verdictLabel, quantityOf } from '../Helper/feedContract';
+import { formatMarketValue, savedTradeSnapshot, listingKind, catchDescription } from '../Helper/valueSources';
 import React, { useCallback, useEffect, useMemo, useState, useRef } from 'react';
 import {
   View, FlatList, Text, TouchableOpacity, StyleSheet, Image, ActivityIndicator, TextInput, Alert, Platform, Animated, Linking } from 'react-native';
@@ -100,6 +104,7 @@ const TradeList = ({ route }) => {
   const { selectedTheme, showMyTradesOnly = false } = route.params || {}
   const { user, analytics, updateLocalStateAndDatabase, appdatabase } = useGlobalState()
   const [trades, setTrades] = useState([]);
+  const [tradeKind, setTradeKind] = useState('all');
   const [filteredTrades, setFilteredTrades] = useState([]);
   // Read inside handleSearchTrades for the instant local pass. A ref, not a
   // dependency, so typing does not rebuild the callback on every keystroke.
@@ -237,6 +242,7 @@ const TradeList = ({ route }) => {
 
     setFilteredTrades(
       trades.filter((trade) => {
+        if (tradeKind !== 'all' && (trade.listingKind || listingKind([...(trade.hasItems || []), ...(trade.wantsItems || [])])) !== tradeKind) return false;
         // ✅ Filter out trades from blocked users
         if (bannedUsersList.includes(trade.userId)) {
           return false;
@@ -256,7 +262,7 @@ const TradeList = ({ route }) => {
         return true;
       })
     );
-  }, [trades, showMyTradesOnly, isMyTradesActive, isSavedActive, savedTradeRefs, user?.id, bannedUsers]);
+  }, [tradeKind, trades, showMyTradesOnly, isMyTradesActive, isSavedActive, savedTradeRefs, user?.id, bannedUsers]);
 
   useEffect(() => {
     if (!user?.id) return;
@@ -699,17 +705,7 @@ const TradeList = ({ route }) => {
 
 
 
-  const formatValue = (value) => {
-    if (value >= 1_000_000_000) {
-      return `${(value / 1_000_000_000).toFixed(1)}B`; // Billions
-    } else if (value >= 1_000_000) {
-      return `${(value / 1_000_000).toFixed(1)}M`; // Millions
-    } else if (value >= 1_000) {
-      return `${(value / 1_000).toFixed(1)}K`; // Thousands
-    } else {
-      return value?.toLocaleString(); // Default formatting
-    }
-  };
+  const formatValue = formatMarketValue;
   const fetchMoreTrades = useCallback(async () => {
     if (!hasMore || !lastDoc) return;
 
@@ -1560,11 +1556,9 @@ const TradeList = ({ route }) => {
     }
 
     // ✅ Migration: Normalize totals to handle both old (object.value) and new (number) formats
-    const hasTotalValue = normalizeTotal(item.hasTotal);
-    const wantsTotalValue = normalizeTotal(item.wantsTotal);
-
-    const isProfit = hasTotalValue > wantsTotalValue; // Profit if trade ratio > 1
-    const neutral = hasTotalValue === wantsTotalValue; // Exactly 1:1 trade
+    const snapshot = savedTradeSnapshot(item);
+    const perspective = tradePerspective(item, snapshot, user?.id);
+    const { evaluation } = perspective;
     // Guard against non-Timestamp values: some docs store a numeric Date.now()
     // (or migrated/optimistic rows) which have no .toDate() and would crash render.
     const formattedTime = item.timestamp
@@ -1702,21 +1696,9 @@ const TradeList = ({ route }) => {
                 <Text style={styles.statusBadgeText}>⭐ FEATURED</Text>
               </View>
             )}
-            {item.status && (
-              <View style={[
-                styles.statusBadge,
-                {
-                  backgroundColor:
-                    item.status === 'w' ? STATUS.success :
-                    item.status === 'f' ? config.colors.primary :
-                    STATUS.danger,
-                }
-              ]}>
-                <Text style={styles.statusBadgeText}>
-                  {item.status === 'w' ? 'Win' : item.status === 'f' ? 'Fair' : 'Lose'}
-                </Text>
-              </View>
-            )}
+            <View style={[styles.statusBadge, { backgroundColor: evaluation?.verdict === 'win' ? STATUS.success : evaluation?.verdict === 'lose' ? STATUS.danger : config.colors.primary }]}>
+              <Text style={styles.statusBadgeText}>{snapshot ? verdictLabel(evaluation) : 'Not evaluated'}</Text>
+            </View>
             {/* Which catalogue priced this trade. Win/Fair/Lose is a verdict on
                 the totals, and the totals depend entirely on the source: the
                 two disagree on 70% of the items they share, and Supreme does
@@ -1731,200 +1713,43 @@ const TradeList = ({ route }) => {
               item.valueSource === VALUE_SOURCE.PROTO && styles.sourceBadgeSupreme,
             ]}>
               <Text style={styles.statusBadgeText}>
-                {sourceLabel(item.valueSource)}
+                {snapshot?.unit || 'Unknown scale'}
               </Text>
             </View>
           </View>
         </View>
 
-        {/* Trade Items */}
         <View style={styles.tradeDetails}>
-          {/* Has Items Grid or Give Offer */}
-          {item.hasItems && item.hasItems.length > 0 ? (
-            <View style={styles.itemGrid}>
-              {/* Only the items the trade actually has. This used to pad the
-                  count up to a multiple of four and render the remainder as
-                  empty cells -- each one a 40px-tall, 10px-margined box of
-                  nothing. A one-item trade drew three of them, and whenever a
-                  filler wrapped past the row it added a whole blank row under
-                  the items. The cells are fixed-width, so the grid lines up
-                  without placeholders. */}
-              {item.hasItems.map((tradeItem, idx) => {
-                return (
-                  <View key={idx} style={styles.gridCell}>
-                    {tradeItem ? (
-                      <>
-                        <Image
-                          source={{ uri: getImageUrl(tradeItem) }}
-                          style={styles.gridItemImage}
-                          onError={(e) => {
-                            console.warn('Image load error for item:', tradeItem);
-                          }}
-                        />
-                        <View style={{ alignItems: 'center', marginTop: SPACE.hair }}>
-                          {/* Full name, wrapped over up to two lines. The old
-                              hard slice at 7 characters cut real names ("Umbral
-                              Shark" -> "Umbral ...") and still broke mid-word,
-                              because the cell was narrower than the 8 characters
-                              it allowed through -- "Anchovy" rendered as
-                              "Anchov / y". Letting RN wrap and ellipsize does
-                              the job at any name length. */}
-                          <Text
-                            style={styles.itemName}
-                            numberOfLines={2}
-                            ellipsizeMode="tail"
-                          >
-                            {tradeItem.name}
-                          </Text>
-                          {tradeItem.deprecatedNames && Array.isArray(tradeItem.deprecatedNames) && tradeItem.deprecatedNames.length > 0 && (
-                            <Text style={styles.deprecatedName}>
-                              {tradeItem.deprecatedNames[0]?.length > 8 ? tradeItem.deprecatedNames[0].slice(0, 7) + '...' : tradeItem.deprecatedNames[0]}
-                            </Text>
-                          )}
-                          {!tradeItem.deprecatedNames && (tradeItem.deprecatedName || tradeItem.deprecated_name) && (
-                            <Text style={styles.deprecatedName}>
-                              {(tradeItem.deprecatedName || tradeItem.deprecated_name)?.length > 8
-                                ? (tradeItem.deprecatedName || tradeItem.deprecated_name).slice(0, 7) + '...'
-                                : (tradeItem.deprecatedName || tradeItem.deprecated_name)}
-                            </Text>
-                          )}
-                          {/* The source that priced this trade had no real value
-                              for this item, so it is not in the ME/YOU totals.
-                              Its own words ("Priceless", "Award only") say why.
-                              Absent on trades made before 2026-09, which render
-                              exactly as they always did. */}
-                          {tradeItem.valueConfidence && tradeItem.valueConfidence !== 'observed' ? (
-                            <Text style={styles.unpricedItemNote} numberOfLines={1}>
-                              {tradeItem.valueText || 'not in total'}
-                            </Text>
-                          ) : null}
-                        </View>
-                      </>
-                    ) : null}
-                  </View>
-                );
-              })}
+          {[["You give", perspective.giveItems], ["You receive", perspective.receiveItems]].map(([label, entries], side) => <React.Fragment key={label}>
+            {side === 1 && <View style={styles.transfer}><Icon name="swap-horizontal-outline" size={18} color={config.colors.primary} /></View>}
+            <View style={[styles.tradeSideColumn, side === 0 ? styles.giveTint : styles.receiveTint]}>
+              <Text style={styles.gridSideLabel}>{label}</Text>
+              {entries.filter(Boolean).length ? <View style={styles.itemGrid}>
+                {entries.filter(Boolean).map((tradeItem, idx) => <View key={idx} style={styles.gridCell}
+                  accessible accessibilityLabel={tradeItem.name + ', ' + (catchDescription(tradeItem) || 'Quantity 1')}>
+                  <CatalogueImage item={tradeItem} source={{ uri: getImageUrl(tradeItem) }} style={styles.gridItemImage} resizeMode="contain" />
+                  <Text style={styles.itemName} numberOfLines={1} ellipsizeMode="tail">{tradeItem.name}</Text>
+                  <Text style={styles.itemDetail} numberOfLines={1} ellipsizeMode="tail">{tradeItem.quantity > 1 ? '×' + tradeItem.quantity : ' '}</Text>
+                </View>)}
+              </View> : <TouchableOpacity style={styles.emptyOffer} onPress={() => handleOpenProfile(item)}><Text style={styles.gridSideLabel}>Open to offers</Text></TouchableOpacity>}
             </View>
-          ) : (
-            <TouchableOpacity style={styles.dealContainerSingle} onPress={() => handleOpenProfile(item)}>
-              <Text style={styles.dealText}>Give offer</Text>
-            </TouchableOpacity>
-          )}
-          {/* Transfer Icon */}
-          <View style={styles.transfer}>
-            <Image source={require('../../assets/left-right.png')} style={styles.transferImage} />
-          </View>
-          {/* Wants Items Grid or Give Offer */}
-          {item.wantsItems && item.wantsItems.length > 0 ? (
-            <View style={styles.itemGrid}>
-              {/* Only the items the trade actually has. This used to pad the
-                  count up to a multiple of four and render the remainder as
-                  empty cells -- each one a 40px-tall, 10px-margined box of
-                  nothing. A one-item trade drew three of them, and whenever a
-                  filler wrapped past the row it added a whole blank row under
-                  the items. The cells are fixed-width, so the grid lines up
-                  without placeholders. */}
-              {item.wantsItems.map((tradeItem, idx) => {
-                return (
-                  <View key={idx} style={styles.gridCell}>
-                    {tradeItem ? (
-                      <>
-                        <Image
-                          source={{ uri: getImageUrl(tradeItem) }}
-                          style={styles.gridItemImage}
-                          onError={(e) => {
-                            console.warn('Image load error for item:', tradeItem);
-                          }}
-                        />
-                        <View style={{ alignItems: 'center', marginTop: SPACE.hair }}>
-                          {/* Full name, wrapped over up to two lines. The old
-                              hard slice at 7 characters cut real names ("Umbral
-                              Shark" -> "Umbral ...") and still broke mid-word,
-                              because the cell was narrower than the 8 characters
-                              it allowed through -- "Anchovy" rendered as
-                              "Anchov / y". Letting RN wrap and ellipsize does
-                              the job at any name length. */}
-                          <Text
-                            style={styles.itemName}
-                            numberOfLines={2}
-                            ellipsizeMode="tail"
-                          >
-                            {tradeItem.name}
-                          </Text>
-                          {tradeItem.deprecatedNames && Array.isArray(tradeItem.deprecatedNames) && tradeItem.deprecatedNames.length > 0 && (
-                            <Text style={styles.deprecatedName}>
-                              {tradeItem.deprecatedNames[0]?.length > 8 ? tradeItem.deprecatedNames[0].slice(0, 7) + '...' : tradeItem.deprecatedNames[0]}
-                            </Text>
-                          )}
-                          {!tradeItem.deprecatedNames && (tradeItem.deprecatedName || tradeItem.deprecated_name) && (
-                            <Text style={styles.deprecatedName}>
-                              {(tradeItem.deprecatedName || tradeItem.deprecated_name)?.length > 8
-                                ? (tradeItem.deprecatedName || tradeItem.deprecated_name).slice(0, 7) + '...'
-                                : (tradeItem.deprecatedName || tradeItem.deprecated_name)}
-                            </Text>
-                          )}
-                          {/* The source that priced this trade had no real value
-                              for this item, so it is not in the ME/YOU totals.
-                              Its own words ("Priceless", "Award only") say why.
-                              Absent on trades made before 2026-09, which render
-                              exactly as they always did. */}
-                          {tradeItem.valueConfidence && tradeItem.valueConfidence !== 'observed' ? (
-                            <Text style={styles.unpricedItemNote} numberOfLines={1}>
-                              {tradeItem.valueText || 'not in total'}
-                            </Text>
-                          ) : null}
-                        </View>
-                      </>
-                    ) : null}
-                  </View>
-                );
-              })}
-            </View>
-          ) : (
-            <TouchableOpacity style={styles.dealContainerSingle} onPress={() => handleOpenProfile(item)}>
-              <Text style={styles.dealText}>Give offer</Text>
-            </TouchableOpacity>
-          )}
+          </React.Fragment>)}
         </View>
 
-        {/* Trade Totals */}
+        <Text style={styles.description}>{(item.listingKind || listingKind([...(item.hasItems || []), ...(item.wantsItems || [])])).toUpperCase()} · {perspective.own ? 'Your trade' : 'Your perspective'}</Text>
         <View style={styles.tradeTotals}>
-          {item.hasItems && item.hasItems.length > 0 && (
-            <Text style={[styles.priceText, styles.hasBackground]}>
-              ME: {formatValue(hasTotalValue)}
-            </Text>
-          )}
-          <View style={styles.transfer}>
-            {(item.hasItems && item.hasItems.length > 0 && item.wantsItems && item.wantsItems.length > 0) && (
-              <>
-                {hasTotalValue > wantsTotalValue && (
-                  <View style={{ flexDirection: 'row', alignItems: 'center', gap: 3 }}>
-                    <View style={{ width: 6, height: 6, borderRadius: 3, backgroundColor: STATUS.success }} />
-                    <Text style={[styles.priceText, { color: STATUS.success, backgroundColor: 'transparent' }]}>
-                      +{formatValue(hasTotalValue - wantsTotalValue)}
-                    </Text>
-                  </View>
-                )}
-                {hasTotalValue < wantsTotalValue && (
-                  <View style={{ flexDirection: 'row', alignItems: 'center', gap: 3 }}>
-                    <View style={{ width: 6, height: 6, borderRadius: 3, backgroundColor: STATUS.danger }} />
-                    <Text style={[styles.priceText, { color: STATUS.danger, backgroundColor: 'transparent' }]}>
-                      -{formatValue(wantsTotalValue - hasTotalValue)}
-                    </Text>
-                  </View>
-                )}
-                {hasTotalValue === wantsTotalValue && (
-                  <Text style={{ fontSize: SIZE.label }}>⚖️</Text>
-                )}
-              </>
-            )}
-          </View>
-          {item.wantsItems && item.wantsItems.length > 0 && (
-            <Text style={[styles.priceText, styles.wantBackground]}>
-              YOU: {formatValue(wantsTotalValue)}
-            </Text>
-          )}
+          {[['You give', perspective.giveTotal], ['You receive', perspective.receiveTotal]].map(([label, total]) => <View key={label} style={[styles.totalPanel, label === 'You give' ? styles.giveTint : styles.receiveTint]}>
+            <Text style={styles.gridSideLabel}>{label}</Text>
+            <Text style={styles.totalAmount} numberOfLines={1} adjustsFontSizeToFit>{snapshot ? (snapshot.scale === 'proto' ? 'P: ' : '$: ') + formatValue(total) : '—'}</Text>
+          </View>)}
         </View>
+        {snapshot && <Text style={styles.description}>
+          {snapshot.evaluation.status === 'complete' ? 'Market estimate at posting' : 'Priced subtotals only · full value unavailable'}
+          {' · ' + new Date(snapshot.capturedAt).toLocaleDateString()}
+        </Text>}
+        {[['You give', perspective.giveItems], ['You receive', perspective.receiveItems]].map(([side, items]) => items.filter(i => i?.catch || i?.quantity > 1).map((tradeItem, idx) => (
+          <Text key={side + idx} numberOfLines={1} ellipsizeMode="tail" style={styles.description}>{side}: {tradeItem.name} · {catchDescription(tradeItem)}</Text>
+        )))}
 
         {/* Description */}
         {item.description && <Text style={styles.description}>{renderTextWithUsername(item.description)}</Text>}
@@ -1935,7 +1760,7 @@ const TradeList = ({ route }) => {
             {!item.isFeatured && (
               <TouchableOpacity onPress={() => handleMakeFeatureTrade(item)} style={[styles.ownerBtn, { backgroundColor: '#8B5CF6' }]}>
                 <Icon name="rocket-outline" size={12} color="white" />
-                <Text style={styles.ownerBtnText}>BOOST IT</Text>
+                <Text style={styles.ownerBtnText}>Boost</Text>
               </TouchableOpacity>
             )}
             {/* Watch-an-ad boost. Hidden from Pro members on purpose: they
@@ -1945,13 +1770,13 @@ const TradeList = ({ route }) => {
               <TouchableOpacity onPress={() => handleFreeBoostTrade(item)} style={[styles.ownerBtn, { backgroundColor: '#F59E0B' }]}>
                 <Icon name="play-circle-outline" size={12} color="white" />
                 <Text style={styles.ownerBtnText}>
-                  {t('trade.free_boost', { defaultValue: 'FREE BOOST' })}
+                  {'Free boost'}
                 </Text>
               </TouchableOpacity>
             )}
             <TouchableOpacity onPress={() => handleDelete(item)} style={[styles.ownerBtn, { backgroundColor: STATUS.danger }]}>
               <Icon name="trash-outline" size={12} color="white" />
-              <Text style={styles.ownerBtnText}>DELETE IT</Text>
+              <Text style={styles.ownerBtnText}>Delete</Text>
             </TouchableOpacity>
           </View>
         )}
@@ -2159,6 +1984,13 @@ const TradeList = ({ route }) => {
           </TouchableOpacity>
         </View>
       )}
+      <View style={{ flexDirection: 'row', gap: 8, padding: 10 }}>
+        {['all', 'fish', 'cosmetics', 'mixed'].map(kind => (
+          <TouchableOpacity key={kind} onPress={() => setTradeKind(kind)} style={{ padding: 10, borderRadius: 12, backgroundColor: tradeKind === kind ? config.colors.primary : (isDarkMode ? config.colors.surfaceDark : '#e2e8f0') }}>
+            <Text style={{ color: tradeKind === kind ? '#fff' : (isDarkMode ? '#fff' : '#111') }}>{kind === 'all' ? 'All trades' : kind.charAt(0).toUpperCase() + kind.slice(1)}</Text>
+          </TouchableOpacity>
+        ))}
+      </View>
       <FlatList
         ref={flatListRef}
         data={tradesWithAds}
@@ -2274,7 +2106,7 @@ const getStyles = (isDarkMode, c = getThemeColors(isDarkMode)) =>
     },
     tradeItem: {
       paddingHorizontal: 14,
-      paddingVertical: SPACE.xl,
+      paddingVertical: 10,
       marginHorizontal: SPACE.xs,
       marginBottom: SPACE.lg,
       backgroundColor: isDarkMode ? config.colors.surfaceDark : '#ffffff',
@@ -2389,45 +2221,22 @@ const getStyles = (isDarkMode, c = getThemeColors(isDarkMode)) =>
       flexDirection: 'row',
       justifyContent: 'space-between',
       color: isDarkMode ? config.colors.textDark : config.colors.textLight,
-      marginVertical: SPACE.lg
+      marginVertical: 8
 
 
     },
-    itemGrid: {
-      flexDirection: 'row',
-      flexWrap: 'wrap',
-      width: '48%',
-      // Gap BETWEEN rows, rather than a bottom margin on every cell: the old
-      // per-cell margin also applied to the last row, so it padded the card
-      // under the items for no reason.
-      rowGap: SPACE.lg,
-      // alignItems: 'center',
-      // justifyContent: 'center',
-      // marginVertical: SPACE.sm,
-    },
-    gridCell: {
-      // 24%, not 22%: four cells plus their 1px margins still fit the 48%-wide
-      // grid, and the extra ~8px is what lets a 7-character name sit on one
-      // line instead of breaking after "Anchov".
-      width: '24%',
-      minHeight: 40,
-      marginHorizontal: 1,
-      alignItems: 'center',
-      justifyContent: 'flex-start',
-      position: 'relative',
-    },
-    gridItemImage: {
-      width: 30,
-      height: 30,
-      borderRadius: 6,
-    },
-    itemName: {
-      fontSize: SIZE.label,
-      fontFamily: FONT.regular,
-      color: isDarkMode ? config.colors.textDark : config.colors.textLight,
-      textAlign: 'center',
-      marginTop: SPACE.hair,
-    },
+    tradeSideColumn: { flex: 1, minWidth: 0, paddingVertical: 6, borderRadius: 10 },
+    gridSideLabel: { color: c.textSecondary, fontFamily: FONT.regular, fontSize: 10, textAlign: 'center', marginBottom: 5 },
+    itemGrid: { flexDirection: 'row', flexWrap: 'wrap', rowGap: 6 },
+    gridCell: { width: '33.333%', paddingHorizontal: 2, alignItems: 'center' },
+    gridItemImage: { width: 32, height: 32, borderRadius: 6 },
+    itemName: { width: '100%', fontSize: 10, lineHeight: 13, fontFamily: FONT.bold, color: c.text, textAlign: 'center', marginTop: 3 },
+    itemDetail: { fontSize: 9, lineHeight: 12, fontFamily: FONT.regular, color: c.textSecondary, textAlign: 'center' },
+    emptyOffer: { minHeight: 60, justifyContent: 'center' },
+    giveTint: { backgroundColor: isDarkMode ? '#143B3B' : '#E3F5F0' },
+    receiveTint: { backgroundColor: isDarkMode ? '#302644' : '#F0EAFC' },
+    totalPanel: { flex: 1, minWidth: 0, padding: 5, borderRadius: 10, backgroundColor: c.bgAlt },
+    totalAmount: { color: c.text, fontFamily: FONT.bold, fontSize: 14, textAlign: 'center' },
     deprecatedName: {
       fontSize: SIZE.label,
       fontFamily: FONT.regular,
@@ -2499,13 +2308,7 @@ const getStyles = (isDarkMode, c = getThemeColors(isDarkMode)) =>
       borderRadius: 5,
       // width:'4%',
     },
-    tradeTotals: {
-      flexDirection: 'row',
-      justifyContent: 'center',
-      // marginTop: SPACE.lg,
-      width: '100%'
-
-    },
+    tradeTotals: { flexDirection: 'row', gap: 12, marginVertical: 8 },
     priceText: {
       fontSize: SIZE.label,
       fontFamily: FONT.bold,
@@ -2543,11 +2346,7 @@ const getStyles = (isDarkMode, c = getThemeColors(isDarkMode)) =>
       alignItems: 'center',
     },
 
-    transfer: {
-      // width: '10%',
-      justifyContent: 'center',
-      alignItems: 'center'
-    },
+    transfer: { width: 22, alignItems: 'center', justifyContent: 'center' },
     actionButtons: {
       flexDirection: 'row', alignItems: 'flex-end', justifyContent: 'space-between',
       borderColor: isDarkMode ? config.colors.borderDark : config.colors.borderLight, marginTop: SPACE.lg, paddingTop: SPACE.lg
@@ -2557,7 +2356,7 @@ const getStyles = (isDarkMode, c = getThemeColors(isDarkMode)) =>
       fontFamily: FONT.regular,
       fontSize: SIZE.label,
       marginTop: 5,
-      lineHeight: 12
+      lineHeight: 15
     },
     descriptionclick: {
       color: config.colors.secondary,
@@ -2640,6 +2439,8 @@ const getStyles = (isDarkMode, c = getThemeColors(isDarkMode)) =>
       marginTop: SPACE.md,
     },
     ownerBtn: {
+      flex: 1,
+      justifyContent: 'center',
       flexDirection: 'row',
       alignItems: 'center',
       gap: SPACE.xs,

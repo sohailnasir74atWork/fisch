@@ -18,7 +18,7 @@ try {
 } catch (_) {}
 
 const KEY = 'valueAlertTopics';
-const GAME = 'mm2';
+const GAME = 'fisch';
 // Device-level FCM cap is 2000 topics; stay far below it.
 const MAX_TOPICS = 300;
 

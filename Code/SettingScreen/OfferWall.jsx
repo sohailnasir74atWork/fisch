@@ -397,9 +397,12 @@ const SubscriptionScreen = ({ visible, onClose, track, showoffer, oneWallOnly, i
   // targetSdk 36 draws edge-to-edge, so the bar sits over our dock; leaving it
   // the app's colour would put a slate strip under a deep-sea screen.
   useEffect(() => {
-    if (Platform.OS !== 'android' || disabled) return;
-    SystemNavigationBar.setNavigationColor(visible ? P.NAV : '#0f172a', P.NAV_STYLE);
-  }, [visible, disabled]);
+    if (Platform.OS !== 'android' || disabled || !visible) return;
+    SystemNavigationBar.setNavigationColor(P.NAV, P.NAV_STYLE, 'navigation');
+    return () => {
+      SystemNavigationBar.setNavigationColor(isDark ? '#000000' : '#F4F9FB', isDark ? 'light' : 'dark', 'navigation');
+    };
+  }, [visible, disabled, isDark, P.NAV, P.NAV_STYLE]);
 
   // ── Entrance ──
   useEffect(() => {

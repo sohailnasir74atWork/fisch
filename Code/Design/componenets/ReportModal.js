@@ -9,6 +9,7 @@ import { useLocalState } from '../../LocalGlobelStats';
 import { useTranslation } from 'react-i18next';
 import { STATUS } from '../tokens';
 import { FONT } from '../tokens';
+import { ModalKeyboardView } from '../../Helper/keyboardAvoidingContainer';
 
 const ReportModal = ({ visible, onClose, item, banUserwithEmail }) => {
   const [reportText, setReportText] = useState('');
@@ -136,6 +137,7 @@ const ReportModal = ({ visible, onClose, item, banUserwithEmail }) => {
 
   return (
     <Modal visible={visible} transparent animationType="fade" onRequestClose={onClose}>
+      <ModalKeyboardView style={{ flex: 1 }}>
       <TouchableWithoutFeedback onPress={Keyboard.dismiss}>
         <View style={styles.overlay}>
           <View style={styles.modal}>
@@ -166,6 +168,7 @@ const ReportModal = ({ visible, onClose, item, banUserwithEmail }) => {
           </View>
         </View>
       </TouchableWithoutFeedback>
+      </ModalKeyboardView>
     </Modal>
   );
 };

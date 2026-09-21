@@ -1,3 +1,5 @@
+import CatalogueImage from '../Components/CatalogueImage';
+import { resolveItem } from '../Helper/valueSources';
 import React, { useState, useEffect, useMemo, useRef, useCallback } from 'react';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import {
@@ -126,13 +128,13 @@ const ValueScreen = React.memo(({ selectedTheme, fromChat, selectedFruits, setSe
   // ✅ MM2: Enhanced ListItem showing all scraped data
   const ListItem = React.memo(({ item, getItemValue, styles, onPress }) => {
     const currentValue = getItemValue(item);
-    const stabilityColor = getStabilityColor(item.stability);
+    const stabilityColor = getStabilityColor(item.trade?.trend);
 
     return (
       <TouchableOpacity style={[styles.itemContainer]} onPress={onPress} disabled={!fromChat && !fromSetting}>
         <View style={styles.imageContainer}>
           <View style={styles.imageWrapper}>
-            <Image source={{ uri: getImageUrl(item) }} style={styles.icon} resizeMode="cover" />
+            <CatalogueImage item={item} source={{ uri: getImageUrl(item) }} style={styles.icon} resizeMode="cover" />
           </View>
           <View style={styles.itemInfo}>
             <Text style={styles.name} numberOfLines={1}>{item.name}</Text>
@@ -154,9 +156,9 @@ const ValueScreen = React.memo(({ selectedTheme, fromChat, selectedFruits, setSe
 
         {/* Demand & Rarity pills */}
         <View style={styles.pillsRow}>
-          {item.demand && item.demand !== 'N/A' && (
+          {item.trade?.demand && item.trade?.demand !== 'N/A' && (
             <View style={[styles.pill, styles.demandPill]}>
-              <Text style={styles.pillText}>Demand: {item.demand}</Text>
+              <Text style={styles.pillText}>Demand: {item.trade?.demand}</Text>
             </View>
           )}
           {item.itemRarity && item.itemRarity !== 'N/A' && (
@@ -167,10 +169,10 @@ const ValueScreen = React.memo(({ selectedTheme, fromChat, selectedFruits, setSe
         </View>
 
         {/* Stability tag */}
-        {item.stability && item.stability !== 'N/A' && (
+        {item.trade?.trend && item.trade?.trend !== 'N/A' && (
           <View style={[styles.stabilityTag, { backgroundColor: stabilityColor + '20' }]}>
             <View style={[styles.stabilityDot, { backgroundColor: stabilityColor }]} />
-            <Text style={[styles.stabilityText, { color: stabilityColor }]}>{item.stability}</Text>
+            <Text style={[styles.stabilityText, { color: stabilityColor }]}>{item.trade?.trend}</Text>
           </View>
         )}
 
@@ -344,17 +346,12 @@ const ValueScreen = React.memo(({ selectedTheme, fromChat, selectedFruits, setSe
   const myPetsView = useMemo(() => {
     if (!(fromChat && chatPetSource === 'mine')) return [];
     const q = searchText.trim().toLowerCase();
-    const byName = new Map();
-    for (const it of parsedValuesData || []) {
-      const k = (it?.name || '').toLowerCase().trim();
-      if (k && !byName.has(k)) byName.set(k, it);
-    }
     const seen = new Set();
     return (localState?.ownedPets || [])
-      .map((p) => byName.get((p?.name || '').toLowerCase().trim()))
+      .map(p => resolveItem(parsedValuesData, p))
       .filter(Boolean)
       .filter((it) => {
-        const k = (it.name || '').toLowerCase();
+        const k = itemKey(it);
         if (seen.has(k)) return false;
         seen.add(k);
         return true;
@@ -407,11 +404,18 @@ const ValueScreen = React.memo(({ selectedTheme, fromChat, selectedFruits, setSe
         // adding ANY item to My Stuff fail silently — which is why the
         // inventory and its worth figure were always empty.
         const fruitObj = {
+          itemId: itemKey(item),
+          quantity: item.quantity || 1,
+          catch: item.catch || null,
+          npcEstimate: item.npcEstimate || null,
           Name: item.name,
           name: item.name,
           // currentValue may be a label ("Priceless"), so take the number from
           // priceOf rather than parsing the display string back.
-          value: priced.value || 0,
+          value: priced.value,
+          quote: priced,
+          trade: item.trade || null,
+          tradeability: item.tradeability || null,
           imageUrl: imageUrl || null,
           // `collection` is what this catalogue actually tags rows with, and it
           // is what decides tradeability downstream. See Code/config/game.js.
@@ -452,6 +456,7 @@ const ValueScreen = React.memo(({ selectedTheme, fromChat, selectedFruits, setSe
       );
     },
     [
+      fromChat, fromSetting, getImageUrl, owned, setOwnedPets, setSelectedFruits, setWishlistPets,
       getItemValue,
       styles,
       selectedFruits,

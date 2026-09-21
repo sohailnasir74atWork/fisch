@@ -19,16 +19,19 @@ import {
   ScrollView, ActivityIndicator, Alert, Platform,
 } from 'react-native';
 import FontAwesome from 'react-native-vector-icons/FontAwesome6';
-import { doc, getDoc, setDoc, serverTimestamp } from '@react-native-firebase/firestore';
+import { doc, getDoc, setDoc, serverTimestamp, runTransaction } from '@react-native-firebase/firestore';
 import config from '../Helper/Environment';
 import { useThemeColors } from '../Helper/themeColors';
 import { useLocalState } from '../LocalGlobelStats';
 import { addJournalEntry, slimItem } from './journalUtils';
+import { createTradeSnapshot } from '../Helper/valueSources';
+import { quantityOf, inventoryIdentity, moveInventory } from '../Helper/feedContract';
 import { addXP, XP_ACTIONS } from './xpUtils';
 import { STATUS } from '../Design/tokens';
 import { SIZE } from '../Design/tokens';
 import { SPACE } from '../Design/tokens';
 import { FONT } from '../Design/tokens';
+import { ModalKeyboardView } from '../Helper/keyboardAvoidingContainer';
 
 const TRADE_RATINGS = [
   { key: 'win',  label: 'Win',  emoji: '🏆', color: STATUS.success, desc: 'I got more value' },
@@ -39,9 +42,6 @@ const TRADE_RATINGS = [
 // The calculator says 'lose'; the journal and these cards use 'loss'.
 const normalizeResult = (r) => (r === 'lose' ? 'loss' : r);
 
-const sumValues = (items) =>
-  items.reduce((s, i) => s + (Number(i?.Value ?? i?.value) || 0), 0);
-
 const TradeCompletion = ({
   visible,
   onClose,
@@ -50,14 +50,16 @@ const TradeCompletion = ({
   uid,
   hasItems = [],
   wantsItems = [],
-  tradeResult = 'fair',
+  tradeResult = null,
+  valueSource = 'value',
+  valuation,
   t,
 }) => {
   const insets = useSafeAreaInsets();
   const C = useThemeColors();
   const { updateLocalState } = useLocalState();
 
-  const [selectedRating, setSelectedRating] = useState(normalizeResult(tradeResult));
+  const [selectedRating, setSelectedRating] = useState(null);
   const [notes, setNotes] = useState('');
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
@@ -67,7 +69,7 @@ const TradeCompletion = ({
   // Keep the preselected rating in step with the calculator while the modal is
   // closed; once it's open the user's own choice wins.
   useEffect(() => {
-    if (!visible) setSelectedRating(normalizeResult(tradeResult));
+    if (!visible) setSelectedRating(null);
   }, [tradeResult, visible]);
 
   const tr = useCallback(
@@ -77,8 +79,9 @@ const TradeCompletion = ({
 
   const gave = hasItems.filter(Boolean);
   const got = wantsItems.filter(Boolean);
-  const gaveValue = sumValues(gave);
-  const gotValue = sumValues(got);
+  const snapshot = valuation || createTradeSnapshot(gave, got, valueSource);
+  const gaveValue = snapshot.has.total;
+  const gotValue = snapshot.wants.total;
 
   // Reports whether anything was actually saved, so the caller only runs its
   // post-log flow (reset calculator, toast, ad) on a real save — not on a
@@ -103,47 +106,19 @@ const TradeCompletion = ({
     const notOwned = [];
     const added = [];
 
-    const snap = await getDoc(doc(firestoreDB, 'reviews', uid));
-    const owned = snap.exists() && Array.isArray(snap.data()?.ownedPets)
-      ? [...snap.data().ownedPets]
-      : [];
-
-    gave.forEach((g) => {
-      const s = slimItem(g);
-      const key = s.name.toLowerCase();
-      // Prefer an exact name+type match so trading a Chroma never removes the
-      // Godly of the same name; fall back to name-only when unambiguous.
-      let idx = owned.findIndex(p =>
-        (p?.name || '').toLowerCase() === key &&
-        (p?.type || '') === (s.type || '')
-      );
-      if (idx === -1) {
-        const sameName = owned.filter(p => (p?.name || '').toLowerCase() === key);
-        if (sameName.length === 1) idx = owned.indexOf(sameName[0]);
-      }
-      if (idx !== -1) { owned.splice(idx, 1); removed.push(s.name); }
-      else notOwned.push(s.name);
+    const inventoryRef = doc(firestoreDB, 'reviews', uid);
+    const change = await runTransaction(firestoreDB, async transaction => {
+      const snap = await transaction.get(inventoryRef);
+      const owned = snap.exists() && Array.isArray(snap.data()?.ownedPets) ? snap.data().ownedPets : [];
+      const result = moveInventory(owned, gave.map(i => slimItem(i, valueSource)), got.map(i => slimItem(i, valueSource)));
+      transaction.set(inventoryRef, { ownedPets: result.owned, updatedAt: serverTimestamp() }, { merge: true });
+      return result;
     });
+    const owned = change.owned;
+    removed.push(...change.removed);
+    notOwned.push(...change.notOwned);
+    added.push(...change.added);
 
-    got.forEach((g) => {
-      const s = slimItem(g);
-      owned.push({
-        name: s.name,
-        type: s.type,
-        value: s.value,
-        image: s.image,
-        imageUrl: s.image, // My Stuff renders imageUrl
-        addedAt: new Date().toISOString(),
-        addedVia: 'trade',
-      });
-      added.push(s.name);
-    });
-
-    await setDoc(
-      doc(firestoreDB, 'reviews', uid),
-      { ownedPets: owned, updatedAt: serverTimestamp() },
-      { merge: true }
-    );
     // Mirror to MMKV so the calculator's INVENTORY tab and My Stuff show the
     // post-trade list immediately instead of after a restart.
     updateLocalState('ownedPets', owned);
@@ -153,9 +128,10 @@ const TradeCompletion = ({
     if (removed.length) msg += `🔄 ${tr('trade_log.removed', 'Removed')}: ${removed.join(', ')}\n`;
     if (notOwned.length) msg += `⚠️ ${tr('trade_log.not_in_list', 'Not in My Stuff')}: ${notOwned.join(', ')}`;
     return msg.trim();
-  }, [firestoreDB, uid, gave, got, updateLocalState, tr]);
+  }, [firestoreDB, uid, gave, got, updateLocalState, tr, valueSource]);
 
   const handleSave = useCallback(async () => {
+    if (saving || saved) return;
     if (!uid || !firestoreDB) {
       Alert.alert(tr('trade_log.signin_title', 'Sign in first'), tr('trade_log.signin_msg', 'You need an account to log trades.'));
       return;
@@ -170,6 +146,7 @@ const TradeCompletion = ({
     setSaving(true);
     try {
       await addJournalEntry(firestoreDB, uid, {
+        valueSource,
         givenItems: gave,
         receivedItems: got,
         givenValue: gaveValue,
@@ -179,7 +156,7 @@ const TradeCompletion = ({
       });
 
       // Fire-and-forget — XP must never block or fail the log.
-      if (db) addXP(db, uid, XP_ACTIONS.COMPLETE_TRADE);
+      if (db) addXP(db, uid, XP_ACTIONS.COMPLETE_TRADE).catch(() => {});
 
       let msg = `+${XP_ACTIONS.COMPLETE_TRADE} XP`;
       if (syncInventory) {
@@ -199,11 +176,11 @@ const TradeCompletion = ({
     } finally {
       setSaving(false);
     }
-  }, [uid, firestoreDB, db, gave, got, gaveValue, gotValue, selectedRating, notes, syncInventory, applyInventory, tr]);
+  }, [uid, firestoreDB, db, gave, got, gaveValue, gotValue, selectedRating, notes, syncInventory, applyInventory, tr, valueSource, saving, saved]);
 
   return (
     <Modal visible={visible} transparent animationType="slide" onRequestClose={handleClose}>
-      <View style={$.overlay}>
+      <ModalKeyboardView style={$.overlay}>
         <View style={[$.sheet, { backgroundColor: C.bg, paddingBottom: insets.bottom }]}>
           <View style={$.grabber} />
 
@@ -251,7 +228,7 @@ const TradeCompletion = ({
 
                 {/* ── Rating ── */}
                 <Text style={[$.sectionLabel, { color: C.text }]}>
-                  {tr('trade_log.how_did_it_go', 'How did it go?')}
+                  {'Your rating (optional; separate from market estimate)'}
                 </Text>
                 <View style={$.ratingRow}>
                   {TRADE_RATINGS.map((r) => {
@@ -323,7 +300,7 @@ const TradeCompletion = ({
             </>
           )}
         </View>
-      </View>
+      </ModalKeyboardView>
     </Modal>
   );
 };

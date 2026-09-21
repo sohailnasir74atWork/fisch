@@ -13,6 +13,7 @@ import { getConfigNodes } from './Helper/configCache';
 import { indexMM2Images, indexSupremePrices, unwrapFeed, feedMeta } from './Helper/valueSources';
 import { getServerTime } from './Helper/serverTime';
 import { generateOnePieceUsername } from './Helper/RendomNamegen';
+import { fetchCatalogue } from './Helper/catalogueClient';
 import { GAME } from './config/game';
 
 
@@ -29,7 +30,7 @@ const GlobalStateContext = createContext();
 export const useGlobalState = () => useContext(GlobalStateContext);
 
 export const GlobalStateProvider = ({ children }) => {
-  const { localState, updateLocalState } = useLocalState()
+  const { localState, updateLocalState, commitCatalogue } = useLocalState()
 
   const colorScheme = useColorScheme(); // 'light' or 'dark'
 
@@ -541,161 +542,39 @@ export const GlobalStateProvider = ({ children }) => {
   const localStateRef = useRef(localState);
   useEffect(() => { localStateRef.current = localState; }, [localState]);
 
-  const fetchStockData = useCallback(async (refresh) => {
-    try {
-      setLoading(true);
-      const ls = localStateRef.current;
-
-      // Own key, not lastActivity. lastActivity is re-stamped on every launch
-      // by the effect above, so it could never be older than a few ms -- which
-      // made `timeElapsed > CACHE_TTL` unreachable and pinned every updated
-      // install to whatever catalogue it had cached. A fresh install fetched
-      // (no cache at all), an updated one never did, which is exactly why
-      // Halloween showed on a clean emulator and not on a real update.
-      //
-      // Installs that predate this key have no value here, so they read as
-      // epoch 0 and refetch once on next launch. That is the intended
-      // migration: it is how they pick up the items they are missing.
-      const fetchedAt = ls.valuesFetchedAt ? new Date(ls.valuesFetchedAt).getTime() : 0;
-      const now = Date.now();
-      const timeElapsed = now - fetchedAt;
-
-      // Bunny is billed per GB served. The two catalogues are ~1.5 MB together
-      // on every fetch, and they only change when the scraper runs — a few
-      // times a day at most. The old 6-minute window meant a user who opened
-      // the app ten times a day paid for ten downloads of identical bytes.
-      //
-      // So: cached for a day, and `refresh` (the pull-to-refresh / "Updated
-      // just now" control) always goes to the network, because that is the
-      // user explicitly asking for today's numbers.
-      const CACHE_TTL = 24 * 60 * 60 * 1000;
-
-      const hasCachedValues =
-        ls.data && Object.keys(ls.data).length &&
-        ls.suprime && Object.keys(ls.suprime).length;
-
-      // `imgurl` is deliberately NOT part of this. It is a config node with a
-      // default, cached separately, and MM2 may not publish one at all —
-      // including it forced a full catalogue download on every single launch.
-      const shouldFetch = Boolean(refresh) || !hasCachedValues || timeElapsed > CACHE_TTL;
-
-      if (shouldFetch) {
-        let data = {};
-        let suprime = {};
-        let image = '';
-
-        // Fisch publishes one feed, wrapped as { meta, data } — meta carries
-        // generatedAt (when the SCRAPER ran, not when we fetched), the
-        // collection counts, and the measured event schedule.
-        //
-        // The host lives only in Code/config/game.js. A shipped build cannot be
-        // re-pointed, so if this path ever moves, keep the old one alive on the
-        // zone as a copy.
-        //
-        // MM2 carried a second "Supreme" zone whose disagreement with the first
-        // was the product feature. Fisch has one catalogue, so the secondary is
-        // null and the source toggle collapses to a single source.
-        const suprimeUrl = GAME.cdn.secondary;
-        const cdnUrl = GAME.cdn.values;
-
-        const loadFromCdn = async (url) => {
-          const res = await fetch(url, { method: 'GET', cache: 'no-store' });
-          // Bunny answers a missing file with a 200-looking HTML error page on
-          // some zones and a 404 on others. Check the status before parsing.
-          if (!res.ok) throw new Error(`HTTP ${res.status}`);
-          const raw = await res.json();
-          const payload = unwrapFeed(raw);
-          // Validate AFTER unwrapping. `{ meta, data }` has two keys, so the
-          // old top-level length check passed even when `data` was empty.
-          if (!payload || typeof payload !== 'object' || payload.error || !Object.keys(payload).length) {
-            throw new Error('CDN returned invalid or error data');
-          }
-          // Carry the envelope's `meta` out separately. Unwrapping here threw it
-          // away before anything could read it, which silently cost us both the
-          // catalogue's own `generatedAt` and the measured event schedule.
-          // It is stored under its own key rather than folded back into `data`
-          // because Trades/Notifier.js reads the stored feed WITHOUT unwrapping
-          // and would see [meta, data] instead of the collections.
-          return { payload, meta: feedMeta(raw) };
-        };
-
-        // Fetched independently, and that is the point. Until 2026-09-13 both
-        // shared one try block while the Supreme URL 404'd, so parsing its HTML
-        // body threw *after* MM2 had already succeeded — discarding good MM2
-        // data and falling back to Firebase on every refresh.
-        // A game with no second catalogue resolves the secondary immediately
-        // rather than calling fetch(null), which throws a TypeError that reads
-        // like a network failure and sends us to the Firebase fallback.
-        const [mm2Result, suprimeResult] = await Promise.allSettled([
-          loadFromCdn(cdnUrl),
-          suprimeUrl ? loadFromCdn(suprimeUrl) : Promise.resolve(null),
-        ]);
-
-        let primaryMeta = null;
-        if (mm2Result.status === 'fulfilled') {
-          data = mm2Result.value.payload;
-          primaryMeta = mm2Result.value.meta;
-          console.log('✅ Loaded MM2 data from CDN:', cdnUrl);
-        } else {
-          console.warn('⚠️ MM2 CDN failed, falling back to Firebase:', mm2Result.reason?.message);
-          const dbSnapshot = await get(ref(appdatabase, 'mm2Data'));
-          data = dbSnapshot.exists() ? dbSnapshot.val() : {};
-        }
-
-        if (!suprimeUrl) {
-          suprime = null;                      // single-catalogue game
-        } else if (suprimeResult.status === 'fulfilled') {
-          suprime = suprimeResult.value?.payload ?? null;
-          console.log('✅ Loaded secondary data from CDN:', suprimeUrl);
-        } else {
-          console.warn('⚠️ Supreme CDN failed, falling back to Firebase:', suprimeResult.reason?.message);
-          const suprimeSnapshot = await get(ref(appdatabase, 'suprimeData'));
-          suprime = suprimeSnapshot.exists() ? suprimeSnapshot.val() : {};
-        }
-
-        // `image_url` may not exist in MM2 at all. Cached for 6 hours with the
-        // other config nodes so a stock refresh (every 6 min) stops re-reading
-        // a node that changes a few times a year.
-        try {
-          // `events` rides along with image_url on the same cached read, so the
-          // seasonal-event config costs no extra round trip. Set it from the
-          // Firebase console and every install picks the change up without an
-          // app release — see Code/Engagement/eventConfig.js.
-          const cfg = await getConfigNodes(appdatabase, ['image_url', 'events']);
-          image = cfg.image_url || '';
-          if (cfg.events && typeof cfg.events === 'object') {
-            await updateLocalStateRef.current('events', cfg.events);
-          }
-        } catch (imgErr) {
-          // absent or unreachable — empty string, same as before
-        }
-
-        // ✅ Store in local state
-        await updateLocalStateRef.current('data', JSON.stringify(data));
-        await updateLocalStateRef.current('feedMeta', JSON.stringify(primaryMeta || {}));
-        // Redemption codes ride in the same feed as a `codes` collection.
-        // CodesDrawer has always existed and read localState.codes — nothing
-        // ever wrote it, so the drawer was permanently empty while 76 codes sat
-        // in the payload. Active ones first: only 1 of 76 is currently live, so
-        // a flat list would bury the single code that actually works.
-        const allCodes = Array.isArray(data?.codes) ? data.codes : [];
-        const sortedCodes = [...allCodes].sort((a, b) => (b?.active === true) - (a?.active === true));
-        await updateLocalStateRef.current('codes', JSON.stringify(sortedCodes));
-        await updateLocalStateRef.current('suprime', JSON.stringify(suprime));
-        if (image) await updateLocalStateRef.current('imgurl', JSON.stringify(image));
-        // Stamp the catalogue's own clock. lastActivity is left to the launch
-        // effect that owns it (and mirrors it to RTDB for presence).
-        await updateLocalStateRef.current('valuesFetchedAt', new Date().toISOString());
+  const catalogueRequest = useRef(null);
+  const fetchStockData = useCallback((refresh = false) => {
+    if (catalogueRequest.current) return catalogueRequest.current;
+    setLoading(true);
+    const request = (async () => {
+      try {
+        const ls = localStateRef.current;
+        const cached = ls.catalogueSnapshot || { data: ls.data, meta: ls.feedMeta };
+        const snapshot = await fetchCatalogue({ url: GAME.cdn.values, cached, force: refresh });
+        commitCatalogue(snapshot);
+        console.info('[Fisch refresh]', snapshot.diagnostics);
+        // Update immediately too: a foreground event can arrive before React's effect.
+        localStateRef.current = { ...ls, catalogueSnapshot: snapshot, data: snapshot.data, feedMeta: snapshot.meta };
+        return snapshot;
+      } catch (error) {
+        updateLocalStateRef.current('valuesError', 'Could not refresh market data. Showing the last saved catalogue; check quote ages.');
+        console.warn('[Fisch catalogue]', error.message);
+        return null;
+      } finally {
+        setLoading(false);
+        catalogueRequest.current = null;
       }
-    } catch (error) {
-      console.error("❌ Error fetching stock data:", error);
-    } finally {
-      setLoading(false);
-    }
-  }, [appdatabase]); // ✅ Stable — only depends on appdatabase
+    })();
+    catalogueRequest.current = request;
+    return request;
+  }, [commitCatalogue]);
 
-
-
+  useEffect(() => {
+    const listener = AppState.addEventListener('change', state => {
+      if (state === 'active') fetchStockData();
+    });
+    return () => listener.remove();
+  }, [fetchStockData]);
 
   // console.log(user)
 
@@ -709,7 +588,7 @@ export const GlobalStateProvider = ({ children }) => {
   }, []);
 
   const reload = useCallback(() => {
-    fetchStockData(true);
+    return fetchStockData(true);
   }, [fetchStockData]);
 
   // ── MM2 image index, for Supreme's art fallback ──
@@ -1005,5 +884,4 @@ export const GlobalStateProvider = ({ children }) => {
     </GlobalStateContext.Provider>
   );
 };
-
 

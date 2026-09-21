@@ -9,6 +9,9 @@ import { useTranslation } from 'react-i18next';
 import { mixpanel } from './AppHelper/MixPenel';
 import { showErrorMessage, showSuccessMessage } from './Helper/MessageHelper';
 
+import { parseStored, normalizeScale } from './Helper/feedContract';
+import { readCatalogueCache } from './Helper/catalogueClient';
+
 const storage = createMMKV();
 const LocalStateContext = createContext();
 
@@ -26,6 +29,7 @@ export const LocalStateProvider = ({ children }) => {
     }
   };
 
+  const initialCatalogue = useMemo(() => readCatalogueCache(storage.getString('catalogueSnapshot')), []);
   const [localState, setLocalState] = useState(() => ({
     localKey: storage.getString('localKey') || 'defaultValue',
     reviewCount: Number(storage.getString('reviewCount')) || 0,
@@ -37,7 +41,7 @@ export const LocalStateProvider = ({ children }) => {
     consentStatus: storage.getString('consentStatus') || 'UNKNOWN',
     isPro: storage.getBoolean('isPro') ?? false,
     fetchDataTime: storage.getString('fetchDataTime') || null,
-    data: safeParseJSON('data', {}),
+    data: initialCatalogue?.data || parseStored(storage.getString('data')) || {},
     // The Supreme catalogue. GlobalStats has written this to MMKV since the
     // dual-feed fetch landed, but it was never rehydrated here — so on every
     // cold start it came back undefined and stayed that way until the next
@@ -46,7 +50,7 @@ export const LocalStateProvider = ({ children }) => {
     // Which catalogue prices the calculator: 'mm2' | 'supreme'. The two
     // disagree on 70% of the items they share, so this is a real preference,
     // not a display option. See Code/Helper/valueSources.js.
-    valueSource: storage.getString('valueSource') || 'supreme',
+    valueSource: normalizeScale(storage.getString('valueSource')),
     // Seasonal-event config, mirrored from RTDB /events. Empty until the first
     // fetch; the event screen falls back to its built-in estimates until then,
     // so a cold start with no network still shows a sensible countdown.
@@ -54,9 +58,11 @@ export const LocalStateProvider = ({ children }) => {
     // The feed envelope's `meta`: catalogue `generatedAt` plus the measured
     // event schedule the Timers screen counts down from. Kept separate from
     // `data` so nothing that reads the collections has to change.
-    feedMeta: safeParseJSON('feedMeta', {}),
+    feedMeta: initialCatalogue?.meta || parseStored(storage.getString('feedMeta')) || {},
+    catalogueSnapshot: initialCatalogue,
+    valuesError: null,
     ggData: safeParseJSON('ggData', {}),
-    codes: safeParseJSON('codes', {}),
+    codes: initialCatalogue?.data.codes || safeParseJSON('codes', {}),
     normalStock: safeParseJSON('normalStock', []),
     // My Stuff mirror (source of truth = Firestore reviews/{uid}) — read by
     // the calculator INVENTORY tab and the chat item picker so all three
@@ -82,7 +88,7 @@ export const LocalStateProvider = ({ children }) => {
     // it as the catalogue's TTL clock meant timeElapsed was always ~0 and a
     // cached catalogue was never refreshed. MUST be rehydrated here -- left
     // undefined it reads as epoch 0 and every launch refetches both feeds.
-    valuesFetchedAt: storage.getString('valuesFetchedAt') || null,
+    valuesFetchedAt: initialCatalogue?.checkedAt || storage.getString('valuesFetchedAt') || null,
     showFlag: storage.getBoolean('showFlag') ?? true, // ✅ Default true (show flag), user can hide to save data
     showOnlineStatus: storage.getBoolean('showOnlineStatus') ?? true, // ✅ Default true (show online), user can hide to save Firebase costs
     gameMusicEnabled: storage.getBoolean('gameMusicEnabled') ?? true, // ✅ Default true (music on), user can toggle off/on
@@ -108,11 +114,15 @@ export const LocalStateProvider = ({ children }) => {
     }
   }, [localState.theme]);
 
-  useEffect(() => {
-    if (localState.data) {
-      storage.set('data', JSON.stringify(localState.data)); // Force store
-    }
-  }, [localState.data]);
+  const commitCatalogue = useCallback(snapshot => {
+    const checked = readCatalogueCache(snapshot);
+    if (!checked) throw new Error('Invalid catalogue cache');
+    // One durable record keeps catalogue, metadata and ETag from different builds apart.
+    storage.set('catalogueSnapshot', JSON.stringify(checked));
+    setLocalState(prev => ({ ...prev, catalogueSnapshot: checked, data: checked.data, feedMeta: checked.meta,
+      valuesFetchedAt: checked.checkedAt, valuesError: null,
+      codes: [...(checked.data.codes || [])].sort((a,b) => Number(b.active === true) - Number(a.active === true)) }));
+  }, []);
 
   // console.log(localState.isPro)
   // ✅ Memoize updateLocalState to prevent recreation on every render
@@ -342,6 +352,7 @@ export const LocalStateProvider = ({ children }) => {
     () => ({
       localState,
       updateLocalState,
+      commitCatalogue,
       clearKey,
       clearAll,
       customerId,
@@ -353,7 +364,7 @@ export const LocalStateProvider = ({ children }) => {
       incrementTranslationCount,
       getRemainingTranslationTries, toggleAd
     }),
-    [localState, customerId, packages, mySubscriptions, updateLocalState, canTranslate, incrementTranslationCount, getRemainingTranslationTries, toggleAd, clearKey, clearAll]
+    [localState, commitCatalogue, customerId, packages, mySubscriptions, updateLocalState, canTranslate, incrementTranslationCount, getRemainingTranslationTries, toggleAd, clearKey, clearAll]
   );
 
   return (

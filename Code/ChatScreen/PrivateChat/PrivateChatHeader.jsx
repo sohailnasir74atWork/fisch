@@ -13,12 +13,18 @@ import { useGlobalState } from '../../GlobelStats';
 import { ref, get, set, remove } from '@react-native-firebase/database';
 import FramedAvatar from '../GroupChat/FramedAvatar';
 import { getCachedProfile, warmProfileCache, getOrFetchFullProfile } from '../../Helper/profileCache';
-import UserBadgePill, { getFirstBadgeType } from '../../Helper/UserBadgePill';
+import UserBadgePill, { getPrimaryRoleType } from '../../Helper/UserBadgePill';
 import { GAME } from '../../config/game';
 import { STATUS } from '../../Design/tokens';
 import { SIZE } from '../../Design/tokens';
 import { SPACE } from '../../Design/tokens';
 import { FONT } from '../../Design/tokens';
+
+// Presence needs its own two colours so Online and Offline never collapse into
+// the same swatch. Green/grey is the convention every chat app uses, and grey
+// reads as "away" rather than "error" the way a red dot would.
+const ONLINE_COLOR = '#10B981';
+const OFFLINE_COLOR = '#9CA3AF';
 
 const PrivateChatHeader = React.memo(({ selectedUser, selectedTheme, bannedUsers, isDrawerVisible, setIsDrawerVisible }) => {
   const { updateLocalState } = useLocalState();
@@ -218,6 +224,27 @@ const PrivateChatHeader = React.memo(({ selectedUser, selectedTheme, bannedUsers
     }
   }, [setIsDrawerVisible]);
 
+  // Role tags this user actually holds, in the app's canonical order:
+  // one authority pill (admin > mod > jmd, mutually exclusive) followed by any
+  // community pills. Only the first one glows, matching every other surface.
+  const badgeTypes = useMemo(() => {
+    if (!mergedUser) return [];
+    const list = [];
+    const primary = getPrimaryRoleType(mergedUser);
+    if (primary) list.push(primary);
+    if (mergedUser.isTrusted) list.push('trusted');
+    if (mergedUser.isCMSR) list.push('cmsr');
+    if (mergedUser.isHelper) list.push('helper');
+    return list;
+  }, [mergedUser]);
+  const firstBadge = badgeTypes[0] || null;
+
+  const hasRecentWin = useMemo(() => (
+    !!mergedUser?.hasRecentGameWin ||
+    (typeof mergedUser?.lastGameWinAt === 'number' &&
+      Date.now() - mergedUser.lastGameWinAt <= 24 * 60 * 60 * 1000)
+  ), [mergedUser?.hasRecentGameWin, mergedUser?.lastGameWinAt]);
+
   return (
     <View style={styles.container}>
       <TouchableOpacity onPress={handleOpenDrawer}>
@@ -229,80 +256,67 @@ const PrivateChatHeader = React.memo(({ selectedUser, selectedTheme, bannedUsers
           forceDetail
         />
       </TouchableOpacity>
-      <TouchableOpacity style={styles.infoContainer} onPress={handleOpenDrawer}>
-        <Text style={[styles.userName, { color: selectedTheme?.colors?.text || '#000' }]}>
-          {userName} 
+      <TouchableOpacity style={styles.infoContainer} onPress={handleOpenDrawer} activeOpacity={0.7}>
+        {/* Line 1 — name, then the small status icons, then copy.
+            These used to be nested inside the <Text> alongside the role pills.
+            A <View> inside <Text> only lays out on Android with fixed
+            dimensions, so the pills (flex rows with padding and a border) were
+            squeezed to nothing and a long username pushed everything off the
+            end with no way to truncate. They are real siblings now. */}
+        <View style={styles.nameRow}>
+          <Text
+            style={[styles.userName, { color: selectedTheme?.colors?.text || '#000' }]}
+            numberOfLines={1}
+          >
+            {userName}
+          </Text>
           {mergedUser?.isPro && (
-            <Image
-              source={require('../../../assets/pro.png')} 
-              style={{ width: 12, height: 12, marginLeft: SPACE.xs }} 
-            />
+            <Image source={require('../../../assets/pro.png')} style={styles.inlineIcon} />
           )}
           {mergedUser?.robloxUsernameVerified && (
-            <Image
-              source={require('../../../assets/verification.png')} 
-              style={{ width: 12, height: 12, marginLeft: SPACE.xs }} 
-            />
+            <Image source={require('../../../assets/verification.png')} style={styles.inlineIcon} />
           )}
-          {(() => {
-            const firstBadge = getFirstBadgeType(mergedUser);
-            return (
-              <>
-                {mergedUser?.isAdmin && (
-                  <UserBadgePill type="admin" size="sm" isDarkMode={selectedTheme?.dark ?? false} glow={firstBadge === 'admin'} />
-                )}
-                {!mergedUser?.isAdmin && mergedUser?.isModerator && (
-                  <UserBadgePill type="mod" size="sm" isDarkMode={selectedTheme?.dark ?? false} glow={firstBadge === 'mod'} />
-                )}
-                {!mergedUser?.isAdmin && !mergedUser?.isModerator && mergedUser?.isBabyMod && (
-                  <UserBadgePill type="jmd" size="sm" isDarkMode={selectedTheme?.dark ?? false} glow={firstBadge === 'jmd'} />
-                )}
-                {mergedUser?.isTrusted && (
-                  <UserBadgePill type="trusted" size="sm" isDarkMode={selectedTheme?.dark ?? false} glow={firstBadge === 'trusted'} />
-                )}
-                {mergedUser?.isCMSR && (
-                  <UserBadgePill type="cmsr" size="sm" isDarkMode={selectedTheme?.dark ?? false} glow={firstBadge === 'cmsr'} />
-                )}
-                {mergedUser?.isHelper && (
-                  <UserBadgePill type="helper" size="sm" isDarkMode={selectedTheme?.dark ?? false} glow={firstBadge === 'helper'} />
-                )}
-              </>
-            );
-          })()}
-          {(() => {
-            const hasRecentWin =
-              !!mergedUser?.hasRecentGameWin ||
-              (typeof mergedUser?.lastGameWinAt === 'number' &&
-                Date.now() - mergedUser.lastGameWinAt <= 24 * 60 * 60 * 1000);
-            return hasRecentWin ? (
-              <Image
-                source={require('../../../assets/trophy.webp')}
-                style={{ width: 10, height: 10, marginLeft: SPACE.xs }}
-              />
-            ) : null;
-          })()}
-          {'  '}
-          <Icon 
-            name="copy-outline" 
-            size={16} 
-            color={STATUS.primary} 
+          {hasRecentWin && (
+            <Image source={require('../../../assets/trophy.webp')} style={styles.trophyIcon} />
+          )}
+          <TouchableOpacity
             onPress={() => copyToClipboard(userName)}
+            hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+          >
+            <Icon name="copy-outline" size={15} color={STATUS.primary} />
+          </TouchableOpacity>
+        </View>
+
+        {/* Line 2 — presence, then whatever role tags this user holds. Giving
+            the tags their own line is what "room for them" means here: on the
+            name line a single ADMIN pill would eat the width a real username
+            needs. The row collapses to just the status when a user has no
+            roles, so nobody pays for blank space they never use. */}
+        <View style={styles.metaRow}>
+          <View
+            style={[
+              styles.presenceDot,
+              { backgroundColor: isOnline ? ONLINE_COLOR : OFFLINE_COLOR },
+            ]}
           />
-        </Text>
-        <Text style={[
-                    styles.drawerSubtitleUser,
-                    {
-                      color: !isOnline
-                        ? config.colors.hasBlockGreen
-                        : config.colors.wantBlockRed,
-                      fontSize: SIZE.label,
-                      marginTop: SPACE.hair,
-                    },
-                  ]}
-                >
-          {isOnline ? 'Online' : 'Offline'}
-        </Text>
-        
+          <Text
+            style={[
+              styles.statusText,
+              { color: isOnline ? ONLINE_COLOR : OFFLINE_COLOR },
+            ]}
+          >
+            {isOnline ? 'Online' : 'Offline'}
+          </Text>
+          {badgeTypes.map((type) => (
+            <UserBadgePill
+              key={type}
+              type={type}
+              size="sm"
+              isDarkMode={selectedTheme?.dark ?? false}
+              glow={type === firstBadge}
+            />
+          ))}
+        </View>
       </TouchableOpacity>
       <TouchableOpacity onPress={handleBanToggle}>
         <Icon
@@ -318,10 +332,10 @@ const PrivateChatHeader = React.memo(({ selectedUser, selectedTheme, bannedUsers
 
 const styles = StyleSheet.create({
   container: {
+    flex: 1,
     flexDirection: 'row',
     alignItems: 'center',
     paddingVertical: 5,
-    // backgroundColor:'red'
   },
   avatar: {
     width: 40,
@@ -332,9 +346,42 @@ const styles = StyleSheet.create({
   },
   infoContainer: {
     flex: 1,
+    marginLeft: SPACE.lg,
+  },
+  nameRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 5,
   },
   userName: {
     fontSize: SIZE.subtitle,
+    fontFamily: FONT.bold,
+    // Shrink before the icons do, so a long username truncates with an
+    // ellipsis instead of shoving the verified tick and copy button off-screen.
+    flexShrink: 1,
+  },
+  inlineIcon: {
+    width: 13,
+    height: 13,
+  },
+  trophyIcon: {
+    width: 11,
+    height: 11,
+  },
+  metaRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    flexWrap: 'wrap',
+    gap: 5,
+    marginTop: 3,
+  },
+  presenceDot: {
+    width: 6,
+    height: 6,
+    borderRadius: 3,
+  },
+  statusText: {
+    fontSize: SIZE.label,
     fontFamily: FONT.bold,
   },
   banIcon: {
