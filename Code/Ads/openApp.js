@@ -8,7 +8,15 @@ import {
   markFullScreenAdShown,
   msSinceOtherFullScreenAd,
 } from './adVisibility';
-import { APP_OPEN_MIN_BACKGROUND_MS, CROSS_FORMAT_GAP_MS, POST_SHOW_RELOAD_MS, isNoFillError } from './adPolicy';
+import {
+  APP_OPEN_MIN_BACKGROUND_MS,
+  APP_OPEN_MIN_INTERVAL_MS,
+  COLD_START_MIN_GAP_MS,
+  COLD_START_BUDGET_MS,
+  CROSS_FORMAT_GAP_MS,
+  POST_SHOW_RELOAD_MS,
+  isNoFillError,
+} from './adPolicy';
 import { adsEnabled } from './adsEnabled';
 
 const adUnitId = getAdUnitId('openapp');
@@ -18,7 +26,7 @@ const adUnitId = getAdUnitId('openapp');
 const AD_EXPIRY_MS = 4 * 60 * 60 * 1000;
 // Don't show more than once per this window, so quick app-switches (e.g.
 // flicking to another app for 5s and back) don't spam the user.
-const MIN_INTERVAL_MS = 2 * 60 * 1000;
+const MIN_INTERVAL_MS = APP_OPEN_MIN_INTERVAL_MS;
 
 // isPro is read straight from MMKV so every foreground show respects the
 // latest purchase state without any React wiring into this singleton.
@@ -35,12 +43,10 @@ try {
 // hides); otherwise this launch has no cold-start ad and the next genuine
 // foreground return can show one. Frequency/caps are unchanged.
 const APP_START_AT = Date.now();
-const COLD_START_BUDGET_MS = 4000;
 const K_LAUNCHED_BEFORE = 'appOpenLaunchedBefore';
 // At most one cold-start ad per this gap, like Adopt Me / Blox. Without it a
 // player reopening the app several times a day got a launch ad every time
 // (reviewed 2026-10-04; MM2 dropped launch ads over exactly that complaint).
-const COLD_START_MIN_GAP_MS = 4 * 60 * 60 * 1000;
 const K_LAST_COLD_AD = 'appOpenLastColdStartAt';
 let launchedBefore = false;
 try {
@@ -264,7 +270,7 @@ class AppOpenAdManager {
     this._clearShowWatchdog();
     setFullScreenAdVisible(false);
     this.isShowing = false;
-    // Nothing was displayed, so don't burn the 2-minute cap on an impression
+    // Nothing was displayed, so don't burn the return interval on an impression
     // the user never saw.
     this.lastShownAt = 0;
     this._createAndLoad();
