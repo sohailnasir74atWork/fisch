@@ -279,7 +279,7 @@ const RodsScreen = () => {
         contentContainerStyle={s.list}
         initialNumToRender={12}
         windowSize={10}
-        removeClippedSubviews
+        removeClippedSubviews={false}
         ListEmptyComponent={
           <View style={ui.emptyContainer}>
             <Text style={ui.emptyText}>

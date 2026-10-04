@@ -69,11 +69,8 @@
     native <methods>;
 }
 
-# ---- Reanimated / worklets / gestures / screens ----------------------------
--keep class com.swmansion.reanimated.** { *; }
--dontwarn com.swmansion.reanimated.**
--keep class com.swmansion.worklets.** { *; }
--dontwarn com.swmansion.worklets.**
+# ---- Gestures / screens ----------------------------------------------------
+# (Reanimated and Worklets were uninstalled 2026-10-04; nothing imported them.)
 -keep class com.swmansion.gesturehandler.** { *; }
 -dontwarn com.swmansion.gesturehandler.**
 -keep class com.swmansion.rnscreens.** { *; }

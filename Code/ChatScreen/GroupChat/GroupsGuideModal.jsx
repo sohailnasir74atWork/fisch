@@ -41,9 +41,14 @@ const GroupsGuideModal = ({ visible, onClose }) => {
             </TouchableOpacity>
           </View>
 
-          {/* Content */}
-          <ScrollView 
-            showsVerticalScrollIndicator={false} 
+          {/* Content. Rewritten to match the screens as they actually are:
+              the old copy pointed at a "+ in the header" that does not exist,
+              said the creator always stays admin (ownership can be handed
+              over), talked about pets, and promised new-message
+              notifications that nothing currently sends. Plain English, like
+              the rest of this modal -- it has never used translation keys. */}
+          <ScrollView
+            showsVerticalScrollIndicator={false}
             style={styles.scrollContainer}
             contentContainerStyle={styles.scrollContent}
           >
@@ -55,12 +60,26 @@ const GroupsGuideModal = ({ visible, onClose }) => {
                 How to Create a Group
               </Text>
               <Text style={[styles.sectionText, { color: c.textSecondary }]}>
-                1. Go to the main Chat screen and tap the plus icon (+) in the header.{'\n\n'}
-                2. Select members from the online users list (you can select multiple users by tapping on them).{'\n\n'}
-                3. Tap "Create" or "Add" button at the top (it will show "Create" if you don't have a group, or "Add" if you already have a group).{'\n\n'}
-                4. If creating a new group, enter a group name (required, max 50 characters) in the modal that appears.{'\n\n'}
-                5. Tap "Create Group" to finalize.{'\n\n'}
-                6. Selected members will receive invitations to join your group.
+                1. On this Groups screen, open the Joined Groups tab and tap the "Create" button at the bottom right.{'\n\n'}
+                2. Pick members. The list shows who is online right now; to find anyone else, type at least 2 letters in "Search by name" (it matches the start of a name). Tap people to select them.{'\n\n'}
+                3. Tap "Create" at the top of the list.{'\n\n'}
+                4. Enter a group name and a short description (both required), and optionally pick a group icon.{'\n\n'}
+                5. Tap "Create Group". Everyone you picked gets an invitation to join.
+              </Text>
+            </View>
+
+            <View style={styles.divider} />
+
+            <View style={styles.section}>
+              <View style={styles.iconContainer}>
+                <Icon name="person-add" size={24} color={config.colors.primary} />
+              </View>
+              <Text style={[styles.sectionTitle, { color: c.text }]}>
+                Joining a Group
+              </Text>
+              <Text style={[styles.sectionText, { color: c.textSecondary }]}>
+                • <Text style={styles.boldText}>Invitations:</Text> They appear under "Pending Invitations" on the Joined Groups tab. You join only after you accept, and an invitation expires after 7 days.{'\n\n'}
+                • <Text style={styles.boldText}>Requests:</Text> On the All Groups tab, tap "Send Request" on any group. Its owner can approve or reject it from "Join Requests".
               </Text>
             </View>
 
@@ -74,13 +93,11 @@ const GroupsGuideModal = ({ visible, onClose }) => {
                 Important Rules
               </Text>
               <Text style={[styles.sectionText, { color: c.textSecondary }]}>
-                • <Text style={styles.boldText}>One Group Limit:</Text> Each user can only be an admin/creator of one group at a time.{'\n\n'}
-                • <Text style={styles.boldText}>Minimum Members:</Text> A group must have at least 2 members (including yourself).{'\n\n'}
-                • <Text style={styles.boldText}>Maximum Members:</Text> Each group can have up to 50 members.{'\n\n'}
-                • <Text style={styles.boldText}>Group Admin:</Text> The creator is the admin. Admins can remove members and make other members admin.{'\n\n'}
-                • <Text style={styles.boldText}>Admin Transfer:</Text> If an admin (not creator) makes another member admin, they will revert to a regular member. The creator always remains admin.{'\n\n'}
-                • <Text style={styles.boldText}>Leaving Groups:</Text> Members can leave at any time. If an admin/creator leaves, a new admin is randomly selected. If the last member leaves, the group is deleted.{'\n\n'}
-                • <Text style={styles.boldText}>Invitations:</Text> Members must accept invitations before they can join.
+                • <Text style={styles.boldText}>One Group Each:</Text> You can own one group at a time. Once you own one, the bottom button becomes "Add Members" and invites people to it.{'\n\n'}
+                • <Text style={styles.boldText}>Size:</Text> You need to invite at least 1 person to create a group, and a group can have up to 50 members.{'\n\n'}
+                • <Text style={styles.boldText}>Owner:</Text> The group owner can invite and remove members, edit the group's name, description and icon from its ⋮ menu, and delete the group.{'\n\n'}
+                • <Text style={styles.boldText}>Passing Ownership:</Text> In the chat, tap the member count at the top, then the star next to a member to make them the owner. This is permanent: you become a regular member.{'\n\n'}
+                • <Text style={styles.boldText}>Leaving:</Text> Anyone can leave at any time. If the owner leaves, a random remaining member becomes the owner. When the last member leaves, the group is deleted.
               </Text>
             </View>
 
@@ -94,10 +111,10 @@ const GroupsGuideModal = ({ visible, onClose }) => {
                 Group Features
               </Text>
               <Text style={[styles.sectionText, { color: c.textSecondary }]}>
-                • Send text messages, images, and pets (up to 18 pets per message).{'\n\n'}
-                • See who's online in your group.{'\n\n'}
-                • View group members and their roles.{'\n\n'}
-                • Receive notifications for new messages when you're not active in the chat.
+                • Send text, up to 3 images, and up to 18 items (fish, rods, rod skins, bobbers, lanterns) per message.{'\n\n'}
+                • Tap a message to copy it or reply to it.{'\n\n'}
+                • Tap the member count at the top of a chat to see the members and who is online.{'\n\n'}
+                • You can mute a group from its ⋮ menu or the bell next to it in your groups list.
               </Text>
             </View>
           </ScrollView>

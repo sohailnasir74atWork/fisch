@@ -55,7 +55,10 @@ export default function ScamSafetyBox({
       try {
         const summaryRef = doc(firestoreDB, 'user_ratings_summary', selectedUserId);
         const snap = await getDoc(summaryRef);
-        if (!cancelled && snap.exists) {
+        // exists() is a method in RNFB v23. The bare property is always a
+        // truthy function, so a user with no ratings threw reading
+        // undefined.averageRating (swallowed by the catch below).
+        if (!cancelled && snap.exists()) {
           const data = snap.data();
           setRatingSummary({
             value: data.averageRating || 0,

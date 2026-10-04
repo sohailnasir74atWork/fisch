@@ -9,8 +9,6 @@ import {
   FlatList,
   Image,
   ActivityIndicator,
-  KeyboardAvoidingView,
-  Platform,
   Alert,
   ScrollView,
 } from 'react-native';
@@ -28,6 +26,7 @@ import config from '../../Helper/Environment';
 import { GAME } from '../../config/game';
 import { STATUS } from '../../Design/tokens';
 import { getThemeColors } from '../../Helper/themeColors';
+import { ModalKeyboardView } from '../../Helper/keyboardAvoidingContainer';
 import { SIZE } from '../../Design/tokens';
 import { SPACE } from '../../Design/tokens';
 import { FONT } from '../../Design/tokens';
@@ -76,7 +75,10 @@ const base64ToBytes = (base64) => {
 
 const MAX_GROUP_MEMBERS = 50;
 
-const CreateGroupModal = ({ visible, onClose, selectedUsers = [], editGroupId = null, editGroupName = null, editGroupDescription = null, editGroupAvatar = null, isAdmin = false, onGroupUpdated = null }) => {
+// onGroupCreated(groupId, groupName): optional. When given, the caller owns
+// what happens after a successful create (close its own sheet, navigate);
+// otherwise this modal navigates to the new chat itself.
+const CreateGroupModal = ({ visible, onClose, selectedUsers = [], editGroupId = null, editGroupName = null, editGroupDescription = null, editGroupAvatar = null, isAdmin = false, onGroupUpdated = null, onGroupCreated = null }) => {
   const { theme, user, firestoreDB, appdatabase } = useGlobalState();
   const insets = useSafeAreaInsets();
   const isEditMode = !!editGroupId;
@@ -300,8 +302,12 @@ const CreateGroupModal = ({ visible, onClose, selectedUsers = [], editGroupId = 
       if (result.success) {
         showSuccessMessage(t('home.alert.success'), t('create_group.create_success'));
         onClose();
-        // Navigate to group chat
-        if (result.groupId && navigation && typeof navigation.navigate === 'function') {
+        // The member picker this opens from is itself a Modal. Navigating from
+        // here left that sheet open on top of the new chat, so the picker
+        // passes onGroupCreated to close itself first and navigate.
+        if (result.groupId && typeof onGroupCreated === 'function') {
+          onGroupCreated(result.groupId, groupName.trim() || t('groups_screen.group'));
+        } else if (result.groupId && navigation && typeof navigation.navigate === 'function') {
           navigation.navigate('GroupChatDetail', {
             groupId: result.groupId,
             groupName: groupName.trim() || t('groups_screen.group'),
@@ -421,10 +427,12 @@ const CreateGroupModal = ({ visible, onClose, selectedUsers = [], editGroupId = 
       animationType="slide"
       onRequestClose={onClose}
     >
-      <KeyboardAvoidingView
-        behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
-        style={[styles.keyboardAvoidingView, { paddingBottom: insets.bottom }]}
-      >
+      {/* ModalKeyboardView, not a bare KeyboardAvoidingView: inside a Modal,
+          Android already resizes the window for the keyboard, and the old
+          behavior 'height' moved the sheet a second time. The bottom inset
+          lives only on the footer below -- it used to be added here too, so
+          the sheet sat a full nav-bar height too high. */}
+      <ModalKeyboardView style={styles.keyboardAvoidingView}>
         <View style={styles.overlay}>
           <View style={[styles.container, { backgroundColor: isDarkMode ? config.colors.surfaceDark : '#fff' }]}>
             {/* Header */}
@@ -525,7 +533,7 @@ const CreateGroupModal = ({ visible, onClose, selectedUsers = [], editGroupId = 
                   </View>
 
                   {/* Selected Members List */}
-                  <FlatList
+                  <FlatList removeClippedSubviews={false}
                     data={displayUsers.filter((u) => selectedMemberIds.includes(u.id))}
                     keyExtractor={(item) => item.id}
                     scrollEnabled={false}
@@ -562,7 +570,9 @@ const CreateGroupModal = ({ visible, onClose, selectedUsers = [], editGroupId = 
             </ScrollView>
 
             {/* Create Button */}
-            <View style={[styles.footer, { paddingBottom: Math.max(insets.bottom, 12) }]}>
+            {/* Own base padding plus the inset (edge-to-edge Android draws
+                under the nav bar), never one in place of the other. */}
+            <View style={[styles.footer, { paddingBottom: SPACE.xl + insets.bottom }]}>
               <TouchableOpacity
                 style={[
                   styles.createButton,
@@ -584,7 +594,7 @@ const CreateGroupModal = ({ visible, onClose, selectedUsers = [], editGroupId = 
             </View>
           </View>
         </View>
-      </KeyboardAvoidingView>
+      </ModalKeyboardView>
     </Modal>
   );
 };

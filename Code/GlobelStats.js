@@ -15,8 +15,23 @@ import { getServerTime } from './Helper/serverTime';
 import { generateOnePieceUsername } from './Helper/RendomNamegen';
 import { fetchCatalogue } from './Helper/catalogueClient';
 import { GAME } from './config/game';
+import { fetchPersonalBlocks } from './ChatScreen/utils';
+import { getAnalytics, logEvent } from '@react-native-firebase/analytics';
 
 
+
+// ── Startup instrumentation (2026-09-21) ────────────────────────────────
+// `am start -W` measures time to FIRST DRAW, which is only the splash. What
+// users call "slow to open" is the time until isAppReady flips, which sits
+// behind the auth + profile work below. Sent to Analytics, not Crashlytics: a
+// Crashlytics log is a breadcrumb visible only if that session later crashes,
+// which is a useless sample for typical startup time.
+const _launchedAt = Date.now();
+const logStartupTiming = (name, params) => {
+  try {
+    logEvent(getAnalytics(), name, params);
+  } catch (_) {}
+};
 
 const app = getApps().length ? getApp() : null;
 const auth = getAuth(app);
@@ -180,36 +195,25 @@ export const GlobalStateProvider = ({ children }) => {
       .catch(() => {});
   }, [user?.id]);
 
-  // ✅ Handle flag setting based on user preference (saves Firebase data costs)
+  // Country flag (Code/Helper/countryFlag.js): saved for every signed-in user,
+  // admins included, and refreshed when the device region changes. It is a
+  // moderation aid that only admins ever see, so there is no user switch and
+  // nothing is ever cleared. At most one write per sign-in; none when the
+  // stored flag already matches. A ref (not user?.flage in the deps) stops the
+  // write from re-triggering this effect. (From Adopt Me.)
+  const userFlageRef = useRef(user?.flage);
+  useEffect(() => { userFlageRef.current = user?.flage; }, [user?.flage]);
   useEffect(() => {
-    if (!isAdmin && user?.id && appdatabase) {
-      // ✅ Only set flag once per user.id to prevent infinite loop
-      if (flagSetForUserRef.current !== user.id) {
-        flagSetForUserRef.current = user.id;
-        
-        // ✅ Only store flag if user wants to show it (saves Firebase data costs)
-        if (localState?.showFlag !== false) {
-          // User wants to show flag - store it
-          updateLocalStateAndDatabaseRef.current({ flage: getFlag() });
-        }
-        // If showFlag is false, don't store flag (saves data)
-      } else {
-        // ✅ Handle flag toggle changes after initial setup
-        if (localState?.showFlag === false && user?.flage) {
-          // ✅ User toggled flag off - remove it from Firebase to save data
-          const userRef = ref(appdatabase, `users/${user.id}`);
-          update(userRef, { flage: null }).catch(() => {});
-          setUser((prev) => ({ ...prev, flage: null }));
-        } else if (localState?.showFlag !== false && !user?.flage) {
-          // ✅ User toggled flag on - add it
-          const flagValue = getFlag();
-          const userRef = ref(appdatabase, `users/${user.id}`);
-          update(userRef, { flage: flagValue }).catch(() => {});
-          setUser((prev) => ({ ...prev, flage: flagValue }));
-        }
-      }
+    if (!user?.id || !appdatabase) return;
+    const flagValue = getFlag();
+    if (!flagValue) return;
+    const alreadyChecked = flagSetForUserRef.current === user.id;
+    if (alreadyChecked && userFlageRef.current === flagValue) return;
+    flagSetForUserRef.current = user.id;
+    if (userFlageRef.current !== flagValue) {
+      updateLocalStateAndDatabaseRef.current({ flage: flagValue });
     }
-  }, [user?.id, isAdmin, localState?.showFlag, appdatabase, user?.flage]) // ✅ Check showFlag preference
+  }, [user?.id, appdatabase]);
 
   // ✅ Memoize resetUserState to prevent unnecessary re-renders
   const resetUserState = useCallback(() => {
@@ -284,9 +288,9 @@ export const GlobalStateProvider = ({ children }) => {
       }
 
       setUser(userData);
-
-      // 🔥 Refresh and update FCM token
-      await Promise.all([registerForNotifications(userId)]);
+      // FCM registration happens once, in the user?.id effect below. It also
+      // ran here and again after login (both awaited before the splash hid),
+      // so every launch registered up to three times. (From mm2values.)
 
     } catch (error) {
       // ⚠️ A failed profile read must NOT look like a logout.
@@ -319,7 +323,6 @@ export const GlobalStateProvider = ({ children }) => {
 
     const run = async () => {
       try {
-        console.log('Registering push token for user:', user.id);
         await registerForNotifications(user.id);
       } catch (e) {
         console.log('registerForNotifications error', e);
@@ -333,19 +336,31 @@ export const GlobalStateProvider = ({ children }) => {
   // ✅ Ensure useEffect runs only when necessary
   useEffect(() => {
     const unsubscribe = onAuthStateChanged(auth, async (loggedInUser) => {
-      if (loggedInUser && !loggedInUser.emailVerified) {
-        await auth.signOut();
-        // showErrorMessage("Email Not Verified", "Please check your inbox and verify your email.");
+      // Enforce email verification ONLY for the email/password provider, and
+      // only for a user still signed in 3 s later. This fires with the
+      // persisted session on every launch, so signing out every
+      // emailVerified=false user logged out social accounts that report it
+      // false (Apple, some Google), and signing out immediately raced the
+      // sign-in drawer while it was still sending the verification email —
+      // the email never went out or the drawer showed "Failed to sign in".
+      // The drawer signs unverified users out itself. (From Adopt Me ae356a3.)
+      const isPasswordUser = !!loggedInUser?.providerData?.some(p => p?.providerId === 'password');
+      if (loggedInUser && isPasswordUser && !loggedInUser.emailVerified) {
+        const uid = loggedInUser.uid;
+        setTimeout(() => {
+          if (auth.currentUser?.uid !== uid) return; // the drawer already signed out
+          auth.signOut().catch(() => {});
+        }, 3000);
         return;
       }
 
       setTimeout(async () => {
+        const _loginStartedAt = Date.now();
         await handleUserLogin(loggedInUser);
+        logStartupTiming('startup_profile_reads', { ms: Date.now() - _loginStartedAt });
 
-        if (loggedInUser?.uid) {
-          await registerForNotifications(loggedInUser.uid);
-        }
-
+        // Time-to-interactive: process start -> splash hide.
+        logStartupTiming('startup_ready', { ms: Date.now() - _launchedAt });
         await updateLocalState('isAppReady', true);
       }, 0);
     });
@@ -552,7 +567,6 @@ export const GlobalStateProvider = ({ children }) => {
         const cached = ls.catalogueSnapshot || { data: ls.data, meta: ls.feedMeta };
         const snapshot = await fetchCatalogue({ url: GAME.cdn.values, cached, force: refresh });
         commitCatalogue(snapshot);
-        console.info('[Fisch refresh]', snapshot.diagnostics);
         // Update immediately too: a foreground event can arrive before React's effect.
         localStateRef.current = { ...ls, catalogueSnapshot: snapshot, data: snapshot.data, feedMeta: snapshot.meta };
         return snapshot;
@@ -652,6 +666,26 @@ export const GlobalStateProvider = ({ children }) => {
     return () => { try { unsub(); } catch (e) { /* noop */ } };
   }, [user?.id]);
 
+  // ── Restore the personal block list at sign-in ──
+  // The device list (MMKV) is empty after a reinstall or on a new phone; the
+  // RTDB copy at bannedUsers/{uid} is not. Merge, never replace, so blocks
+  // made on this device before the read returns are kept. One read per
+  // session. Mirrors Adopt Me's sign-in hydration.
+  useEffect(() => {
+    if (!appdatabase || !user?.id) return;
+    let cancelled = false;
+    fetchPersonalBlocks(appdatabase, user.id)
+      .then((remoteIds) => {
+        if (cancelled || remoteIds.length === 0) return;
+        const local = Array.isArray(localState?.bannedUsers) ? localState.bannedUsers : [];
+        const merged = [...new Set([...local, ...remoteIds])];
+        if (merged.length !== local.length) updateLocalStateRef.current('bannedUsers', merged);
+      })
+      .catch(() => { /* offline / denied → keep the device list */ });
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [user?.id]);
+
   // ── Live role flags for the signed-in user ──
   // Two leaf listeners for the session, so a demoted moderator loses their
   // powers immediately instead of at next launch.
@@ -744,7 +778,9 @@ export const GlobalStateProvider = ({ children }) => {
     let armedOnDisconnect = false;
 
     const setLocalOnline = (val) => {
-      setUser((prev) => (prev?.id ? { ...prev, online: val } : prev));
+      // Same object when nothing changed: a new `user` re-rendered every
+      // useGlobalState consumer on each foreground/background switch.
+      setUser((prev) => (prev?.id && prev.online !== val ? { ...prev, online: val } : prev));
     };
 
     const forceOffline = async () => {

@@ -23,7 +23,6 @@ import { useHaptic } from '../Helper/HepticFeedBack';
 import { useLocalState } from '../LocalGlobelStats';
 import { useTranslation } from 'react-i18next';
 import { ref, update } from '@react-native-firebase/database';
-import { mixpanel } from '../AppHelper/MixPenel';
 import { Menu, MenuOption, MenuOptions, MenuTrigger } from 'react-native-popup-menu';
 import InterstitialAdManager from '../Ads/IntAd';
 import BannerAdComponent from '../Ads/bannerAds';
@@ -530,7 +529,7 @@ const ValueScreen = React.memo(({ selectedTheme, fromChat, selectedFruits, setSe
                 </Text>
               </View>
 
-              <FlatList
+              <FlatList removeClippedSubviews={false}
                 horizontal
                 data={selectedList}
                 keyExtractor={itemKey}
@@ -673,7 +672,7 @@ const ValueScreen = React.memo(({ selectedTheme, fromChat, selectedFruits, setSe
               keyExtractor={itemKey}
               renderItem={renderItem}
               showsVerticalScrollIndicator={false}
-              removeClippedSubviews={true}
+              removeClippedSubviews={false}
               numColumns={2}
               columnWrapperStyle={styles.columnWrapper}
               contentContainerStyle={{ paddingBottom: 180 }}

@@ -33,12 +33,16 @@ const ProfileAdminActions = ({
   handleMakeTrusted, handleRemoveTrusted, handleMakeCMSR, handleRemoveCMSR, handleMakeHelper, handleRemoveHelper,
   handleDeleteUserData, deletingUser = false,
   canDeleteUser = false,
+  canSanction = true, targetIsStaff = false,
 }) => {
   const c = getThemeColors(isDarkMode);
   const isBabyModOnly = isBabyMod && !isAdmin && !isModerator;
   // A user who only holds the delegated "can grant Junior Mod" permission is not
   // staff — they get the Junior Mod chip and nothing else.
   const grantOnly = !isStaff;
+  // Staff are off-limits to non-admins (Adopt Me 8299678). Folded into the
+  // one flag the strike / mute / unban blocks test.
+  const noSanctions = grantOnly || !canSanction;
 
   const bg = c.bg;
   const border = c.border;
@@ -61,7 +65,13 @@ const ProfileAdminActions = ({
         {isAdmin ? 'Admin' : isModerator ? 'Moderator' : grantOnly ? 'Junior Mod Access' : 'Junior Mod'}
       </Text>
 
-      {!isBabyModOnly && !grantOnly && (
+      {targetIsStaff && !canSanction && (
+        <Text style={{ fontSize: SIZE.small, color: dim, fontFamily: FONT.regular, marginBottom: SPACE.lg, lineHeight: 16 }}>
+          This user is a staff member. Only an admin can strike, mute or ban them.
+        </Text>
+      )}
+
+      {!isBabyModOnly && !noSanctions && (
         <View style={{ marginBottom: SPACE.lg }}>
           <Text style={{ fontSize: SIZE.label, color: dim, fontFamily: FONT.regular, marginBottom: SPACE.sm }}>Strikes</Text>
           <View style={{ flexDirection: 'row', gap: SPACE.sm }}>
@@ -72,7 +82,7 @@ const ProfileAdminActions = ({
         </View>
       )}
 
-      {!grantOnly && (
+      {!noSanctions && (
       <View style={{ marginBottom: SPACE.lg }}>
         <Text style={{ fontSize: SIZE.label, color: dim, fontFamily: FONT.regular, marginBottom: SPACE.sm }}>
           Mute{isBabyModOnly ? ' (max 2h)' : ''}
@@ -88,10 +98,10 @@ const ProfileAdminActions = ({
       </View>
       )}
 
-      {!grantOnly && <View style={{ height: 1, backgroundColor: border, marginBottom: SPACE.lg }} />}
+      {!noSanctions && <View style={{ height: 1, backgroundColor: border, marginBottom: SPACE.lg }} />}
 
       <View style={{ flexDirection: 'row', gap: SPACE.md, flexWrap: 'wrap' }}>
-        {!isBabyModOnly && !grantOnly && isBanned && (
+        {!isBabyModOnly && !noSanctions && isBanned && (
           <Chip label="Unban" color="#10b981" onPress={handleUnbanUser} />
         )}
         {isAdmin && (

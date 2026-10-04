@@ -1,12 +1,13 @@
 import React, { createContext, useContext, useState, useEffect, useMemo, useCallback } from 'react';
-import { Appearance } from 'react-native';
+import { Appearance, AppState } from 'react-native';
 import { createMMKV } from 'react-native-mmkv';
 import Purchases from 'react-native-purchases';
 import config from './Helper/Environment';
 import { GAME, hasProEntitlement } from './config/game';
 import { useTranslation } from 'react-i18next';
+import { getAuth, onAuthStateChanged } from '@react-native-firebase/auth';
+import { fetchPromoProUntil } from './Helper/promoCode';
 
-import { mixpanel } from './AppHelper/MixPenel';
 import { showErrorMessage, showSuccessMessage } from './Helper/MessageHelper';
 
 import { parseStored, normalizeScale } from './Helper/feedContract';
@@ -40,6 +41,9 @@ export const LocalStateProvider = ({ children }) => {
     theme: storage.getString('theme') || 'system',
     consentStatus: storage.getString('consentStatus') || 'UNKNOWN',
     isPro: storage.getBoolean('isPro') ?? false,
+    // Promo-code Pro end time (ms), 0 = none. isPro is RevenueCat OR this;
+    // see applyRcPro / applyPromoPro below.
+    promoProUntil: Number(storage.getString('promoProUntil')) || 0,
     fetchDataTime: storage.getString('fetchDataTime') || null,
     data: initialCatalogue?.data || parseStored(storage.getString('data')) || {},
     // The Supreme catalogue. GlobalStats has written this to MMKV since the
@@ -70,14 +74,16 @@ export const LocalStateProvider = ({ children }) => {
     ownedPets: safeParseJSON('ownedPets', []),
     wishlistPets: safeParseJSON('wishlistPets', []),
     bannedUsers: safeParseJSON('bannedUsers', []),
-    isAppReady: storage.getBoolean('isAppReady') ?? false,
+    // Per launch, never restored: it gates the boot splash on THIS launch's
+    // login. Read back from storage it was true from the 2nd launch on, so the
+    // splash hid before login and signed-in players saw a signed-out app.
+    // App.js caps the wait at 3 s. (From mm2values.)
+    isAppReady: false,
     lastActivity: storage.getString('lastActivity') || null,
     showOnBoardingScreen: storage.getBoolean('showOnBoardingScreen') ?? true,
     user_name: storage.getString('user_name') || 'Anonymous',
     translationUsage: safeParseJSON('translationUsage', { count: 0, date: new Date().toDateString() }),
     favorites: safeParseJSON('favorites', []),
-    imgurl: storage.getString('imgurl') || 'https://elvebredd.com',
-    imgurlGG: storage.getString('imgurlGG') || 'https://adoptmevalues.gg',
     isGG: storage.getBoolean('isGG') ?? false,
     showAd1: storage.getBoolean('showAd1') ?? true,
     postsCache: safeParseJSON('postsCache', []),
@@ -91,7 +97,6 @@ export const LocalStateProvider = ({ children }) => {
     valuesFetchedAt: initialCatalogue?.checkedAt || storage.getString('valuesFetchedAt') || null,
     showFlag: storage.getBoolean('showFlag') ?? true, // ✅ Default true (show flag), user can hide to save data
     showOnlineStatus: storage.getBoolean('showOnlineStatus') ?? true, // ✅ Default true (show online), user can hide to save Firebase costs
-    gameMusicEnabled: storage.getBoolean('gameMusicEnabled') ?? true, // ✅ Default true (music on), user can toggle off/on
 
   }));
 
@@ -145,6 +150,61 @@ export const LocalStateProvider = ({ children }) => {
       // console.error('🚨 MMKV supports only string, number, boolean, or JSON stringified objects.');
     }
   }, []); // ✅ Empty deps - function is stable, doesn't depend on any props/state
+  // ── Pro = RevenueCat OR an unexpired promo code ─────────────────────────
+  // The ad modules read MMKV 'isPro' directly, so the combined answer must
+  // land in that key. RevenueCat's own answer is kept in 'rcPro' so a promo
+  // expiring can fall back to it rather than to false.
+  const promoActive = (until) => until > Date.now();
+
+  const applyRcPro = useCallback((rcPro) => {
+    storage.set('rcPro', rcPro === true);
+    const promoUntil = Number(storage.getString('promoProUntil')) || 0;
+    updateLocalState('isPro', rcPro === true || promoActive(promoUntil));
+  }, [updateLocalState]);
+
+  const applyPromoPro = useCallback((until) => {
+    const next = Number(until) || 0;
+    // Installs from before promo codes never stored 'rcPro'; their isPro is
+    // RevenueCat's answer, so take it as the baseline before overwriting it.
+    if (storage.getBoolean('rcPro') === undefined) {
+      storage.set('rcPro', storage.getBoolean('isPro') === true);
+    }
+    updateLocalState('promoProUntil', next);
+    updateLocalState('isPro', storage.getBoolean('rcPro') === true || promoActive(next));
+  }, [updateLocalState]);
+
+  // Expire promo Pro on time: at launch, on every foreground, and by timer
+  // while the app stays open.
+  useEffect(() => {
+    const until = localState.promoProUntil;
+    if (!until) return;
+    const expire = () => {
+      if (!promoActive(until)) applyPromoPro(0);
+    };
+    expire();
+    const sub = AppState.addEventListener('change', s => { if (s === 'active') expire(); });
+    const left = until - Date.now();
+    const timer = left > 0 && left < 2 ** 31 - 1 ? setTimeout(expire, left + 1000) : null;
+    return () => { sub.remove(); if (timer) clearTimeout(timer); };
+  }, [localState.promoProUntil, applyPromoPro]);
+
+  // Promo Pro belongs to the account: restore it on sign-in (reinstall, new
+  // phone), drop it on sign-out so a shared phone never lends it. Offline
+  // reads (null) leave the stored value alone.
+  useEffect(() => {
+    return onAuthStateChanged(getAuth(), async (user) => {
+      if (!user) {
+        if (Number(storage.getString('promoProUntil')) > 0) applyPromoPro(0);
+        return;
+      }
+      const until = await fetchPromoProUntil(user.uid);
+      if (until === null) return;
+      if (until !== (Number(storage.getString('promoProUntil')) || 0)) {
+        applyPromoPro(promoActive(until) ? until : 0);
+      }
+    });
+  }, [applyPromoPro]);
+
   const canTranslate = useCallback(() => {
     const today = new Date().toDateString();
     const { count, date } = localState.translationUsage || { count: 0, date: today };
@@ -183,8 +243,16 @@ export const LocalStateProvider = ({ children }) => {
   // console.log(isPro)
   // Initialize RevenueCat
   const initRevenueCat = async () => {
+    // The iOS limited build configures RevenueCat too: its one purchase is
+    // Remove Ads (the Pro entitlement), sold from IosSettings and the
+    // calculator. See Code/config/iosLimited.js.
     try {
-      await Purchases.configure({ apiKey: config.apiKey, usesStoreKit2IfAvailable: false });
+      // Configure once per app process. The provider remounts (Fast Refresh in
+      // dev, a provider re-render after a reload), and a second configure
+      // logged "Purchases instance already set ... Ignoring duplicate call".
+      if (!(await Purchases.isConfigured())) {
+        await Purchases.configure({ apiKey: config.apiKey, usesStoreKit2IfAvailable: false });
+      }
       const userID = await Purchases.getAppUserID();
       setCustomerId(userID);
 
@@ -248,7 +316,7 @@ export const LocalStateProvider = ({ children }) => {
       const entitlements = customerInfo.entitlements.active;
       const proStatus = hasProEntitlement(entitlements);
 
-      updateLocalState('isPro', proStatus);
+      applyRcPro(proStatus);
       setMySubscriptions(
         proStatus
           ? customerInfo.activeSubscriptions.map((plan) => ({
@@ -257,8 +325,12 @@ export const LocalStateProvider = ({ children }) => {
           }))
           : []
       );
+      // Callers that need to tell the user what happened read this; the
+      // paywall ignores it and watches localState.isPro instead.
+      return proStatus;
     } catch (error) {
       // console.error('❌ Restore Purchases Error:', error);
+      return null;
     } finally {
       setLoadingReStore(false); // Ensure loading state resets
     }
@@ -275,7 +347,7 @@ export const LocalStateProvider = ({ children }) => {
       // console.log(customerInfo.activeSubscriptions)
       const proStatus = hasProEntitlement(entitlements);
       if (proStatus) {
-        updateLocalState('isPro', proStatus); // Persist Pro status in MMKV
+        applyRcPro(proStatus); // Persist Pro status in MMKV
         const activePlansWithExpiry = customerInfo.activeSubscriptions.map((subscription) => ({
           plan: subscription,
           expiry: customerInfo.allExpirationDates[subscription],
@@ -290,11 +362,15 @@ export const LocalStateProvider = ({ children }) => {
   const purchaseProduct = async (packageToPurchase, setLoading, track) => {
     setLoading(true);
     try {
+      // The Play purchase sheet backgrounds the app; coming back from it must
+      // not open an App Open ad on someone who was just buying ad-free. Lazy
+      // require keeps the ad SDK out of this module's import graph.
+      try { require('./Ads/openApp').default.skipNextForeground(); } catch (_) {}
       const { customerInfo } = await Purchases.purchasePackage(packageToPurchase);
       const entitlements = customerInfo.entitlements.active;
       const proStatus = hasProEntitlement(entitlements);
 
-      updateLocalState('isPro', proStatus);
+      applyRcPro(proStatus);
       setMySubscriptions(
         proStatus
           ? customerInfo.activeSubscriptions.map((plan) => ({
@@ -305,11 +381,6 @@ export const LocalStateProvider = ({ children }) => {
       );
 
       if (track) {
-        mixpanel.track('Purchase Completed', {
-          package: packageToPurchase.identifier,
-          price: packageToPurchase.product.price,
-          currency: packageToPurchase.product.currencyCode,
-        });
       }
 
       showSuccessMessage("Success", "Purchase completed successfully!");
@@ -332,7 +403,7 @@ export const LocalStateProvider = ({ children }) => {
       return newState;
     });
 
-    storage.delete(key);
+    storage.remove(key);
   }, []);
 
   // Clear all local state and MMKV storage
@@ -360,11 +431,12 @@ export const LocalStateProvider = ({ children }) => {
       mySubscriptions,
       purchaseProduct,
       restorePurchases,
+      applyPromoPro,
       canTranslate,
       incrementTranslationCount,
       getRemainingTranslationTries, toggleAd
     }),
-    [localState, commitCatalogue, customerId, packages, mySubscriptions, updateLocalState, canTranslate, incrementTranslationCount, getRemainingTranslationTries, toggleAd, clearKey, clearAll]
+    [localState, commitCatalogue, applyPromoPro, customerId, packages, mySubscriptions, updateLocalState, canTranslate, incrementTranslationCount, getRemainingTranslationTries, toggleAd, clearKey, clearAll]
   );
 
   return (

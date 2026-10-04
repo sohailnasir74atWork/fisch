@@ -13,8 +13,16 @@ import { getThemeColors } from '../../Helper/themeColors';
  *   Exclusive → Full ornamental frame + all effects + Lottie
  */
 
-import React, { useMemo } from 'react';
+import React, { useMemo, useState, useEffect } from 'react';
 import { View, Image } from 'react-native';
+import { GAME } from '../../config/game';
+
+// Bundled so it renders offline and on first paint. GAME.defaultAvatar is the
+// same idea hosted on the CDN, but that file was never uploaded (404 on
+// 2026-09-23), so a signed-out user's Home header was an empty circle — and so
+// was every user without a photo, in trades and chat. Anything that resolves to
+// the default, or fails to load, draws this instead.
+const LOCAL_DEFAULT_AVATAR = require('../../../assets/brand/default-avatar.png');
 import { SPACE } from '../../Design/tokens';
 import Svg, {
   Path,
@@ -1050,10 +1058,28 @@ const FramedAvatar = ({
 }) => {
   const c = getThemeColors(isDarkMode);
   const instanceId = useMemo(() => `fa-${++_framedAvatarIdCounter}`, []);
+  // Remember WHICH uri failed, so a new uri gets a fresh attempt without an effect.
+  const [failedUri, setFailedUri] = useState(null);
+  const useLocalAvatar = !avatarUri || avatarUri === GAME.defaultAvatar || failedUri === avatarUri;
+  const avatarSource = useLocalAvatar ? LOCAL_DEFAULT_AVATAR : { uri: avatarUri };
+  const handleAvatarError = useLocalAvatar ? undefined : () => setFailedUri(avatarUri);
   const def = frame?.id ? (FRAME_DEFS[frame.id] || DEFAULT_DEF) : null;
   const borderColors = frame?.borderColors || [];
   const glowColor = frame?.glowColor || null;
   const primaryColor = borderColors[0] || '#94a3b8';
+
+  // SvgImage (the framed path) has no error callback, so a dead URL there drew
+  // an empty ring forever. Probe it up front and fall back to the local
+  // default on failure, the same way the plain <Image> path's onError does.
+  useEffect(() => {
+    if (!def || useLocalAvatar) return undefined;
+    let alive = true;
+    Image.prefetch(avatarUri)
+      .then(ok => { if (alive && !ok) setFailedUri(avatarUri); })
+      .catch(() => { if (alive) setFailedUri(avatarUri); });
+    return () => { alive = false; };
+  }, [def, useLocalAvatar, avatarUri]);
+
   // ── No frame: simple circular avatar ──
   if (!frame || !def) {
     const showOnline = isOnline !== undefined && avatarSize >= 40;
@@ -1068,12 +1094,11 @@ const FramedAvatar = ({
           backgroundColor: c.border,
           alignItems: 'center', justifyContent: 'center',
         }}>
-          {avatarUri ? (
-            <Image
-              source={{ uri: avatarUri }}
-              style={{ width: avatarSize, height: avatarSize, borderRadius: avatarSize / 2 }}
-            />
-          ) : null}
+          <Image
+            source={avatarSource}
+            onError={handleAvatarError}
+            style={{ width: avatarSize, height: avatarSize, borderRadius: avatarSize / 2 }}
+          />
         </View>
         {showOnline && (
           <View style={{
@@ -1266,20 +1291,15 @@ const FramedAvatar = ({
         })}
 
         {/* ── Layer 9: Avatar image ── */}
-        {avatarUri ? (
-          <SvgImage
-            href={{ uri: avatarUri }}
-            x={cx - innerR}
-            y={cy - innerR}
-            width={innerR * 2}
-            height={innerR * 2}
-            clipPath={`url(#${clipId})`}
-            preserveAspectRatio="xMidYMid slice"
-          />
-        ) : (
-          <SvgCircle cx={cx} cy={cy} r={innerR}
-            fill={isDarkMode ? '#334155' : '#cbd5e1'} />
-        )}
+        <SvgImage
+          href={avatarSource}
+          x={cx - innerR}
+          y={cy - innerR}
+          width={innerR * 2}
+          height={innerR * 2}
+          clipPath={`url(#${clipId})`}
+          preserveAspectRatio="xMidYMid slice"
+        />
       </Svg>
 
       {/* Online indicator */}

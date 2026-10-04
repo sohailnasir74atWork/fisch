@@ -209,7 +209,7 @@ const NotificationFeed = ({ navigation }) => {
           </Text>
         </View>
       ) : (
-        <FlatList
+        <FlatList removeClippedSubviews={false}
           data={notifications}
           keyExtractor={(item) => item.id}
           renderItem={renderItem}

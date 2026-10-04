@@ -23,7 +23,6 @@ import SignInDrawer from '../Firebase/SigninDrawer';
 import { useTranslation } from 'react-i18next';
 import { useLanguage } from '../Translation/LanguageProvider';
 import { showSuccessMessage, showErrorMessage } from '../Helper/MessageHelper';
-import { mixpanel } from '../AppHelper/MixPenel';
 import InterstitialAdManager from '../Ads/IntAd';
 import BannerAdComponent from '../Ads/bannerAds';
 import Share from 'react-native-share';
@@ -40,6 +39,7 @@ import { getThemeColors } from '../Helper/themeColors';
 import { SIZE } from '../Design/tokens';
 import { SPACE } from '../Design/tokens';
 import { CALC_FILTERS, GAME } from '../config/game';
+import { IOS_LIMITED } from '../config/iosLimited';
 import { FONT } from '../Design/tokens';
 
 // Product limit, independent of the in-game trading window.
@@ -808,7 +808,6 @@ const HomeScreen = ({ selectedTheme }) => {
         status: statusLetter, // ✅ Trade status: 'w' (win), 'l' (lose), 'f' (fair)
         rating: userRating,
         ratingCount,
-        flage: user.flage ? user.flage : null,
         robloxUsername: user?.robloxUsername || null,
         robloxUsernameVerified: user?.robloxUsernameVerified || false,
         hasRecentGameWin: hasRecentWin, // ✅ Game win info
@@ -848,7 +847,6 @@ const HomeScreen = ({ selectedTheme }) => {
 
       // Step 4: Update timestamp and analytics
       setLastTradeTime(now); // ✅ Use Date.now() for cooldown tracking
-      mixpanel.track("Trade Created", { user: user?.id });
 
       // ✅ Store timeout and animation frame IDs for cleanup
       const rafKey1 = `createTrade_raf_${Date.now()}_1`;
@@ -919,7 +917,6 @@ const HomeScreen = ({ selectedTheme }) => {
     setShowTradeCompletion(false);
     if (!didSave) return;
     resetState();
-    mixpanel.track("Trade Logged", { user: user?.id, result: tradeStatus });
 
     const callbackfunction = () => {
       if (!isMountedRef.current) return;
@@ -1005,7 +1002,7 @@ const HomeScreen = ({ selectedTheme }) => {
                   <Text style={[styles.resultText, tradeStatus === 'win' && { color: '#176342' }, tradeStatus === 'lose' && { color: '#983B36' }]}>{valuation.evaluation.status === 'incomplete' ? 'Value incomplete' : verdictLabel(valuation.evaluation)}</Text>
                   {tradeStatus && <Text style={styles.cardCaption}>{profitLoss >= 0 ? '+' : '−'}{summaryUnit}: {formatValue(Math.abs(profitLoss))} received</Text>}
                 </View>
-                <Text style={styles.sourceCaption}>Game.Guide estimates · {GAME.trade.fairBandPercent}% fair range</Text>
+                <Text style={styles.sourceCaption}>Market estimates · {GAME.trade.fairBandPercent}% fair range</Text>
                 {verdictPartial && <Text style={styles.sourceCaption}>Unpriced / stale: give {excludedLabel(hasSummary)} · receive {excludedLabel(wantsSummary)}</Text>}
                 {(refreshing || catalogueLoading) && <RefreshIndicator colors={c} primary={config.colors.primary} />}
                 {!refreshing && !catalogueLoading && !!localState.valuesError && <TouchableOpacity onPress={handleRefresh} style={styles.refreshNotice}><Icon name="cloud-offline-outline" size={16} color={c.textSecondary} /><Text style={styles.cardCaption}>Using saved data · Tap to retry</Text></TouchableOpacity>}
@@ -1038,9 +1035,17 @@ const HomeScreen = ({ selectedTheme }) => {
               </View>
             </ViewShot>
             <View style={styles.actionArea}>
+              {/* iOS limited build: no sign-in, so Create Trade (posts to the
+                  hidden Trade feed) and Log Trade (writes the journal) go;
+                  only Share Trade, which needs no account, stays.
+                  See Code/config/iosLimited.js. */}
+              {!IOS_LIMITED && (
               <TouchableOpacity style={styles.primaryAction} onPress={handleCreateTradePress}><Icon name="swap-horizontal-outline" size={20} color="#fff" /><Text style={styles.primaryActionText}>{t('home.create_trade')}</Text></TouchableOpacity>
+              )}
               <View style={styles.secondaryActions}>
+                {!IOS_LIMITED && (
                 <TouchableOpacity style={styles.secondaryAction} onPress={handleLogTradePress}><Icon name="book-outline" size={18} color={config.colors.primary} /><Text style={styles.secondaryActionText}>{t('home.log_trade', { defaultValue: 'Log Trade' })}</Text></TouchableOpacity>
+                )}
                 <TouchableOpacity style={styles.secondaryAction} onPress={handleShareTrade}><Icon name="share-outline" size={18} color={config.colors.primary} /><Text style={styles.secondaryActionText}>{t('home.share_trade')}</Text></TouchableOpacity>
               </View>
             </View>
@@ -1049,6 +1054,8 @@ const HomeScreen = ({ selectedTheme }) => {
                 <Icon name="refresh-outline" size={14} color={c.textSecondary} />
                 <Text style={styles.cardCaption}>{refreshing || catalogueLoading ? 'Refreshing…' : 'Refresh values'}</Text>
               </TouchableOpacity>
+              {/* Remove ads opens the RevenueCat paywall (on iOS too: it is the
+                  limited build's one purchase). */}
               {!localState.isPro && <TouchableOpacity onPress={() => setShowofferwall(true)} style={styles.utilityAction}>
                 <Icon name="shield-checkmark-outline" size={14} color={c.textSecondary} /><Text style={styles.cardCaption}>Remove ads</Text>
               </TouchableOpacity>}
@@ -1133,7 +1140,7 @@ const HomeScreen = ({ selectedTheme }) => {
                   {renderFavoritesHeader()}
                   <FlatList
                     keyboardShouldPersistTaps="handled"
-                    key={`${selectedPetType}-${isAddingToFavorites ? 'add' : 'view'}-${(localState.favorites || []).length}`}
+                    key={`${selectedPetType}-${isAddingToFavorites ? 'add' : 'view'}`} // no favourites count: toggling one remounted the whole grid and lost the scroll position
                     data={filteredData}
                     keyExtractor={keyExtractor}
                     renderItem={selectedPetType === 'INVENTORY' && !isAddingToFavorites ? renderFavoriteItem : renderGridItem}
@@ -1198,6 +1205,9 @@ const HomeScreen = ({ selectedTheme }) => {
             </ConditionalKeyboardWrapper>
           </Modal>
 
+          {/* iOS limited build: the sign-in drawer is not mounted, so nothing
+              can surface it. The paywall below IS mounted on iOS. */}
+          {!IOS_LIMITED && (
           <SignInDrawer
             visible={isSigninDrawerVisible}
             onClose={handleLoginSuccess}
@@ -1205,6 +1215,7 @@ const HomeScreen = ({ selectedTheme }) => {
             screen='Chat'
             message={t("home.alert.sign_in_required")}
           />
+          )}
         </View>
         <SubscriptionScreen visible={showofferwall} onClose={() => setShowofferwall(false)} track='Home' oneWallOnly={single_offer_wall} showoffer={!single_offer_wall} />
       </GestureHandlerRootView>

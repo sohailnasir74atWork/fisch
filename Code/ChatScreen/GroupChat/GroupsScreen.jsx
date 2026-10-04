@@ -122,6 +122,12 @@ const GroupsScreen = ({ groups = [], setGroups, groupsLoading = false }) => {
   const [editGroupModalVisible, setEditGroupModalVisible] = useState(false);
   const [editingGroup, setEditingGroup] = useState(null);
   const [mutedGroups, setMutedGroups] = useState({}); // { groupId: boolean } - Track muted status
+  // Invitation / join-request actions currently running, keyed 'inv:<id>' /
+  // 'req:<id>'. The ref is the real guard (it updates synchronously, so a
+  // double tap is caught before the next render); the state mirror only
+  // greys the buttons out.
+  const inFlightRef = useRef(new Set());
+  const [inFlightIds, setInFlightIds] = useState(() => new Set());
   const [groupInfoModalVisible, setGroupInfoModalVisible] = useState(false);
   const [selectedGroupInfo, setSelectedGroupInfo] = useState(null);
   const [groupInfoLoading, setGroupInfoLoading] = useState(false);
@@ -131,6 +137,21 @@ const GroupsScreen = ({ groups = [], setGroups, groupsLoading = false }) => {
   const c = getThemeColors(isDarkMode);
   const insets = useSafeAreaInsets();
   const styles = useMemo(() => getStyles(isDarkMode), [isDarkMode]);
+
+  // Run `task` at most once at a time per key. Approve had no guard at all:
+  // two quick taps both passed approveJoinRequest's pre-checks and the user
+  // could be appended to memberIds twice.
+  const runOnce = useCallback(async (key, task) => {
+    if (inFlightRef.current.has(key)) return;
+    inFlightRef.current.add(key);
+    setInFlightIds(new Set(inFlightRef.current));
+    try {
+      await task();
+    } finally {
+      inFlightRef.current.delete(key);
+      setInFlightIds(new Set(inFlightRef.current));
+    }
+  }, []);
 
   // ✅ Refs for current values — avoids adding volatile state to callback deps
   const mutedGroupsRef = useRef(mutedGroups);
@@ -301,7 +322,8 @@ const GroupsScreen = ({ groups = [], setGroups, groupsLoading = false }) => {
       }
     };
 
-    callbackFunction();
+    // Awaited so runOnce (the double-tap guard) holds until it finishes.
+    await callbackFunction();
   }, [user?.id, firestoreDB, appdatabase, navigation, localState?.isPro]);
 
   const handleDeclineInvitation = useCallback(async (inviteId) => {
@@ -367,7 +389,10 @@ const GroupsScreen = ({ groups = [], setGroups, groupsLoading = false }) => {
           style: 'destructive',
           onPress: async () => {
             try {
-              const result = await deleteGroup(firestoreDB, appdatabase, groupId);
+              // deleteGroup now checks ownership against the Firestore doc
+              // itself (the `createdBy` on this list row can be stale after a
+              // transfer), so it needs to know who is asking.
+              const result = await deleteGroup(firestoreDB, appdatabase, groupId, user.id, !!isAdmin);
               if (result.success) {
                 showSuccessMessage(t('home.alert.success'), t('groups_screen.delete_success'));
                 // Update local state
@@ -459,13 +484,31 @@ const GroupsScreen = ({ groups = [], setGroups, groupsLoading = false }) => {
   }, []);
 
   // Handle edit group (Group creator, group admin, or global admin) - Opens CreateGroupModal in edit mode
-  const handleEditGroup = useCallback((groupId) => {
+  const handleEditGroup = useCallback(async (groupId) => {
     if (!groupId || !user?.id) return;
     
     const group = groups.find(g => g.groupId === groupId);
     if (!group) {
       showErrorMessage(t('home.alert.error'), t('groups_screen.not_found'));
       return;
+    }
+
+    // Read the Firestore doc (the source of truth) before opening. The list
+    // row's description may be missing on rows written by older builds, and
+    // CreateGroupModal seeds its fields once per editGroupId, so a value that
+    // arrived after opening would be ignored -- the sheet opened with an
+    // EMPTY description. The same read gives the current owner, which the
+    // list row can have stale after a transfer. One doc read, on an explicit
+    // Edit tap only (handleShowGroupInfo does the same).
+    let freshData = null;
+    try {
+      const snap = await getDoc(doc(firestoreDB, 'groups', groupId));
+      if (snap.exists()) {
+        freshData = snap.data() || {};
+      }
+    } catch (e) {
+      // Non-fatal: fall back to the list row; the save re-checks ownership.
+      console.warn('Could not load group for edit:', e?.message);
     }
 
     // `groups` comes from RTDB group_meta_data, whose keys are groupId,
@@ -478,7 +521,8 @@ const GroupsScreen = ({ groups = [], setGroups, groupsLoading = false }) => {
     // Membership needs no separate check: the lookup above already bailed if
     // this group is absent from the user's own group_meta_data, which lists
     // only groups they belong to. Presence in `groups` IS membership.
-    const isCreator = group.createdBy === user.id;
+    const currentOwner = freshData?.createdBy ?? group.createdBy;
+    const isCreator = currentOwner === user.id;
     const canEdit = isCreator || isAdmin;
     
     if (!canEdit) {
@@ -488,12 +532,12 @@ const GroupsScreen = ({ groups = [], setGroups, groupsLoading = false }) => {
 
     setEditingGroup({
       id: groupId,
-      name: group.groupName || group.name || '',
-      description: group.description || '',
-      avatar: group.groupAvatar || group.avatar || null,
+      name: freshData?.groupName || freshData?.name || group.groupName || group.name || '',
+      description: freshData ? (freshData.description || '') : (group.description || ''),
+      avatar: freshData?.avatar || freshData?.groupAvatar || group.groupAvatar || group.avatar || null,
     });
     setEditGroupModalVisible(true);
-  }, [isAdmin, groups, user?.id, showErrorMessage]);
+  }, [isAdmin, groups, user?.id, showErrorMessage, firestoreDB]);
 
   // Handle group updated callback
   const handleGroupUpdated = useCallback(() => {
@@ -504,40 +548,23 @@ const GroupsScreen = ({ groups = [], setGroups, groupsLoading = false }) => {
     }
   }, [setGroups]);
 
-  // ✅ Memoize group IDs so mute useEffect only re-runs when groups are added/removed
-  const groupIds = useMemo(() => {
-    if (!Array.isArray(groups)) return '';
-    return groups.map(g => g.groupId).filter(Boolean).sort().join(',');
-  }, [groups]);
-
-  // ✅ Load mute status for all groups — depends on stable groupIds string
+  // ✅ Mute status comes from the groups prop: ChatNavigator's listener
+  // already holds every group_meta_data row, `muted` included. This used to
+  // do one RTDB read PER GROUP into a ref the rows read from -- but a ref is
+  // not a render dependency, so rows rendered before the reads landed kept
+  // showing OFF for a muted group, and tapping the switch then UNMUTED it.
+  // Deriving from the prop keeps it in step with the database, including a
+  // change made on another device.
   useEffect(() => {
-    if (!appdatabase || !user?.id || !groupIds) return;
-
-    const ids = groupIds.split(',');
-    const loadMuteStatus = async () => {
-      const muteStatusMap = {};
-      const promises = ids.map(async (groupId) => {
-        try {
-          const muteRef = ref(appdatabase, `group_meta_data/${user.id}/${groupId}/muted`);
-          const snapshot = await get(muteRef);
-          muteStatusMap[groupId] = snapshot.exists() ? snapshot.val() === true : false;
-        } catch (error) {
-          console.error(`Error loading mute status for group ${groupId}:`, error);
-          muteStatusMap[groupId] = false;
-        }
-      });
-
-      await Promise.all(promises);
-      setMutedGroups(muteStatusMap);
-    };
-
-    loadMuteStatus();
-  }, [appdatabase, user?.id, groupIds]);
+    const muteStatusMap = {};
+    (Array.isArray(groups) ? groups : []).forEach((group) => {
+      if (group?.groupId) muteStatusMap[group.groupId] = !!group.muted;
+    });
+    setMutedGroups(muteStatusMap);
+  }, [groups]);
 
   // Handle show group info
   const handleShowGroupInfo = useCallback(async (groupId) => {
-    console.log('handleShowGroupInfo called with groupId:', groupId);
     if (!groupId || !firestoreDB || !appdatabase) {
       console.log('Missing required data:', { groupId, firestoreDB: !!firestoreDB, appdatabase: !!appdatabase });
       return;
@@ -545,7 +572,6 @@ const GroupsScreen = ({ groups = [], setGroups, groupsLoading = false }) => {
 
     setGroupInfoLoading(true);
     setGroupInfoModalVisible(true);
-    console.log('Modal visibility set to true');
 
     try {
       // Get group data from Firestore
@@ -559,7 +585,6 @@ const GroupsScreen = ({ groups = [], setGroups, groupsLoading = false }) => {
       }
 
       const groupData = groupDocSnapshot.data();
-      console.log('Group data:', groupData);
       const createdBy = groupData.createdBy;
       let createdAt = groupData.createdAt || groupData.createdAtTimestamp || groupData.createdAt?.toMillis?.() || null;
       
@@ -608,7 +633,6 @@ const GroupsScreen = ({ groups = [], setGroups, groupsLoading = false }) => {
         memberCount: memberCount,
       };
       
-      console.log('Setting group info:', groupInfo);
       setSelectedGroupInfo(groupInfo);
     } catch (error) {
       console.error('Error loading group info:', error);
@@ -616,11 +640,11 @@ const GroupsScreen = ({ groups = [], setGroups, groupsLoading = false }) => {
       setGroupInfoModalVisible(false);
     } finally {
       setGroupInfoLoading(false);
-      console.log('Loading finished');
     }
   }, [firestoreDB, appdatabase, showErrorMessage]);
 
-  // ✅ Toggle mute notifications for a group — reads current mute state from ref
+  // ✅ Toggle mute notifications for a group — reads current mute state from a
+  // ref so the handler identity stays stable (the rows render from state)
   const handleToggleMute = useCallback(async (groupId, groupName) => {
     if (!appdatabase || !user?.id || !groupId) return;
 
@@ -706,7 +730,8 @@ const GroupsScreen = ({ groups = [], setGroups, groupsLoading = false }) => {
     );
   }, [user?.id, firestoreDB, appdatabase, uploadToBunny, setGroups, isAdmin, groups]);
 
-  // Render group item — reads groups/mutedGroups from refs to avoid dep churn
+  // Render group item. Mute state is read from `mutedGroups` state (listed in
+  // the deps) so the bell and the switch re-render when it changes.
   const renderGroupItem = useCallback(({ item }) => {
     if (!item || typeof item !== 'object') return null;
 
@@ -723,9 +748,13 @@ const GroupsScreen = ({ groups = [], setGroups, groupsLoading = false }) => {
     const unreadCount = item.unreadCount || 0;
     const memberCount = item.memberCount || 0;
     const isMyGroup = item.createdBy === user?.id;
-    // Check admin from item itself — no need to search groups array
+    // Check admin from item itself — no need to search groups array.
+    // item.createdBy is kept in step with the current owner by the transfer
+    // paths in groupUtils (propagateOwnerChange) and re-stamped on every
+    // message, so the pill and the owner menu follow a handover.
     const isGroupAdmin = isMyGroup || (item.members?.[user?.id]?.role === 'admin') || (isAdmin && item.members?.[user?.id]);
-    const currentMutedGroups = mutedGroupsRef.current;
+    // Rendered from STATE (a render dependency below), not a ref.
+    const isMuted = !!mutedGroups[groupId];
 
     return (
       <View style={styles.itemContainer}>
@@ -773,6 +802,22 @@ const GroupsScreen = ({ groups = [], setGroups, groupsLoading = false }) => {
             </View>
           )}
         </TouchableOpacity>
+        {/* One-tap mute, same flag as the menu switch. The icon shows the
+            current state, so a muted group is visible without opening the
+            menu. */}
+        <TouchableOpacity
+          onPress={() => handleToggleMute(groupId, groupName)}
+          hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+          style={{ paddingHorizontal: SPACE.sm }}
+          accessibilityRole="button"
+          accessibilityLabel={isMuted ? 'Unmute group' : 'Mute group'}
+        >
+          <Icon
+            name={isMuted ? 'notifications-off' : 'notifications-outline'}
+            size={20}
+            color={isMuted ? STATUS.danger : c.textSecondary}
+          />
+        </TouchableOpacity>
         <Menu>
           <MenuTrigger>
             <Icon
@@ -798,10 +843,10 @@ const GroupsScreen = ({ groups = [], setGroups, groupsLoading = false }) => {
               }}>
                 <Text style={{ fontSize: SIZE.subtitle, flex: 1 }}>{t('groups_screen.menu_mute')}</Text>
                 <Switch
-                  value={currentMutedGroups[groupId] || false}
+                  value={isMuted}
                   onValueChange={() => handleToggleMute(groupId, groupName)}
                   trackColor={{ false: '#767577', true: config.colors.primary }}
-                  thumbColor={currentMutedGroups[groupId] ? '#fff' : '#f4f3f4'}
+                  thumbColor={isMuted ? '#fff' : '#f4f3f4'}
                 />
               </View>
             </MenuOption>
@@ -827,7 +872,7 @@ const GroupsScreen = ({ groups = [], setGroups, groupsLoading = false }) => {
         </Menu>
       </View>
     );
-  }, [styles, handleOpenGroup, handleLeaveGroup, handleUpdateGroupIcon, handleEditGroup, handleDeleteGroup, handleToggleMute, handleShowGroupInfo, user?.id, isDarkMode, isAdmin]);
+  }, [styles, handleOpenGroup, handleLeaveGroup, handleUpdateGroupIcon, handleEditGroup, handleDeleteGroup, handleToggleMute, handleShowGroupInfo, user?.id, isDarkMode, isAdmin, mutedGroups]);
 
   const filteredGroups = useMemo(() => {
     if (!Array.isArray(groups)) return [];
@@ -958,6 +1003,10 @@ const GroupsScreen = ({ groups = [], setGroups, groupsLoading = false }) => {
   const renderInvitationItem = useCallback(({ item }) => {
     const inviteGroupName = item.groupName || 'Group';
     const truncatedInviteName = truncateGroupName(inviteGroupName, 20);
+    // Accept and Decline share one key: once either is running, neither can
+    // start again for this invitation.
+    const inviteKey = `inv:${item.id}`;
+    const inviteBusy = inFlightIds.has(inviteKey);
     
     return (
       <View style={{
@@ -1003,9 +1052,10 @@ const GroupsScreen = ({ groups = [], setGroups, groupsLoading = false }) => {
             </Text>
           </View>
         </View>
-        <View style={{ flexDirection: 'row', gap: SPACE.md }}>
+        <View style={{ flexDirection: 'row', gap: SPACE.md, opacity: inviteBusy ? 0.5 : 1 }}>
           <TouchableOpacity
-            onPress={() => handleDeclineInvitation(item.id)}
+            onPress={() => runOnce(inviteKey, () => handleDeclineInvitation(item.id))}
+            disabled={inviteBusy}
             style={{
               flex: 1,
               paddingVertical: SPACE.lg,
@@ -1024,7 +1074,8 @@ const GroupsScreen = ({ groups = [], setGroups, groupsLoading = false }) => {
             }}>{t('groups_screen.btn_decline')}</Text>
           </TouchableOpacity>
           <TouchableOpacity
-            onPress={() => handleAcceptInvitation(item.id, item.groupId)}
+            onPress={() => runOnce(inviteKey, () => handleAcceptInvitation(item.id, item.groupId))}
+            disabled={inviteBusy}
             style={{
               flex: 1,
               paddingVertical: SPACE.lg,
@@ -1043,12 +1094,15 @@ const GroupsScreen = ({ groups = [], setGroups, groupsLoading = false }) => {
         </View>
       </View>
     );
-  }, [styles, isDarkMode, handleAcceptInvitation, handleDeclineInvitation]);
+  }, [styles, isDarkMode, handleAcceptInvitation, handleDeclineInvitation, runOnce, inFlightIds]);
 
   // Render join request item (for groups where user is creator)
   const renderJoinRequestItem = useCallback(({ item }) => {
     const requestGroupName = item.groupName || 'Group';
     const truncatedGroupName = truncateGroupName(requestGroupName, 20);
+    // Approve and Reject share one key (see runOnce).
+    const requestKey = `req:${item.id}`;
+    const requestBusy = inFlightIds.has(requestKey);
     
     return (
       <View style={{
@@ -1110,16 +1164,17 @@ const GroupsScreen = ({ groups = [], setGroups, groupsLoading = false }) => {
             </Text>
           </View>
         </View>
-        <View style={{ flexDirection: 'row', gap: SPACE.md }}>
+        <View style={{ flexDirection: 'row', gap: SPACE.md, opacity: requestBusy ? 0.5 : 1 }}>
           <TouchableOpacity
-            onPress={async () => {
+            onPress={() => runOnce(requestKey, async () => {
               const result = await rejectJoinRequest(firestoreDB, item.id, user.id);
               if (result.success) {
                 showSuccessMessage(t('home.alert.success'), t('groups_screen.reject_success'));
               } else {
                 showErrorMessage(t('home.alert.error'), result.error || t('groups_screen.reject_failed'));
               }
-            }}
+            })}
+            disabled={requestBusy}
             style={{
               flex: 1,
               paddingVertical: SPACE.lg,
@@ -1138,14 +1193,15 @@ const GroupsScreen = ({ groups = [], setGroups, groupsLoading = false }) => {
             }}>{t('groups_screen.btn_reject')}</Text>
           </TouchableOpacity>
           <TouchableOpacity
-            onPress={async () => {
+            onPress={() => runOnce(requestKey, async () => {
               const result = await approveJoinRequest(firestoreDB, appdatabase, item.id, user.id);
               if (result.success) {
                 showSuccessMessage(t('home.alert.success'), t('groups_screen.approve_success'));
               } else {
                 showErrorMessage(t('home.alert.error'), result.error || t('groups_screen.approve_failed'));
               }
-            }}
+            })}
+            disabled={requestBusy}
             style={{
               flex: 1,
               paddingVertical: SPACE.lg,
@@ -1164,7 +1220,7 @@ const GroupsScreen = ({ groups = [], setGroups, groupsLoading = false }) => {
         </View>
       </View>
     );
-  }, [styles, isDarkMode, firestoreDB, appdatabase, user?.id]);
+  }, [styles, isDarkMode, firestoreDB, appdatabase, user?.id, runOnce, inFlightIds]);
 
   // ✅ Extracted: memoized renderItem for All Groups FlatList
   const renderAllGroupItem = useCallback(({ item }) => {
@@ -1344,7 +1400,7 @@ const GroupsScreen = ({ groups = [], setGroups, groupsLoading = false }) => {
                         style: 'destructive',
                         onPress: async () => {
                           try {
-                            const result = await deleteGroup(firestoreDB, appdatabase, groupId);
+                            const result = await deleteGroup(firestoreDB, appdatabase, groupId, user?.id, !!isAdmin);
                             if (result.success) {
                               showSuccessMessage(t('home.alert.success'), t('groups_screen.delete_success'));
                               setAllGroups((prev) => prev.filter((g) => (g.id || g.groupId) !== groupId));
@@ -1529,7 +1585,7 @@ const GroupsScreen = ({ groups = [], setGroups, groupsLoading = false }) => {
           </TouchableOpacity>
           {joinRequestsExpanded && (
             <View style={{ padding: SPACE.xl }}>
-              <FlatList
+              <FlatList removeClippedSubviews={false}
                 data={pendingJoinRequests}
                 keyExtractor={(item) => item.id}
                 renderItem={renderJoinRequestItem}
@@ -1617,7 +1673,7 @@ const GroupsScreen = ({ groups = [], setGroups, groupsLoading = false }) => {
           </TouchableOpacity>
           {invitationsExpanded && (
             <View style={{ padding: SPACE.xl }}>
-              <FlatList
+              <FlatList removeClippedSubviews={false}
                 data={pendingInvitations}
                 keyExtractor={(item) => item.id}
                 renderItem={renderInvitationItem}
@@ -1643,7 +1699,7 @@ const GroupsScreen = ({ groups = [], setGroups, groupsLoading = false }) => {
           data={filteredGroups}
           keyExtractor={(item, index) => item?.groupId || `group-${index}`}
           renderItem={renderGroupItem}
-          removeClippedSubviews={true}
+          removeClippedSubviews={false}
           maxToRenderPerBatch={10}
           windowSize={10}
         />
@@ -1678,7 +1734,7 @@ const GroupsScreen = ({ groups = [], setGroups, groupsLoading = false }) => {
               ) : null
             }
             renderItem={renderAllGroupItem}
-            removeClippedSubviews={true}
+            removeClippedSubviews={false}
             maxToRenderPerBatch={10}
             windowSize={10}
           />

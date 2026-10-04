@@ -55,7 +55,10 @@ const PetModal = ({
         <Pressable style={styles.backdrop} onPress={handleClose} />
 
         {/* Bottom drawer */}
-        <View style={[styles.drawer, { backgroundColor: drawerBackgroundColor, paddingBottom: insets.bottom }]}>
+        {/* The sheet's own padding PLUS the nav-bar inset. The inline value
+            used to be `insets.bottom` alone, which replaced styles.drawer's
+            SPACE.xxl — so on devices with no inset the list ran to the edge. */}
+        <View style={[styles.drawer, { backgroundColor: drawerBackgroundColor, paddingBottom: SPACE.xxl + insets.bottom }]}>
           <ValueScreen 
             fromChat={fromChat} 
             selectedFruits={selectedFruits} 
@@ -82,7 +85,7 @@ const styles = StyleSheet.create({
     justifyContent: 'flex-end', // drawer from bottom
   },
   backdrop: {
-    ...StyleSheet.absoluteFillObject,
+    ...StyleSheet.absoluteFill,
     backgroundColor: 'rgba(0,0,0,0.4)',
   },
   drawer: {

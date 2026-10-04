@@ -9,8 +9,6 @@ import {
   FlatList,
   Image,
   ActivityIndicator,
-  KeyboardAvoidingView,
-  Platform,
   TextInput,
 } from 'react-native';
 import Icon from 'react-native-vector-icons/Ionicons';
@@ -23,7 +21,6 @@ import { useNavigation } from '@react-navigation/native';
 import { useTranslation } from 'react-i18next';
 import InterstitialAdManager from '../../Ads/IntAd';
 import { useLocalState } from '../../LocalGlobelStats';
-import { mixpanel } from '../../AppHelper/MixPenel';
 import config from '../../Helper/Environment';
 import CreateGroupModal from './CreateGroupModal';
 import { useHaptic } from '../../Helper/HepticFeedBack';
@@ -32,6 +29,7 @@ import { showSuccessMessage, showErrorMessage } from '../../Helper/MessageHelper
 import { GAME } from '../../config/game';
 import { STATUS } from '../../Design/tokens';
 import { getThemeColors } from '../../Helper/themeColors';
+import { ModalKeyboardView } from '../../Helper/keyboardAvoidingContainer';
 import { SIZE } from '../../Design/tokens';
 import { SPACE } from '../../Design/tokens';
 import { FONT } from '../../Design/tokens';
@@ -70,8 +68,27 @@ const OnlineUsersList = ({
   
   // ✅ Group creation state (only used in 'select' mode)
   const [isSelectionMode, setIsSelectionMode] = useState(mode === 'select');
-  const [selectedUserIds, setSelectedUserIds] = useState(new Set());
+  // Selected users keyed by id, holding the whole user object. It used to be
+  // a Set of ids, and the objects were looked up again in allOnlineUsers only
+  // -- so anyone picked from the name SEARCH (usually someone offline) had no
+  // object, was silently dropped, and "Create (2)" opened a sheet with 0
+  // members. Keeping the object from whichever list it was picked in fixes
+  // that for creating and for adding members.
+  const [selectedUsersById, setSelectedUsersById] = useState({});
+  const selectedUserIds = useMemo(() => new Set(Object.keys(selectedUsersById)), [selectedUsersById]);
   const [showCreateGroupModal, setShowCreateGroupModal] = useState(false);
+
+  // ── Search by name ──────────────────────────────────────────────────────
+  // (Declared up here so the close-reset effect below can clear it.)
+  // The list itself only ever held people who were online right now, so an
+  // offline friend could not be added to a group at all. A non-empty query
+  // swaps the data source to a prefix search over /users; clearing it returns
+  // to the online list untouched. See utils/userSearch.js for why prefix and
+  // not substring.
+  const [searchText, setSearchText] = useState('');
+  const [searchResults, setSearchResults] = useState([]);
+  const [searching, setSearching] = useState(false);
+  const isSearching = searchText.trim().length >= 2;
   
   // ✅ User's existing group state (only used in 'select' mode)
   const [userGroup, setUserGroup] = useState(null);
@@ -273,8 +290,10 @@ const OnlineUsersList = ({
   useEffect(() => {
     if (!visible) {
       setIsSelectionMode(mode === 'select');
-      setSelectedUserIds(new Set());
+      setSelectedUsersById({});
       setShowCreateGroupModal(false);
+      // The query survived closing, so the sheet reopened mid-search.
+      setSearchText('');
     }
   }, [visible, mode]);
 
@@ -284,25 +303,27 @@ const OnlineUsersList = ({
     triggerHapticFeedback('impactLight');
     setIsSelectionMode((prev) => !prev);
     if (isSelectionMode) {
-      setSelectedUserIds(new Set());
+      setSelectedUsersById({});
     }
   }, [mode, isSelectionMode, triggerHapticFeedback]);
 
-  // ✅ Handle user selection for group creation
-  const handleToggleUserSelection = useCallback((userId) => {
+  // ✅ Handle user selection for group creation (takes the user object, from
+  // either the online list or search results)
+  const handleToggleUserSelection = useCallback((selectedUser) => {
+    const userId = selectedUser?.id;
+    if (!userId) return;
     triggerHapticFeedback('impactLight');
-    setSelectedUserIds((prev) => {
-      const newSet = new Set(prev);
-      if (newSet.has(userId)) {
-        newSet.delete(userId);
-      } else {
-        // Check max members limit (creator + selected members <= MAX_GROUP_MEMBERS)
-        if (newSet.size >= MAX_GROUP_MEMBERS - 1) {
-          return prev; // Don't add if limit reached
-        }
-        newSet.add(userId);
+    setSelectedUsersById((prev) => {
+      if (prev[userId]) {
+        const next = { ...prev };
+        delete next[userId];
+        return next;
       }
-      return newSet;
+      // Check max members limit (creator + selected members <= MAX_GROUP_MEMBERS)
+      if (Object.keys(prev).length >= MAX_GROUP_MEMBERS - 1) {
+        return prev; // Don't add if limit reached
+      }
+      return { ...prev, [userId]: selectedUser };
     });
   }, [triggerHapticFeedback]);
 
@@ -321,19 +342,25 @@ const OnlineUsersList = ({
       setLoading(true);
       
       try {
-        // ✅ Build user data map from allOnlineUsers to avoid extra Firestore read
+        // ✅ Build user data map from the selected users (online OR search) to
+        // avoid extra reads
         const invitedUsersMap = {};
-        allOnlineUsers.forEach((u) => {
-          if (u.id && selectedIds.includes(u.id)) {
-            invitedUsersMap[u.id] = {
+        selectedIds.forEach((id) => {
+          const u = selectedUsersById[id];
+          if (u) {
+            invitedUsersMap[id] = {
               displayName: u.displayName || 'Anonymous',
               avatar: u.avatar || null,
             };
           }
         });
 
+        // Was `null` with the note "pass null if using RTDB only". But the
+        // group, its membership and the invitations all live in Firestore, and
+        // addMembersToGroup's first check is `!firestoreDB` -> "Missing
+        // required parameters". Every "Add to <group>" tap failed.
         const result = await addMembersToGroup(
-          null, // firestoreDB - pass null if using RTDB only
+          firestoreDB,
           appdatabase,
           userGroup.groupId,
           selectedIds,
@@ -347,7 +374,7 @@ const OnlineUsersList = ({
 
         if (result.success) {
           showSuccessMessage('Success', `Invitations sent to ${result.invitedCount || selectedIds.length} user(s)!`);
-          setSelectedUserIds(new Set());
+          setSelectedUsersById({});
           setIsSelectionMode(false);
         } else {
           showErrorMessage('Error', result.error || 'Failed to send invitations');
@@ -362,15 +389,19 @@ const OnlineUsersList = ({
       // Create new group
       setShowCreateGroupModal(true);
     }
-  }, [selectedUserIds, userGroup, user, appdatabase, allOnlineUsers, triggerHapticFeedback]);
+  }, [selectedUserIds, selectedUsersById, userGroup, user, appdatabase, firestoreDB, triggerHapticFeedback]);
 
-  // ✅ Handle group created (navigate to group chat)
-  const handleGroupCreated = useCallback((groupId) => {
+  // ✅ Handle group created: close THIS sheet, then open the new chat.
+  // Passed to CreateGroupModal as onGroupCreated. It existed but was never
+  // wired, so CreateGroupModal navigated on its own and this picker stayed
+  // open on top of the new chat.
+  const handleGroupCreated = useCallback((groupId, groupName) => {
     if (groupId) {
       onClose();
       if (navigation && typeof navigation.navigate === 'function') {
         navigation.navigate('GroupChatDetail', {
           groupId,
+          groupName: groupName || 'Group',
         });
       }
     }
@@ -448,7 +479,7 @@ const OnlineUsersList = ({
   const handleStartChat = useCallback((selectedUser) => {
     if (mode === 'select') {
       // In select mode, toggle selection instead
-      handleToggleUserSelection(selectedUser.id);
+      handleToggleUserSelection(selectedUser);
       return;
     }
 
@@ -469,16 +500,18 @@ const OnlineUsersList = ({
           },
         });
       }
-      mixpanel.track("Online Users Chat");
     };
 
     callbackFunction();
   }, [mode, onClose, navigation, localState?.isPro, handleToggleUserSelection, handleGameInvite]);
 
-  // ✅ Get selected users for group creation
-  const selectedUsers = useMemo(() => {
-    return allOnlineUsers.filter((u) => selectedUserIds.has(u.id));
-  }, [allOnlineUsers, selectedUserIds]);
+  // ✅ Get selected users for group creation -- from the map, so search picks
+  // are included (see selectedUsersById)
+  const selectedUsers = useMemo(() => Object.values(selectedUsersById), [selectedUsersById]);
+
+  // Who is actually online. Search results come from /users, not /presence,
+  // so every row used to get the green dot whether or not that person was on.
+  const onlineIdSet = useMemo(() => new Set(allOnlineUserIds), [allOnlineUserIds]);
 
   // ✅ Memoize render user item
   const renderUserItem = useCallback(({ item }) => {
@@ -509,7 +542,7 @@ const OnlineUsersList = ({
             style={styles.avatar}
             defaultSource={{ uri: GAME.defaultAvatar }}
           />
-          <View style={styles.onlineIndicator} />
+          {onlineIdSet.has(item.id) && <View style={styles.onlineIndicator} />}
         </View>
         <View style={styles.userInfo}>
           <View style={{ flexDirection: 'row', alignItems: 'center', flexWrap: 'wrap' }}>
@@ -622,20 +655,9 @@ const OnlineUsersList = ({
         )}
       </TouchableOpacity>
     );
-  }, [styles, handleStartChat, isDarkMode, isSelectionMode, selectedUserIds, mode, invitingIds, invitedIds, handleGameInvite]);
+  }, [styles, handleStartChat, isDarkMode, isSelectionMode, selectedUserIds, mode, invitingIds, invitedIds, handleGameInvite, onlineIdSet]);
 
-  // ✅ Memoize key extractor
-  // ── Search by name ──────────────────────────────────────────────────────
-  // The list itself only ever held people who were online right now, so an
-  // offline friend could not be added to a group at all. A non-empty query
-  // swaps the data source to a prefix search over /users; clearing it returns
-  // to the online list untouched. See utils/userSearch.js for why prefix and
-  // not substring.
-  const [searchText, setSearchText] = useState('');
-  const [searchResults, setSearchResults] = useState([]);
-  const [searching, setSearching] = useState(false);
-  const isSearching = searchText.trim().length >= 2;
-
+  // Debounced name search (state declared near the top).
   useEffect(() => {
     const term = searchText.trim();
     if (term.length < 2) {
@@ -648,7 +670,8 @@ const OnlineUsersList = ({
     setSearching(true);
     const timer = setTimeout(async () => {
       try {
-        const found = await searchUsersByName(appdatabase, term, { limit: 25 });
+        // You cannot invite yourself, so don't offer yourself.
+        const found = await searchUsersByName(appdatabase, term, { limit: 25, excludeIds: [user?.id] });
         if (!cancelled) setSearchResults(found);
       } catch (err) {
         if (!cancelled) setSearchResults([]);
@@ -659,12 +682,13 @@ const OnlineUsersList = ({
     }, 350);
 
     return () => { cancelled = true; clearTimeout(timer); };
-  }, [searchText, appdatabase]);
+  }, [searchText, appdatabase, user?.id]);
 
   // Selection state is keyed by id and lives outside both lists, so a user
   // picked from search stays selected after the query is cleared.
   const visibleUsers = isSearching ? searchResults : allOnlineUsers;
 
+  // ✅ Memoize key extractor
   const keyExtractor = useCallback((item) => item?.id || Math.random().toString(), []);
 
   return (
@@ -679,11 +703,10 @@ const OnlineUsersList = ({
         activeOpacity={1}
         onPress={onClose}
       >
-        <KeyboardAvoidingView
-          behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
-          style={{ flex: 1, justifyContent: 'flex-end' }}
-          keyboardVerticalOffset={Platform.OS === 'ios' ? 0 : 0}
-      >
+        {/* ModalKeyboardView: inside a Modal Android already resizes for the
+            keyboard, and behavior 'height' on top of that moved the sheet
+            twice. iOS still gets 'padding'. */}
+        <ModalKeyboardView style={{ flex: 1, justifyContent: 'flex-end' }}>
         <View 
           style={[styles.modalContent, { paddingBottom: insets.bottom }]}
           onStartShouldSetResponder={() => true}
@@ -778,7 +801,7 @@ const OnlineUsersList = ({
               style={styles.list}
               contentContainerStyle={styles.listContent}
               showsVerticalScrollIndicator={false}
-              removeClippedSubviews={true}
+              removeClippedSubviews={false}
               maxToRenderPerBatch={5}
               windowSize={5}
               initialNumToRender={5}
@@ -814,7 +837,7 @@ const OnlineUsersList = ({
             </Text>
           </View>
         </View>
-        </KeyboardAvoidingView>
+        </ModalKeyboardView>
       </TouchableOpacity>
 
       {/* Create Group Modal */}
@@ -823,9 +846,10 @@ const OnlineUsersList = ({
         onClose={() => {
           setShowCreateGroupModal(false);
           setIsSelectionMode(false);
-          setSelectedUserIds(new Set());
+          setSelectedUsersById({});
         }}
         selectedUsers={selectedUsers}
+        onGroupCreated={handleGroupCreated}
       />
     </Modal>
   );

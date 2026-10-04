@@ -21,7 +21,7 @@
         android:supportsRtl="true">
         <meta-data
             android:name="com.google.firebase.messaging.default_notification_icon"
-            android:resource="@drawable/ic_notification" />
+            android:resource="@drawable/ic_stat_clown_fish" />
 
         <activity
             android:name=".MainActivity"
@@ -39,5 +39,15 @@
         <meta-data
             android:name="com.google.android.gms.auth.api.signin.v2"
             android:value="true" />
+        <!-- Don't cold-start React Native for every background push. RNFB's
+             headless service ran index.js's (empty) setBackgroundMessageHandler
+             for each push while the app was closed; on slow phones that start
+             overran the service limit and showed as ANRs (Adopt Me: 106 of 112
+             weekly ANRs, fixed in d4c65e5). Every Fisch push carries a
+             notification payload, which Android displays itself, and taps and
+             foreground messages don't use this service. -->
+        <service
+            android:name="io.invertase.firebase.messaging.ReactNativeFirebaseMessagingHeadlessService"
+            tools:node="remove" />
     </application>
 </manifest>

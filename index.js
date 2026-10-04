@@ -12,14 +12,16 @@ import { LocalStateProvider } from './Code/LocalGlobelStats';
 import { MenuProvider } from 'react-native-popup-menu';
 import { SafeAreaProvider, initialWindowMetrics } from 'react-native-safe-area-context';
 import { LanguageProvider } from './Code/Translation/LanguageProvider';
-import messaging from '@react-native-firebase/messaging';
+import { getMessaging, setBackgroundMessageHandler } from '@react-native-firebase/messaging';
 import FlashMessage from 'react-native-flash-message';
 
 // Removed deleted dynamic imports
 
 // ✅ Background Notification Handler
-messaging().setBackgroundMessageHandler(async remoteMessage => {
-});
+// Every push carries a notification payload that Android shows itself; this
+// only silences RNFB's "no background handler" warning. (Modular API: the
+// namespaced messaging() calls are deprecated in RNFB 22+.)
+setBackgroundMessageHandler(getMessaging(), async () => {});
 
 // ✅ Foreground display for value-change alerts — background/killed pushes
 // auto-display, but foreground ones are dropped unless shown manually.
@@ -51,7 +53,8 @@ class ErrorBoundary extends React.Component {
 // rather than a zero-inset flash.
 const App = React.memo(() => (
   <SafeAreaProvider initialMetrics={initialWindowMetrics}>
-  <MenuProvider skipInstanceCheck>
+  {/* backHandler: Android Back closes an open popup menu before it leaves the screen. */}
+  <MenuProvider skipInstanceCheck backHandler>
   <LanguageProvider>
     <LocalStateProvider>
       <GlobalStateProvider > 

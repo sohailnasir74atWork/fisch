@@ -39,13 +39,11 @@ import config from '../Helper/Environment';
 import { getMyCosmetics } from '../Helper/cosmeticsCache';
 import { Platform } from 'react-native';
 import { showMessage } from 'react-native-flash-message';
-import NativeAdCard from '../Ads/NativeAdCard';
+import FeedBannerAd from '../Ads/FeedBannerAd';
 import PollCard from '../Engagement/PollCard';
-import EventCard from '../Engagement/EventScreen';
-import { releaseByPrefix as releaseNativeAds } from '../Ads/NativeAdManager';
 import InterstitialAdManager from '../Ads/IntAd';
 import BannerAdComponent from '../Ads/bannerAds';
-import { ABOVE_BANNER, FLOATING_BUTTON_ICON_SIZE, FLOATING_BUTTON_RIGHT } from '../Helper/floatingButtonLayout';
+import { ABOVE_BANNER, BANNER_HEIGHT, FLOATING_BUTTON_GAP, FLOATING_BUTTON_ICON_SIZE, FLOATING_BUTTON_RIGHT } from '../Helper/floatingButtonLayout';
 import PostsHeader from './componenets/PostsHeader';
 import { useTranslation } from 'react-i18next';
 import { FONT } from './tokens';
@@ -132,10 +130,6 @@ const DesignFeedScreen = ({ route }) => {
 
   }, [localState.bannedUsers]);
 
-  // Free this feed's native ad handles on unmount (keys are prefixed 'ad-').
-  useEffect(() => {
-    return () => releaseNativeAds('ad-');
-  }, []);
   // console.log('mainscreen')
   const fetchMyPosts = async (tag = null) => {
     if (!user?.id) return;
@@ -174,7 +168,11 @@ const DesignFeedScreen = ({ route }) => {
     }
   };
   
-  const deleteUsersLatestPosts = async (userId, n = 15) => {
+  // The handlers handed to PostCard are useCallback'd: its memo compares them
+  // by identity, and fresh functions every render re-rendered every mounted
+  // card on each page load and poll vote — the "deep in the feed it freezes"
+  // reviews.
+  const deleteUsersLatestPosts = useCallback(async (userId, n = 15) => {
     if (!userId) throw new Error('userId is required');
   
     const q = query(
@@ -197,7 +195,7 @@ const DesignFeedScreen = ({ route }) => {
   
     await batch.commit();
     return ids;
-  };
+  }, [firestoreDB]);
   
   // useEffect(() => {
   //   nativeAdPool.fillIfNeeded();
@@ -233,7 +231,7 @@ const DesignFeedScreen = ({ route }) => {
 
 
   const skeletonArray = useMemo(() => Array.from({ length: 5 }), []);
-    const handleDeletePost = async (postId) => {
+    const handleDeletePost = useCallback(async (postId) => {
       try {
         await deleteDoc(doc(firestoreDB, 'designPosts', postId));
         setPosts(prev => prev.filter(p => p.id !== postId));
@@ -241,7 +239,7 @@ const DesignFeedScreen = ({ route }) => {
       } catch (err) {
         showMessage({ message: t('feed.delete_failed'), type: 'danger' });
       }
-    };
+    }, [firestoreDB, t]);
     
 
 
@@ -375,7 +373,7 @@ const DesignFeedScreen = ({ route }) => {
     }
   };
 
-  const handleLike = async (post) => {
+  const handleLike = useCallback(async (post) => {
     if (!user?.id) return;
     const postRef = doc(firestoreDB, 'designPosts', post.id);
     const alreadyLiked = !!post.likes?.[user.id];
@@ -411,7 +409,7 @@ const DesignFeedScreen = ({ route }) => {
       setMyPosts(rollback);
       setRankedPosts(rollback);
     }
-  };
+  }, [user?.id, firestoreDB]);
 
   const handleUploadPost = async (desc, imageUrls, selectedTags, currentUserEmail) => {
     // ✅ Prevent multiple submissions - check if already submitting
@@ -522,20 +520,15 @@ const DesignFeedScreen = ({ route }) => {
     }
   };
   
-  const renderItem = ({ item, index }) => {
+  const renderItem = useCallback(({ item }) => {
     if (initialLoading) {
       return <View style={[styles.skeletonPost, isDarkMode && { backgroundColor: '#444' }]} />;
     }
 
-    // Native ad slot interleaved into the feed (collapses to nothing when
+    // In-feed ad slot interleaved into the feed (collapses to nothing when
     // unfilled or for Pro users, so the feed never shows a blank gap).
     if (item?.__type === 'ad') {
-      return <NativeAdCard adKey={item.id} isDarkMode={isDarkMode} />;
-    }
-
-    // Seasonal event. Renders nothing when no event is running or near.
-    if (item?.__type === 'event') {
-      return <EventCard isDarkMode={isDarkMode} />;
+      return <FeedBannerAd adKey={item.id} isDarkMode={isDarkMode} />;
     }
 
     if (item?.__type === 'poll') {
@@ -559,11 +552,10 @@ const DesignFeedScreen = ({ route }) => {
         appdatabase={appdatabase}
         onDelete={handleDeletePost}
         onDeleteAll={deleteUsersLatestPosts}
-
-
       />
     );
-  };
+  }, [initialLoading, isDarkMode, user, firestoreDB, handleLike, localState,
+    appdatabase, handleDeletePost, deleteUsersLatestPosts]);
 
   // const dataToRender = initialLoading
   //   ? skeletonArray
@@ -590,22 +582,20 @@ const DesignFeedScreen = ({ route }) => {
   const dataToRender = useMemo(() => {
     if (initialLoading) return skeletonArray;
     const withAds = interleaveAds(filteredBase, !localState?.isPro);
-    // Polls and the seasonal event ride at the top of the list rather than in
-    // ListHeaderComponent, because the header is sticky
-    // (stickyHeaderIndices={[0]}) and anything pinned there would sit over the
-    // feed permanently.
+    // Polls ride at the top of the list rather than in ListHeaderComponent,
+    // because the header is sticky (stickyHeaderIndices={[0]}) and anything
+    // pinned there would sit over the feed permanently.
     //
-    // The event row renders null outside an event window, so this costs an
-    // empty row for most of the year and nothing else.
+    // The seasonal event card (Code/Engagement/EventScreen) was removed from
+    // the feed on 2026-09-23 at the owner's request; the component is kept.
     const head = [
-      { __type: 'event', id: 'seasonal-event' },
       ...polls.map((poll) => ({ __type: 'poll', id: `poll-${poll.id}`, poll })),
     ];
     return [...head, ...withAds];
   }, [initialLoading, filteredBase, localState?.isPro, skeletonArray, polls]);
 
   // Stable keys: drop `index` from real-item keys so pagination/reorder doesn't
-  // remount rows (which previously also forced native ad cards to reload).
+  // remount rows (which previously also forced in-feed ad slots to reload).
   const keyExtractor = useCallback(
     (item, index) =>
       initialLoading
@@ -618,12 +608,17 @@ const DesignFeedScreen = ({ route }) => {
 
   return (
     <View style={[styles.container, isDarkMode && styles.darkContainer]}>
-      <FlatList
+      <FlatList removeClippedSubviews={false}
         data={dataToRender}
         keyExtractor={keyExtractor}
         renderItem={renderItem}
         onEndReached={loadMorePosts}
         onEndReachedThreshold={0.5}
+        // The default window (21 screens) kept 30–50 cards mounted once deep
+        // in the feed; these match the trade list.
+        initialNumToRender={6}
+        maxToRenderPerBatch={6}
+        windowSize={5}
         refreshing={refreshing}
         contentContainerStyle={{ paddingBottom: 180 }}
         onRefresh={() => {
@@ -680,7 +675,15 @@ const DesignFeedScreen = ({ route }) => {
         // edge, and zIndex 6 (> the ad's 5) guarantees the ad never renders on
         // top of the button (AdMob "accidental clicks: layout"). The trades and
         // chat buttons share the same constant so all three line up.
-        style={[styles.fab, { bottom: !localState.isPro ? bannerBottomPos + ABOVE_BANNER : 75, zIndex: 6 }]}
+        // Pro members have no banner, so they drop BANNER_HEIGHT (mm2's
+        // bannerAware()) instead of the old hardcoded 75, which still reserved
+        // most of a banner's height under the button.
+        style={[styles.fab, {
+          bottom: bannerBottomPos + (localState.isPro
+            ? Math.max(FLOATING_BUTTON_GAP, ABOVE_BANNER - BANNER_HEIGHT)
+            : ABOVE_BANNER),
+          zIndex: 6,
+        }]}
         onPress={() => user?.id ? setModalVisible(true) : setSigninDrawerVisible(true)}
       >
         <FontAwesome name="circle-plus" size={FLOATING_BUTTON_ICON_SIZE} color={config.colors.primary} />

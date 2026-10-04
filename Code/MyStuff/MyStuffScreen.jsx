@@ -762,7 +762,7 @@ const MyStuffScreen = ({ selectedTheme }) => {
             </Text>
           </View>
         ) : (
-          <FlatList
+          <FlatList removeClippedSubviews={false}
             key="history-list"
             data={history}
             keyExtractor={(item, i) => `hist-${item.id || i}`}
@@ -804,7 +804,7 @@ const MyStuffScreen = ({ selectedTheme }) => {
             </TouchableOpacity>
           </View>
         ) : (
-          <FlatList
+          <FlatList removeClippedSubviews={false}
             key="items-grid"
             data={currentList}
             keyExtractor={(item, i) => `${item.id || item.name || i}-${i}`}
@@ -852,7 +852,7 @@ const MyStuffScreen = ({ selectedTheme }) => {
             </TouchableOpacity>
           </View>
         ) : (
-          <FlatList
+          <FlatList removeClippedSubviews={false}
             key="goals-list"
             data={wishlistPets}
             keyExtractor={(item, i) => `goal-${item.name || i}-${i}`}

@@ -40,11 +40,14 @@ import FramedAvatar from '../ChatScreen/GroupChat/FramedAvatar';
 import { getMyCosmetics, syncMyCosmetics } from '../Helper/cosmeticsCache';
 import { GAME } from '../config/game';
 import { useNextEvent, countdown } from '../Helper/useNextEvent';
+import EventBell from '../Timers/EventBell';
 import { STATUS, LIGHT } from '../Design/tokens';
 import { SIZE } from '../Design/tokens';
 import { SPACE } from '../Design/tokens';
 import { accentFor } from '../Design/tokens';
 import { FONT } from '../Design/tokens';
+import { IOS_LIMITED } from '../config/iosLimited';
+import AppOpenAdManager from '../Ads/openApp';
 
 const LANGUAGES = [
   { code: 'en', name: 'English', flag: '🇺🇸' },
@@ -217,6 +220,10 @@ const HomeTabScreen = ({ selectedTheme }) => {
   return (
     <View style={[$.root, { backgroundColor: C.bg }]}>
 
+      {/* iOS limited build: no custom band, so no language picker either —
+          Home gets the plain native stack header (title only, set in App.js)
+          and the app stays in English (i18n.js default). See Code/config/iosLimited.js. */}
+      {!IOS_LIMITED && (<>
       {/* ── Header band ──
           Its own surface, deliberately NOT the page background. It used to be
           painted in C.bg inside the ScrollView, so it read as the first row of
@@ -259,6 +266,7 @@ const HomeTabScreen = ({ selectedTheme }) => {
 
         </View>
       </View>
+      </>)}
 
       <ScrollView showsVerticalScrollIndicator={false} keyboardShouldPersistTaps="handled" contentContainerStyle={{ paddingBottom: 100 }} bounces>
         <View style={$.introRow}>
@@ -332,6 +340,12 @@ const HomeTabScreen = ({ selectedTheme }) => {
             <Text style={[$.eventMeta, { color: nextEvent.live ? '#FFFFFF' : accentFor('amber', dark).color }]}>
               {nextEvent.live ? `${countdown(nextEvent.end - eventNow)} left` : t('home.timers', { defaultValue: 'Timers' })}
             </Text>
+            <EventBell
+              eventKey={nextEvent.key}
+              label={nextEvent.label}
+              size={16}
+              color={nextEvent.live ? '#FFFFFF' : accentFor('amber', dark).color}
+            />
             <FontAwesome name="chevron-right" size={11} color={nextEvent.live ? '#FFFFFF' : accentFor('amber', dark).color} />
           </TouchableOpacity>
         )}
@@ -345,6 +359,16 @@ const HomeTabScreen = ({ selectedTheme }) => {
         <Text style={[$.sectionTitle, $.sectionSpacing, { color: C.text }]}>{t("home.explore_tools", { defaultValue: "Explore & discover" })}</Text>
         <View style={$.toolGrid}>
           {[
+            // iOS limited build only: the trade calculator is a TAB on Android
+            // (MainTabs.js) and needs no card there. With the tab bar hidden it
+            // becomes the headline card here — full width, first — and opens
+            // the stack route App.js registers under the same gate.
+            ...(IOS_LIMITED ? [{
+              icon: 'calculator', accent: 'amber', wide: true,
+              label: t('tabs.calculator'),
+              sub: t('home.calculator_sub', { defaultValue: 'Check a trade: win, fair or loss' }),
+              onPress: () => nav.navigate('Calculator'),
+            }] : []),
             // One hue per tool. Colour is doing work here, not decoration: the
             // grid becomes scannable by colour before it is read, so a
             // returning user reaches for position + colour instead of
@@ -360,7 +384,7 @@ const HomeTabScreen = ({ selectedTheme }) => {
                 key={tool.label}
                 accessibilityRole="button"
                 accessibilityLabel={tool.label + '. ' + tool.sub}
-                style={[$.toolCard, { backgroundColor: a.tint, borderColor: a.tint }]}
+                style={[$.toolCard, tool.wide && $.toolCardWide, { backgroundColor: a.tint, borderColor: a.tint }]}
                 onPress={tool.onPress}
                 activeOpacity={0.8}
               >
@@ -379,7 +403,9 @@ const HomeTabScreen = ({ selectedTheme }) => {
 
         {/* ── My Stuff Worth ──
             Personal, but secondary to lookup: it reads 0 until you have added
-            items, so it must not be the first thing a new user meets. */}
+            items, so it must not be the first thing a new user meets.
+            Not in the iOS limited build: it is sign-in gated. */}
+        {!IOS_LIMITED && (
         <TouchableOpacity
           onPress={() => guard(() => nav.navigate('MyStuff'), 'Sign in')}
           activeOpacity={0.8}
@@ -399,6 +425,7 @@ const HomeTabScreen = ({ selectedTheme }) => {
             </View>
           </View>
         </TouchableOpacity>
+        )}
 
         {/* ── Social & extras ──
             Deliberately smaller than the tool grid. These used to sit in the
@@ -407,12 +434,18 @@ const HomeTabScreen = ({ selectedTheme }) => {
         <Text style={[$.sectionTitle, $.sectionSpacing, { color: C.text }]}>{t("home.more_to_explore", { defaultValue: "More to explore" })}</Text>
         <View style={$.pillRow}>
           {[
-            { icon: 'friends', accent: 'lagoon', label: t('home.friends') || 'Friends', onPress: () => guard(() => nav.navigate('SocialDashboard'), 'Sign in') },
-            { icon: 'star', accent: 'amber', label: t('home.daily_stars'), onPress: () => guard(() => setShowDailyStars(true), 'Sign in') },
-            { icon: 'trophy', accent: 'rose', label: t('home.top_rated'), onPress: () => nav.navigate('Leaderboard') },
+            // hideOnIosLimited: pills the iOS limited build leaves out — the
+            // social ones, and Daily Stars because it is sign-in gated.
+            // iosLimitedOnly: Settings, whose entry point elsewhere is the
+            // header avatar — the iOS header has no buttons at all.
+            // See Code/config/iosLimited.js.
+            { icon: 'friends', accent: 'lagoon', label: t('home.friends') || 'Friends', onPress: () => guard(() => nav.navigate('SocialDashboard'), 'Sign in'), hideOnIosLimited: true },
+            { icon: 'star', accent: 'amber', label: t('home.daily_stars'), onPress: () => guard(() => setShowDailyStars(true), 'Sign in'), hideOnIosLimited: true },
+            { icon: 'trophy', accent: 'rose', label: t('home.top_rated'), onPress: () => nav.navigate('Leaderboard'), hideOnIosLimited: true },
             { icon: 'gift', accent: 'kelp', label: t('home.codes', { defaultValue: 'Codes' }), onPress: () => setShowCodes(true) },
-            { icon: 'shield', accent: 'violet', label: t('home.our_team', { defaultValue: 'Our Team' }), onPress: () => nav.navigate('ModsScreen') },
-          ].map((p) => {
+            { icon: 'shield', accent: 'violet', label: t('home.our_team', { defaultValue: 'Our Team' }), onPress: () => nav.navigate('ModsScreen'), hideOnIosLimited: true },
+            { icon: 'settings', accent: 'lagoon', label: t('tabs.settings'), onPress: () => nav.navigate('Setting'), iosLimitedOnly: true },
+          ].filter((p) => (IOS_LIMITED ? !p.hideOnIosLimited : !p.iosLimitedOnly)).map((p) => {
             const a = accentFor(p.accent, dark);
             return (
               <TouchableOpacity
@@ -429,7 +462,8 @@ const HomeTabScreen = ({ selectedTheme }) => {
           })}
         </View>
 
-        {/* ── Status Feed ── */}
+        {/* ── Status Feed ── (not in the iOS limited build) */}
+        {!IOS_LIMITED && (
         <StatusFeed
           user={user}
           firestoreDB={firestoreDB}
@@ -437,12 +471,15 @@ const HomeTabScreen = ({ selectedTheme }) => {
           isDarkMode={dark}
           onRequireSignIn={() => { setSigninMsg('Sign in to post a status'); setSigninVis(true); }}
         />
+        )}
 
         {/* ══════════ Cosmetics ══════════
             Demoted to one compact row. It had a titled section and two large
             saturated cards — more visual weight than any data tool on the
             screen — for an engagement mechanic. The pink/purple were also the
             last un-migrated MM2 literals on this screen. */}
+        {/* Not in the iOS limited build. See Code/config/iosLimited.js. */}
+        {!IOS_LIMITED && (
         <View style={$.cosmeticsRow}>
           <TouchableOpacity
             style={[$.cosmeticCard, { backgroundColor: accentFor('rose', dark).tint, borderColor: accentFor('rose', dark).tint }]}
@@ -466,6 +503,7 @@ const HomeTabScreen = ({ selectedTheme }) => {
             </Text>
           </TouchableOpacity>
         </View>
+        )}
 
         {/* ── Invite: growth, not a peer of the tools ── */}
         <TouchableOpacity
@@ -473,6 +511,9 @@ const HomeTabScreen = ({ selectedTheme }) => {
           activeOpacity={0.7}
           onPress={async () => {
             const link = Platform.OS === 'ios' ? config.IOsShareLink : config.andriodShareLink;
+            // The Android share sheet backgrounds the app; don't greet the
+            // player with an App Open ad when they come back from it.
+            AppOpenAdManager.skipNextForeground();
             try { await Share.share({ message: `${t('home.share_message')} ${link}` }); } catch {}
           }}
         >
@@ -490,10 +531,16 @@ const HomeTabScreen = ({ selectedTheme }) => {
         <BannerAdComponent collapsible />
       </View>
 
-      {/* ── Modals ── */}
+      {/* ── Modals ──
+          The iOS limited build has no sign-in: every trigger above is hidden,
+          and the drawer itself is not mounted so nothing can surface it. */}
+      {!IOS_LIMITED && (
       <DailyStarRewards visible={showDailyStars} onClose={() => setShowDailyStars(false)} db={appdatabase} uid={user?.id} isDarkMode={dark} />
+      )}
 
+      {!IOS_LIMITED && (
       <SignInDrawer visible={signinVis} onClose={() => setSigninVis(false)} selectedTheme={selectedTheme} screen="Home" message={signinMsg} />
+      )}
 
       {/* Codes open here rather than on the Values tab. CodesDrawer is a
           self-contained Modal, so it needs nothing from that screen. */}
@@ -609,6 +656,8 @@ const $ = StyleSheet.create({
     flexBasis: '45%', flexGrow: 1, minWidth: 0,
     padding: SPACE.xl, borderRadius: 20, borderWidth: 1,
   },
+  // The one card that takes a whole row: the iOS limited build's calculator.
+  toolCardWide: { flexBasis: '100%' },
   toolIcon: {
     width: 46, height: 46, borderRadius: 16,
     alignItems: 'center', justifyContent: 'center',

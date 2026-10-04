@@ -520,7 +520,9 @@ highlightedMessage: {
 nameRow: {
   flexDirection: 'row',
   alignItems: 'center',      // vertical alignment (text + images)
-  // justifyContent: 'center',  // center the whole row horizontally
+  // A name with several role pills overflowed the bubble; wrap like Adopt Me.
+  flexWrap: 'wrap',
+  rowGap: 4,
 },
 
 userNameText: {

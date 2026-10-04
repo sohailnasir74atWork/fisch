@@ -5,8 +5,8 @@ import {
   Alert,
   Text,
   Image,
-  TouchableOpacity,  TextInput,  
-
+  TouchableOpacity,  TextInput,
+  Modal,
 } from 'react-native';
 import { useFocusEffect, useRoute } from '@react-navigation/native';
 import { getStyles } from '../Style';
@@ -17,12 +17,15 @@ import { chatTypeForRoute, fetchChatAvailability, resolveChatBlock } from '../ch
 import { GestureHandlerRootView } from 'react-native-gesture-handler';
 import { clearActiveChat, setActiveChat, useOtherLastRead, updateLastRead, useOnlineStatus } from '../utils';
 import { useLocalState } from '../../LocalGlobelStats';
-import  { get, increment, ref, update } from '@react-native-firebase/database';
+import  { get, set, increment, ref, update } from '@react-native-firebase/database';
 import { useTranslation } from 'react-i18next';
 import { showSuccessMessage, showErrorMessage } from '../../Helper/MessageHelper';
+import { showMessage } from 'react-native-flash-message';
+import { serverNowMs } from '../../Helper/serverTime';
+import { getThemeColors } from '../../Helper/themeColors';
 
 import config from '../../Helper/Environment';
-import ConditionalKeyboardWrapper from '../../Helper/keyboardAvoidingContainer';
+import ConditionalKeyboardWrapper, { ModalKeyboardView } from '../../Helper/keyboardAvoidingContainer';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import BannerAdComponent from '../../Ads/bannerAds';
 
@@ -49,8 +52,12 @@ const PAGE_SIZE = 10; // ✅ Pagination: load 10 messages per batch
 const PrivateChatScreen = ({route, bannedUsers, isDrawerVisible, setIsDrawerVisible, noTabBar }) => {
   const { selectedUser, selectedTheme, item } = route.params || {};
 
-  const { user, theme, appdatabase, updateLocalStateAndDatabase, firestoreDB } = useGlobalState();
+  const { user, theme, appdatabase, updateLocalStateAndDatabase, firestoreDB, isUserBlocked, strikeInfo } = useGlobalState();
   const [trade, setTrade] = useState(null)
+  // A feed post the chat was opened from. Kept apart from `trade` because a
+  // post has no items: treated as a trade it was written over the pair's real
+  // trade at private_messages/{chatId}/trade and drew an empty trade strip.
+  const [post, setPost] = useState(null)
   const [messages, setMessages] = useState([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
@@ -79,20 +86,66 @@ const bannerBottomPos = noTabBar ? Math.max(insets.bottom, 8) + 12 : 0; // with 
 // used to reserve the banner's height unconditionally, so a no-fill (or a Pro
 // user) left a dead gap between the message input and the tab bar.
 const [bannerHeight, setBannerHeight] = useState(0); // measured, 0 when no ad is on screen
-
-  // ✅ Read receipts: listen to other user's lastRead timestamp
-  const otherLastRead = useOtherLastRead(chatKey, selectedUserId);
+// Set when a partner message lands while this chat is open. The sender always
+// bumps our unreadCount (it cannot know we are reading), so we clear it once
+// when we leave — but only if something arrived, so a quiet visit costs no
+// extra write.
+const unreadWhileFocusedRef = useRef(false);
 
   const closeProfileDrawer = () => {
     setIsDrawerVisible(false);
   };
 
-
-  // ✅ Fix useEffect dependency
-  useEffect(() => {
-    if (item) {
-      setTrade(item);
+  // Moderation gate. isUserBlocked is the authoritative, server-time checked
+  // flag from GlobelStats; strikeInfo only formats the "time left" message.
+  // Private chat had neither, so banned and muted users kept messaging and
+  // rating people one to one.
+  const isMeBanned = !!isUserBlocked;
+  const rejectIfBanned = useCallback(() => {
+    if (isMeBanned) {
+      showMessage({
+        message: t('chat.access_denied', { defaultValue: 'Access Denied' }),
+        description: t('chat.banned_message', { defaultValue: 'You are banned from sending messages.' }),
+        type: 'danger',
+      });
+      return true;
     }
+    if (strikeInfo) {
+      const { strikeCount, bannedUntil } = strikeInfo;
+      const now = serverNowMs();
+      if (bannedUntil === 'permanent') {
+        showMessage({
+          message: '⛔ Permanently Banned',
+          description: 'You are permanently banned from sending messages.',
+          type: 'danger',
+        });
+        return true;
+      }
+      if (typeof bannedUntil === 'number' && now < bannedUntil) {
+        const totalMinutes = Math.ceil((bannedUntil - now) / 60000);
+        const hours = Math.floor(totalMinutes / 60);
+        const minutes = totalMinutes % 60;
+        const timeLeftText = hours > 0 ? `${hours}h ${minutes}m` : `${minutes}m`;
+        showMessage({
+          message: `⚠️ Strike ${strikeCount}`,
+          description: `You are banned from chatting for ${timeLeftText} more minute(s).`,
+          type: 'warning',
+          duration: 5000,
+        });
+        return true;
+      }
+    }
+    return false;
+  }, [isMeBanned, strikeInfo, t]);
+
+  // Trades carry item lists; feed posts carry a description and/or images.
+  // Anything else is not persisted, so an unexpected shape can never be
+  // written over the pair's trade.
+  const itemKind = useMemo(() => {
+    if (!item || typeof item !== 'object') return null;
+    if (item.hasItems || item.wantsItems) return 'trade';
+    if (item.desc !== undefined || item.imageUrl) return 'post';
+    return null;
   }, [item]);
 
   useEffect(() => {
@@ -163,6 +216,7 @@ const [bannerHeight, setBannerHeight] = useState(0); // measured, 0 when no ad i
   const isChatUnavailable = !!chatBlockedBy;
   const isDarkMode = theme === 'dark';
   const styles = useMemo(() => getStyles(isDarkMode), [isDarkMode]);
+  const themeColors = getThemeColors(isDarkMode);
 
   // Generate a unique chat key
   const chatKey = useMemo(
@@ -173,21 +227,14 @@ const [bannerHeight, setBannerHeight] = useState(0); // measured, 0 when no ad i
     [myUserId, selectedUserId]
   );
 
-  // const navigation = useNavigation();
-  useFocusEffect(
-    useCallback(() => {
-      // Screen is focused
-      // console.log('Screen is focused');
+  // Read receipts: the other user's lastRead timestamp. This must come after
+  // chatKey — it used to be called ~80 lines above it, where chatKey was still
+  // undefined, so the listener never attached and ticks never turned blue.
+  const otherLastRead = useOtherLastRead(chatKey, selectedUserId);
 
-      return () => {
-        // Screen is unfocused
-        if (user?.id) {
-          clearActiveChat(user.id);
-          // console.log('Triggered clearActiveChat for user:', user.id);
-        }
-      };
-    }, [user?.id])
-  );
+  // (The active-chat flag is cleared by the focus effect further down, which
+  // also sets it. A second effect here cleared it again on every blur.)
+
   // ✅ Memoize handleRating - FIRESTORE ONLY (no RTDB)
   const handleRating = useCallback(async () => {
     if (!rating || rating < 1 || rating > 5) {
@@ -200,7 +247,10 @@ const [bannerHeight, setBannerHeight] = useState(0); // measured, 0 when no ad i
       showErrorMessage(t('home.alert.error'), t('private_chat.missing_data'));
       return;
     }
-  
+
+    // Banned users cannot rate or review others either.
+    if (rejectIfBanned()) return;
+
     try {
       setStartRating(true);
       
@@ -300,7 +350,7 @@ showSuccessMessage(
       showErrorMessage(t('home.alert.error'), t('private_chat.rating_error'));
       setStartRating(false);
     }
-  }, [rating, selectedUserId, myUserId, firestoreDB, reviewText, user?.id, user?.displayName]);
+  }, [rating, selectedUserId, myUserId, firestoreDB, reviewText, user?.id, user?.displayName, rejectIfBanned]);
   
   
 
@@ -314,10 +364,27 @@ showSuccessMessage(
   
     // console.log(selecte÷dUser)
 
+  // A page that resolves after the user opened another chat belongs to the
+  // old conversation; compare against the live ref and drop it. The in-flight
+  // flag stops onEndReached (which fires repeatedly, faster than isPaginating
+  // state can update) from requesting the same page twice.
+  const liveMessagesDbRef = useRef(messagesRef);
+  liveMessagesDbRef.current = messagesRef;
+  const loadingMoreRef = useRef(false);
+
   // Load messages with pagination
   const loadMessages = useCallback(
     async (reset = false) => {
       if (!messagesRef) return;
+      // No cursor means there is nothing older; without this a stray
+      // load-more fetched the NEWEST page again and appended nothing.
+      if (!reset && !lastLoadedKeyRef.current) return;
+      // Guard OUTSIDE the try: an early return inside it would run `finally`
+      // and clear the flag that the in-flight request still owns.
+      if (!reset) {
+        if (loadingMoreRef.current) return;
+        loadingMoreRef.current = true;
+      }
   
       if (reset) {
         setLoading(true);
@@ -328,23 +395,35 @@ showSuccessMessage(
         setIsPaginating(true);
       }
   
+      let stale = false;
       try {
+        const requestRef = messagesRef;
         let query = messagesRef.orderByKey();
   
+        // endAt() is INCLUSIVE: a page ending at the cursor re-reads the
+        // cursor message, which is already on screen, and a full-looking page
+        // of one repeat never let paging stop. Fetch one extra and drop the
+        // cursor key — same fix as Trader.jsx's community-chat pagination.
         const lastKey = lastLoadedKeyRef.current;
-        if (!reset && lastKey) {
-          // get older messages including lastKey – we'll filter overlap
-          query = query.endAt(lastKey);
-        }
-  
-        // ✅ Apply limit ONLY ONCE, at the end
-        // Use INITIAL_PAGE_SIZE for first load, PAGE_SIZE for pagination
         const limitSize = reset ? INITIAL_PAGE_SIZE : PAGE_SIZE;
-        query = query.limitToLast(limitSize);
+        if (!reset && lastKey) {
+          query = query.endAt(lastKey).limitToLast(limitSize + 1);
+        } else {
+          query = query.limitToLast(limitSize);
+        }
 
-  
         const snapshot = await query.once('value');
+        if (liveMessagesDbRef.current !== requestRef) { stale = true; return; } // chat switched mid-request
         const data = snapshot.val() || {};
+        if (!reset && lastKey) delete data[lastKey];
+
+        // The cursor comes from the raw keys: push keys sort chronologically,
+        // so the smallest key is the oldest row this page returned.
+        const rawKeys = Object.keys(data).sort();
+        const oldestKey = rawKeys.length > 0 ? rawKeys[0] : null;
+        // Fewer NEW rows than a page means the start of the chat was reached:
+        // stop paging instead of re-querying on every onEndReached.
+        const reachedStart = rawKeys.length < limitSize;
   
         let parsedMessages = Object.entries(data)
           .map(([key, value]) => ({ id: key, ...value }))
@@ -352,13 +431,8 @@ showSuccessMessage(
 
         // ✅ If reset and no messages found, keep loading state but don't clear existing messages unnecessarily
         if (parsedMessages.length === 0) {
-          if (reset) {
-            // Only clear if we explicitly reset (manual refresh or chat change)
-            // This prevents accidental clearing
-          } else {
-            // ✅ No more messages to load - set ref to null to prevent further pagination
-            lastLoadedKeyRef.current = null;
-          }
+          // No more messages to load - null the cursor to stop pagination
+          lastLoadedKeyRef.current = null;
           return;
         }
 
@@ -379,11 +453,13 @@ showSuccessMessage(
           }
         });
   
-        lastLoadedKeyRef.current = parsedMessages[parsedMessages.length - 1]?.id; // ✅ oldest in this batch (last item in descending array)
+        lastLoadedKeyRef.current = reachedStart ? null : oldestKey;
       } catch (err) {
         console.warn('Error loading messages:', err);
       } finally {
-        if (reset) setLoading(false);
+        // A stale reset must not clear the spinner the new chat's own load owns.
+        if (reset) { if (!stale) setLoading(false); }
+        else loadingMoreRef.current = false;
         setIsPaginating(false);
       }
     },
@@ -453,29 +529,67 @@ showSuccessMessage(
 
     const chatId = [myUserId, selectedUserId].sort().join('_');
     const tradeRef = ref(appdatabase, `private_messages/${chatId}/trade`);
-  
-    if (item && typeof item === 'object') {
-      // ✅ If trade comes from props, set it and update Firebase
+    // Posts get their own sibling node. It is new and additive: older builds
+    // never read it, and they keep reading /trade, which a post no longer
+    // touches.
+    const postRef = ref(appdatabase, `private_messages/${chatId}/post`);
+
+    if (itemKind === 'trade') {
       setTrade(item);
-      tradeRef.set(item).catch((error) => {
+      setPost(null);
+      set(tradeRef, item).catch((error) => {
         console.error("Error updating trade in Firebase:", error);
       });
+    } else if (itemKind === 'post') {
+      setPost(item);
+      setTrade(null);
+      // Only what the reminder card shows. The raw post carries Firestore
+      // timestamps and every image, none of which belong in the chat node.
+      set(postRef, {
+        desc: typeof item.desc === 'string' ? item.desc.slice(0, 300) : '',
+        imageUrl: Array.isArray(item.imageUrl) ? item.imageUrl.slice(0, 1) : [],
+        displayName: item.displayName || '',
+        selectedTags: Array.isArray(item.selectedTags) ? item.selectedTags.slice(0, 3) : [],
+      }).catch((error) => {
+        console.error("Error updating post in Firebase:", error);
+      });
     } else {
-      // ✅ If no trade in props, check Firebase
-      tradeRef.once('value')
+      // Opened without context (inbox, profile): show whatever this pair last
+      // talked about. A trade wins over a post, as the strip is more useful.
+      get(tradeRef)
         .then((snapshot) => {
           if (snapshot.exists()) {
             const tradeData = snapshot.val();
             if (tradeData && typeof tradeData === 'object') {
-              setTrade(tradeData);
+              // Older builds wrote feed POSTS into /trade too. Only a real
+              // trade has item lists; showing a post here drew an empty trade
+              // strip and hid the post card. Treat those as the post (the
+              // /post read below wins if it finds one).
+              if (tradeData.hasItems || tradeData.wantsItems) {
+                setTrade(tradeData);
+              } else if (tradeData.desc || tradeData.imageUrl) {
+                setPost((prev) => prev || tradeData);
+              }
             }
           }
         })
         .catch((error) => {
           console.error("Error fetching trade from Firebase:", error);
         });
+      get(postRef)
+        .then((snapshot) => {
+          if (snapshot.exists()) {
+            const postData = snapshot.val();
+            if (postData && typeof postData === 'object') {
+              setPost(postData);
+            }
+          }
+        })
+        .catch((error) => {
+          console.error("Error fetching post from Firebase:", error);
+        });
     }
-  }, [item, myUserId, selectedUserId, appdatabase]);
+  }, [item, itemKind, myUserId, selectedUserId, appdatabase]);
   
   // ✅ Memoize grouped items
   const groupedHasItems = useMemo(() => {
@@ -492,6 +606,11 @@ showSuccessMessage(
   const getImageUrl = resolveItemImage;
 
   // ✅ Memoize sendMessage
+  //
+  // Returns true once the message is stored, false when it was refused or
+  // failed. PrivateMessageInput clears the box before calling this and puts
+  // the text, photos and items back on false — so every early return below
+  // must return false, or the user loses what they typed.
   const sendMessage = useCallback(async (text, image, fruits) => {
     // Guard for a stale screen — the input is already disabled when this door
     // is shut, so this only fires if the switch flipped while the chat was open.
@@ -506,47 +625,42 @@ showSuccessMessage(
             ? 'You have disabled trade chat. Turn it back on in Settings.'
             : 'You have disabled chat. Turn it back on in Settings.')
       );
-      return;
+      return false;
     }
+
+    // Same ban / strike gate the public chat applies (Trader.jsx).
+    if (rejectIfBanned()) return false;
 
     const trimmedText = (text || '').trim(); // safe guard
     // Handle both single image (string) and multiple images (array)
     const hasImage = !!image && (typeof image === 'string' || (Array.isArray(image) && image.length > 0));
     const hasFruits = Array.isArray(fruits) && fruits.length > 0;
-  
+
     // ✅ Validate fruits count - maximum 18 fruits allowed
     if (hasFruits && fruits.length > 18) {
       showErrorMessage(t("home.alert.error"), t('private_chat.max_pets_error'));
-      return;
+      return false;
     }
-  
+
     // Block only if there's no text, no image AND no fruits
     if (!trimmedText && !hasImage && !hasFruits) {
       showErrorMessage(t("home.alert.error"), t("chat.cannot_empty"));
-      return;
+      return false;
     }
-  
+
     // ✅ Safety checks
     if (!myUserId || !selectedUserId || !appdatabase) {
       showErrorMessage(t("home.alert.error"), t('private_chat.missing_data'));
-      return;
+      return false;
     }
 
     // ⚠️ NOTE: Block prevention check is missing here
     // Currently, blocked users can still send messages (they're just filtered on receiver's side)
     // See BLOCK_FUNCTIONALITY_ANALYSIS.md for details and recommended solution
 
-    setInput(''); // clear input, image & fruits already cleared in PrivateMessageInput
-  
     const timestamp = Date.now();
     const chatId = [myUserId, selectedUserId].sort().join('_');
-  
-    // References
-    const messageRef = ref(appdatabase, `private_messages/${chatId}/messages/${timestamp}`);
-    const senderChatRef = ref(appdatabase, `chat_meta_data/${myUserId}/${selectedUserId}`);
-    const receiverChatRef = ref(appdatabase, `chat_meta_data/${selectedUserId}/${myUserId}`);
-    const receiverStatusRef = ref(appdatabase, `users/${selectedUserId}/activeChat`);
-  
+
     // Build message payload
     const messageData = {
       text: trimmedText,
@@ -579,42 +693,55 @@ showSuccessMessage(
     const petsCountStr = hasFruits ? (fruits.length === 1 ? t('private_chat.pets_count_singular', { count: fruits.length }) : t('private_chat.pets_count_plural', { count: fruits.length })) : '';
     const lastMessagePreview = trimmedText || (hasImage ? photosCountStr : hasFruits ? petsCountStr : '');
   
+    // One atomic multi-path write: the message and both inbox rows land
+    // together or not at all. These used to be four sequential writes, so an
+    // app killed mid-send left a message the recipient never saw in their
+    // inbox, with no unread badge and no push.
+    //
+    // Every inbox field is its own path. Writing the row as a single object
+    // would REPLACE it and wipe fields this client does not own — `muted` in
+    // particular, which the recipient sets from their inbox bell.
+    //
+    // The recipient's unreadCount always goes up by one, server-side. The old
+    // code first read users/{uid}/activeChat to skip the bump for a reader,
+    // but nothing writes that path, so the read was wasted. The reader clears
+    // its own count when it leaves the chat (see the focus effect), and the
+    // push function already stays silent for the chat that is open.
+    const senderPath = `chat_meta_data/${myUserId}/${selectedUserId}`;
+    const receiverPath = `chat_meta_data/${selectedUserId}/${myUserId}`;
+    const updates = {
+      [`private_messages/${chatId}/messages/${timestamp}`]: messageData,
+
+      [`${senderPath}/chatId`]: chatId,
+      [`${senderPath}/receiverId`]: selectedUserId,
+      [`${senderPath}/receiverName`]: selectedUser?.sender || t('private_chat.anonymous'),
+      [`${senderPath}/receiverAvatar`]: selectedUser?.avatar || GAME.defaultAvatar,
+      [`${senderPath}/lastMessage`]: lastMessagePreview,
+      [`${senderPath}/timestamp`]: timestamp,
+      [`${senderPath}/unreadCount`]: 0,
+
+      [`${receiverPath}/chatId`]: chatId,
+      [`${receiverPath}/receiverId`]: myUserId,
+      [`${receiverPath}/receiverName`]: user?.displayName || t('private_chat.anonymous'),
+      [`${receiverPath}/receiverAvatar`]: user?.avatar || GAME.defaultAvatar,
+      [`${receiverPath}/lastMessage`]: lastMessagePreview,
+      [`${receiverPath}/timestamp`]: timestamp,
+      // notifyNewMessage fires on this counter rising — keep it an increment.
+      [`${receiverPath}/unreadCount`]: increment(1),
+    };
+
     try {
-      // Save the message
-      await messageRef.set(messageData);
-  
-      // Check if receiver is currently in the chat
-      const snapshot = await receiverStatusRef.once('value');
-      const isReceiverInChat = snapshot.val() === chatId;
-  
-      // Update sender's chat metadata
-      await senderChatRef.update({
-        chatId,
-        receiverId: selectedUserId,
-        receiverName: selectedUser?.sender || t('private_chat.anonymous'),
-        receiverAvatar: selectedUser?.avatar || "https://example.com/default-avatar.jpg",
-        lastMessage: lastMessagePreview,
-        timestamp,
-        unreadCount: 0,
-      });
-  
-      // Update receiver's chat metadata
-      await receiverChatRef.update({
-        chatId,
-        receiverId: myUserId,
-        receiverName: user?.displayName || t('private_chat.anonymous'),
-        receiverAvatar: user?.avatar || "https://example.com/default-avatar.jpg",
-        lastMessage: lastMessagePreview,
-        timestamp,
-        unreadCount: isReceiverInChat ? 0 : increment(1),
-      });
-  
+      await update(ref(appdatabase, '/'), updates);
+
+      setInput('');
       setReplyTo(null);
+      return true;
     } catch (error) {
       console.error("Error sending message:", error);
       Alert.alert(t('home.alert.error'), t('private_chat.send_failed'));
+      return false;
     }
-  }, [myUserId, selectedUserId, appdatabase, selectedUser, user, t, chatBlockedBy, chatType]);
+  }, [myUserId, selectedUserId, appdatabase, selectedUser, user, t, chatBlockedBy, chatType, rejectIfBanned]);
   
   
 
@@ -623,11 +750,14 @@ showSuccessMessage(
       if (!user?.id || !selectedUserId) return;
 
       const chatMetaRef = ref(appdatabase, `chat_meta_data/${user.id}/${selectedUserId}`);
+      unreadWhileFocusedRef.current = false;
 
-      // ✅ Reset unreadCount when entering chat
-      chatMetaRef.update({ unreadCount: 0 });
-
-      setActiveChat(user.id, chatKey);
+      // Mark this chat open FIRST, then clear the badge, so a message that
+      // lands in between is already silenced by the push function instead of
+      // notifying someone who is reading the chat.
+      setActiveChat(user.id, chatKey).then(() => {
+        update(chatMetaRef, { unreadCount: 0 }).catch(() => {});
+      });
 
       // ✅ Update lastRead timestamp for read receipts
       if (localState?.showReadReceipts ?? true) {
@@ -636,8 +766,15 @@ showSuccessMessage(
 
       return () => {
         clearActiveChat(user.id);
+        // Messages that arrived while we were reading still bumped our
+        // unreadCount (the sender always increments). Clear it on the way out
+        // so the inbox does not show a phantom badge for a chat already read.
+        if (unreadWhileFocusedRef.current) {
+          unreadWhileFocusedRef.current = false;
+          update(chatMetaRef, { unreadCount: 0 }).catch(() => {});
+        }
       };
-    }, [user?.id, selectedUserId, chatKey])
+    }, [user?.id, selectedUserId, chatKey, appdatabase])
   );
   // console.log(selectedUser.senderId)
 
@@ -674,9 +811,16 @@ useEffect(() => {
       newMessage.timestamp = Date.now();
     }
 
-    // ✅ Update lastRead when receiving a new message while in chat
-    if (newMessage.senderId !== myUserId && myUserId && (localState?.showReadReceipts ?? true)) {
-      updateLastRead(chatKey, myUserId);
+    if (newMessage.senderId && newMessage.senderId !== myUserId && myUserId) {
+      // The sender bumped our unreadCount for this one; clear it on leave.
+      // (limitToLast(1) also replays the newest existing message on attach,
+      // which can cost one redundant reset write per visit — cheaper than a
+      // read to tell the two apart.)
+      unreadWhileFocusedRef.current = true;
+      // ✅ Update lastRead when receiving a new message while in chat
+      if (localState?.showReadReceipts ?? true) {
+        updateLastRead(chatKey, myUserId);
+      }
     }
 
     setMessages(prev => {
@@ -722,28 +866,10 @@ useEffect(() => {
                           source={{ uri: getImageUrl(hasItem) || GAME.defaultAvatar }}
                           style={{ width: 30, height: 30}}
                         />
-                        <View style={{ flexDirection: 'row', flexWrap: 'wrap', justifyContent: 'center', gap: SPACE.hair, marginTop: SPACE.hair }}>
-                          {hasItem.isFly && (
-                            <View style={{ backgroundColor: '#3498db', paddingHorizontal: 1, paddingVertical: 1, borderRadius: 8 }}>
-                              <Text style={{ color: 'white', fontSize: SIZE.label, textAlign: 'center' }}>F</Text>
-                            </View>
-                          )}
-                          {hasItem.isRide && (
-                            <View style={{ backgroundColor: '#e74c3c', paddingHorizontal: 1, paddingVertical: 1, borderRadius: 8 }}>
-                              <Text style={{ color: 'white', fontSize: SIZE.label, textAlign: 'center' }}>R</Text>
-                            </View>
-                          )}
-                          {hasItem.valueType === 'm' && (
-                            <View style={{ backgroundColor: '#9b59b6', paddingHorizontal: 1, paddingVertical: 1, borderRadius: 8 }}>
-                              <Text style={{ color: 'white', fontSize: SIZE.label, textAlign: 'center' }}>M</Text>
-                            </View>
-                          )}
-                          {hasItem.valueType === 'n' && (
-                            <View style={{ backgroundColor: '#2ecc71', paddingHorizontal: 1, paddingVertical: 1, borderRadius: 8 }}>
-                              <Text style={{ color: 'white', fontSize: SIZE.label, textAlign: 'center' }}>N</Text>
-                            </View>
-                          )}
-                        </View>
+                        {/* The F/R/M/N (Fly/Ride/Mega/Neon) badges that sat
+                            here were Adopt Me pet variants. Fisch trade items
+                            (serializeTradeItem) never carry those fields, so
+                            they could not render and were removed. */}
                         {hasItem.count > 1 && (
                           <View style={{ position: 'absolute', top: 0, right: 0, backgroundColor: '#e74c3c', borderRadius: 8, paddingHorizontal: 1, paddingVertical: 1 }}>
                             <Text style={{ color: 'white', fontSize: SIZE.label}}>{hasItem.count}</Text>
@@ -762,28 +888,6 @@ useEffect(() => {
                           source={{ uri: getImageUrl(wantitem) || GAME.defaultAvatar }}
                           style={{ width: 35, height: 35 }}
                         />
-                        <View style={{ flexDirection: 'row', flexWrap: 'wrap', justifyContent: 'center', gap: SPACE.hair, marginTop: SPACE.hair }}>
-                          {wantitem.isFly && (
-                            <View style={{ backgroundColor: '#3498db', paddingHorizontal: 1, paddingVertical: 1, borderRadius: 8 }}>
-                              <Text style={{ color: 'white', fontSize: SIZE.label, textAlign: 'center' }}>F</Text>
-                            </View>
-                          )}
-                          {wantitem.isRide && (
-                            <View style={{ backgroundColor: '#e74c3c', paddingHorizontal: 1, paddingVertical: 1, borderRadius: 8 }}>
-                              <Text style={{ color: 'white', fontSize: SIZE.label, textAlign: 'center' }}>R</Text>
-                            </View>
-                          )}
-                          {wantitem.valueType === 'm' && (
-                            <View style={{ backgroundColor: '#9b59b6', paddingHorizontal: 1, paddingVertical: 1, borderRadius: 8 }}>
-                              <Text style={{ color: 'white', fontSize: SIZE.label, textAlign: 'center' }}>M</Text>
-                            </View>
-                          )}
-                          {wantitem.valueType === 'n' && (
-                            <View style={{ backgroundColor: '#2ecc71', paddingHorizontal: 1, paddingVertical: 1, borderRadius: 8 }}>
-                              <Text style={{ color: 'white', fontSize: SIZE.label, textAlign: 'center' }}>N</Text>
-                            </View>
-                          )}
-                        </View>
                         {wantitem.count > 1 && (
                           <View style={{ position: 'absolute', top: 0, right: 0, backgroundColor: '#e74c3c', borderRadius: 8, paddingHorizontal: 1, paddingVertical: 1 }}>
                             <Text style={{ color: 'white', fontSize: SIZE.label }}>{wantitem.count}</Text>
@@ -795,7 +899,38 @@ useEffect(() => {
                 </View>
                 </View>
               )}
-             
+
+              {/* Small reminder of the feed post this chat started from, in
+                  place of the trade strip a post used to (wrongly) render as. */}
+              {!trade && post && (
+                <View style={{
+                  flexDirection: 'row',
+                  alignItems: 'center',
+                  gap: SPACE.sm,
+                  paddingHorizontal: SPACE.md,
+                  paddingVertical: SPACE.xs,
+                  borderBottomWidth: 1,
+                  borderBottomColor: themeColors.border,
+                  backgroundColor: themeColors.card,
+                }}>
+                  {Array.isArray(post.imageUrl) && typeof post.imageUrl[0] === 'string' && (
+                    <Image
+                      source={{ uri: post.imageUrl[0] }}
+                      style={{ width: 28, height: 28, borderRadius: 4 }}
+                    />
+                  )}
+                  <View style={{ flex: 1 }}>
+                    <Text style={{ fontSize: SIZE.label, fontFamily: FONT.bold, color: themeColors.textMuted }}>
+                      {t('feed.about_post', { defaultValue: 'About a post' })}
+                    </Text>
+                    {!!post.desc && (
+                      <Text numberOfLines={1} style={{ fontSize: SIZE.small, color: themeColors.text, fontFamily: FONT.regular }}>
+                        {post.desc}
+                      </Text>
+                    )}
+                  </View>
+                </View>
+              )}
 
              {messages.length === 0 ? (
   // No messages yet
@@ -823,13 +958,25 @@ useEffect(() => {
     isBanned={isBanned}
     selectedUser={selectedUser}
     user={user}
-    onReply={(message) => setReplyTo(message)}
+    onReply={setReplyTo} // stable, so memo(PrivateMessageList) holds while typing
     canRate={canRate}
     hasRated={hasRated}
     setShowRatingModal={setShowRatingModal}
     otherLastRead={(localState?.showReadReceipts ?? true) ? otherLastRead : null}
+    chatKey={chatKey}
   />
 )}
+
+              {/* Says why the input is dead for a banned or muted user, so a
+                  disabled box never reads as the app being broken. */}
+              {isMeBanned && !isChatUnavailable && (
+                <View style={styles.chatUnavailableBanner}>
+                  <Text style={styles.chatUnavailableIcon}>⛔</Text>
+                  <Text style={styles.chatUnavailableText}>
+                    {t('chat.banned_message', { defaultValue: 'You are banned from sending messages.' })}
+                  </Text>
+                </View>
+              )}
 
               {isChatUnavailable && (
                 <View style={styles.chatUnavailableBanner}>
@@ -848,7 +995,7 @@ useEffect(() => {
 
               <PrivateMessageInput
                 onSend={sendMessage}
-                isBanned={isBanned || isChatUnavailable}
+                isBanned={isBanned || isChatUnavailable || isMeBanned}
                 bannedUsers={bannedUsers}
                 replyTo={replyTo}
                 onCancelReply={() => setReplyTo(null)}
@@ -889,96 +1036,112 @@ useEffect(() => {
 
         </View>
       </GestureHandlerRootView>
-      {showRatingModal && (
-  <View
-    style={{
-      position: 'absolute',
-      top: 0, left: 0, right: 0, bottom: 0,
-      backgroundColor: 'rgba(0,0,0,0.5)',
-      justifyContent: 'center',
-      alignItems: 'center',
-      zIndex: 9999,
-    }}
-  >
-    <View
-      style={{
-        backgroundColor: 'white',
-        padding: SPACE.xxxl,
-        borderRadius: 10,
-        width: '80%',
-        alignItems: 'center',
-        position: 'relative',
-      }}
-    >
-      {/* ❌ Close Button */}
-      <TouchableOpacity
-        onPress={() => setShowRatingModal(false)}
-        style={{
-          position: 'absolute',
-          top: -5,
-          right: 1,
-          zIndex: 100,
-          padding: 5,
-        }}
+      {/* Rating dialog. A real Modal now: as a plain absolute overlay the
+          Android keyboard (edge-to-edge no longer resizes the activity) slid
+          over the review box and the Submit button, and nothing inside a
+          sibling KeyboardAvoidingView could move it. ModalKeyboardView lets the
+          modal window resize on Android and pads on iOS — see its comments.
+          The card was also hardcoded white, so dark mode got a white card. */}
+      <Modal
+        visible={showRatingModal}
+        transparent
+        animationType="fade"
+        onRequestClose={() => setShowRatingModal(false)}
       >
-        <Text style={{ fontSize: SIZE.subtitle, color: '#888' }}>✖</Text>
-      </TouchableOpacity>
+        <ModalKeyboardView
+          style={{
+            flex: 1,
+            backgroundColor: 'rgba(0,0,0,0.5)',
+            justifyContent: 'center',
+            alignItems: 'center',
+          }}
+        >
+          <View
+            style={{
+              backgroundColor: themeColors.card,
+              borderWidth: 1,
+              borderColor: themeColors.border,
+              padding: SPACE.xxxl,
+              borderRadius: 10,
+              width: '80%',
+              alignItems: 'center',
+              position: 'relative',
+            }}
+          >
+            {/* ❌ Close Button */}
+            <TouchableOpacity
+              onPress={() => setShowRatingModal(false)}
+              style={{
+                position: 'absolute',
+                top: -5,
+                right: 1,
+                zIndex: 100,
+                padding: 5,
+              }}
+            >
+              <Text style={{ fontSize: SIZE.subtitle, color: themeColors.textMuted }}>✖</Text>
+            </TouchableOpacity>
 
-      {/* Title */}
-      <Text style={{ fontSize: SIZE.subtitle, marginBottom: SPACE.lg, textAlign: 'center', fontFamily: FONT.regular }}>
-        {t('private_chat.rate_trader')}
-      </Text>
-
-      {/* Stars */}
-      <View style={{ flexDirection: 'row', justifyContent: 'center', marginBottom: 15 }}>
-        {[1, 2, 3, 4, 5].map((num) => (
-          <TouchableOpacity key={num} onPress={() => setRating(num)}>
-            <Text style={{ fontSize: SIZE.display, color: num <= rating ? '#FFD700' : '#ccc', marginHorizontal: SPACE.xs }}>
-              ★
+            {/* Title */}
+            <Text style={{ fontSize: SIZE.subtitle, marginBottom: SPACE.lg, textAlign: 'center', fontFamily: FONT.regular, color: themeColors.text }}>
+              {t('private_chat.rate_trader')}
             </Text>
-          </TouchableOpacity>
-        ))}
-      </View>
-      {/* Review input (optional) */}
-<TextInput
-  style={{
-    width: '100%',
-    minHeight: 60,
-    borderWidth: 1,
-    borderColor: '#ddd',
-    borderRadius: 8,
-    paddingHorizontal: SPACE.lg,
-    paddingVertical: SPACE.md,
-    marginBottom: SPACE.xl,
-    textAlignVertical: 'top',
-    fontSize: SIZE.body,
-  }}
-  placeholder={t('private_chat.write_review')}
-  placeholderTextColor={isDarkMode ? '#999' : '#888'}
-  multiline
-  value={reviewText}
-  onChangeText={setReviewText}
-/>
 
+            {/* Stars */}
+            <View style={{ flexDirection: 'row', justifyContent: 'center', marginBottom: 15 }}>
+              {[1, 2, 3, 4, 5].map((num) => (
+                <TouchableOpacity key={num} onPress={() => setRating(num)}>
+                  <Text style={{ fontSize: SIZE.display, color: num <= rating ? '#FFD700' : themeColors.border, marginHorizontal: SPACE.xs }}>
+                    ★
+                  </Text>
+                </TouchableOpacity>
+              ))}
+            </View>
 
-      {/* Submit Button */}
-      <TouchableOpacity
-        style={{
-          backgroundColor: config.colors.primary,
-          paddingVertical: SPACE.lg,
-          paddingHorizontal: SPACE.xxxl,
-          borderRadius: 8,
-          width: '100%',
-        }}
-        onPress={handleRating}
-      >
-        <Text style={{ color: 'white', fontSize: SIZE.body, textAlign: 'center' }}>
-       { !startRating ? t('private_chat.submit_rating') : t('private_chat.submitting')}
-        </Text>
-      </TouchableOpacity>
-    </View>
-  </View>
-)}
+            {/* Review input (optional) */}
+            <TextInput
+              style={{
+                width: '100%',
+                minHeight: 60,
+                borderWidth: 1,
+                borderColor: themeColors.inputBorder,
+                backgroundColor: themeColors.inputBg,
+                color: themeColors.text,
+                borderRadius: 8,
+                paddingHorizontal: SPACE.lg,
+                paddingVertical: SPACE.md,
+                marginBottom: SPACE.xl,
+                textAlignVertical: 'top',
+                fontSize: SIZE.body,
+              }}
+              placeholder={t('private_chat.write_review')}
+              placeholderTextColor={themeColors.textMuted}
+              multiline
+              value={reviewText}
+              onChangeText={setReviewText}
+            />
+
+            {/* Submit Button — disabled while saving so a double tap cannot
+                count the same rating twice in the summary average. */}
+            <TouchableOpacity
+              style={{
+                backgroundColor: config.colors.primary,
+                paddingVertical: SPACE.lg,
+                paddingHorizontal: SPACE.xxxl,
+                borderRadius: 8,
+                width: '100%',
+                opacity: startRating ? 0.6 : 1,
+              }}
+              onPress={handleRating}
+              disabled={startRating}
+            >
+              <Text style={{ color: 'white', fontSize: SIZE.body, textAlign: 'center' }}>
+                {!startRating ? t('private_chat.submit_rating') : t('private_chat.submitting')}
+              </Text>
+            </TouchableOpacity>
+          </View>
+        </ModalKeyboardView>
+      </Modal>
       {!localState.isPro && !noTabBar && (
         <View style={{ position: 'absolute', bottom: bannerBottomPos, left: 0, right: 0, alignItems: 'center', zIndex: 5 }}>
           <BannerAdComponent onHeightChange={setBannerHeight} />

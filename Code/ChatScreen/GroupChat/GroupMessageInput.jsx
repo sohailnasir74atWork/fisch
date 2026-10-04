@@ -58,7 +58,8 @@ const base64ToBytes = (base64) => {
 };
 
 const GroupMessageInput = ({
-  onSend,
+  onSend, // resolves false when the screen refused or failed the send
+  canSend, // optional (fruits) => boolean, checked before the box is cleared
   isBanned,
   petModalVisible,
   setPetModalVisible,
@@ -206,6 +207,22 @@ const GroupMessageInput = ({
       }
     }
 
+    // Ban / strike / group-mute / membership / item limit. Asked before
+    // anything is cleared, so a refused send leaves the text where it was.
+    if (typeof canSend === 'function' && !canSend(fruitsToSend)) {
+      return;
+    }
+
+    // Put the user's content back after a send that did not go through, so
+    // a failure never silently loses the text, images, or selected items.
+    const restoreContent = () => {
+      setInput(textToSend);
+      setImageUris(imagesToSend);
+      if (setSelectedFruits && typeof setSelectedFruits === 'function') {
+        setSelectedFruits(fruitsToSend);
+      }
+    };
+
     setIsSending(true);
     setInput('');
     setImageUris([]);
@@ -239,21 +256,24 @@ const GroupMessageInput = ({
       // Send single image URL if only one, or array if multiple
       const imageUrlToSend = imageUrls.length === 1 ? imageUrls[0] : (imageUrls.length > 1 ? imageUrls : null);
 
-      await onSend(textToSend, imageUrlToSend, fruitsToSend, replyTo);
-      
+      const sent = await onSend(textToSend, imageUrlToSend, fruitsToSend, replyTo);
+
+      // Strictly `false`: the screen refused or failed the send and has
+      // already told the user why, so restore without a second alert. (Any
+      // other value keeps the old behaviour for callers that return nothing.)
+      if (sent === false) {
+        restoreContent();
+        return;
+      }
+
       // Clear reply after successful send
       if (onCancelReply) {
         onCancelReply();
       }
     } catch (error) {
       console.error('Error sending message:', error);
-      // Restore the user's content so a failed send/upload doesn't silently
-      // lose the text, images, or selected pets they had typed.
-      setInput(textToSend);
-      setImageUris(imagesToSend);
-      if (setSelectedFruits && typeof setSelectedFruits === 'function') {
-        setSelectedFruits(fruitsToSend);
-      }
+      // Upload failures and unexpected errors land here.
+      restoreContent();
       Alert.alert('Error', 'Failed to send message.');
     } finally {
       setIsSending(false);
@@ -264,6 +284,7 @@ const GroupMessageInput = ({
     selectedFruits,
     isSending,
     onSend,
+    canSend,
     setSelectedFruits,
     localState?.isPro,
     uploadToBunny,
@@ -290,9 +311,11 @@ const GroupMessageInput = ({
     if (replyTo.imageUrl) {
       return '[Image]';
     }
+    // Display text only; the payload field stays `fruits`. Adopt Me's "pets"
+    // wording was wrong for Fisch items (fish, rods, skins, bobbers, lanterns).
     if (replyTo.hasFruits || (Array.isArray(replyTo.fruits) && replyTo.fruits.length > 0)) {
       const count = replyTo.fruitsCount || (Array.isArray(replyTo.fruits) ? replyTo.fruits.length : 0);
-      return count > 0 ? `[${count} pet(s) message]` : '[Pets message]';
+      return count > 0 ? `[${count} item(s) message]` : '[Items message]';
     }
     return '[Deleted message]';
   };
@@ -321,7 +344,7 @@ const GroupMessageInput = ({
         </View>
       )}
       <View style={styles.inputContainer}>
-        {/* Pets drawer icon */}
+        {/* Item picker icon. Was Adopt Me's cat (logo-octocat) for pets. */}
         <TouchableOpacity
           style={[styles.sendButton, { marginRight: 3, paddingHorizontal: 3 }]}
           onPress={() => {
@@ -331,7 +354,7 @@ const GroupMessageInput = ({
           }}
           disabled={isSending || isBanned}
         >
-          <Icon name="logo-octocat" size={20} color={isDark ? '#FFF' : '#000'} />
+          <Icon name="fish-outline" size={20} color={isDark ? '#FFF' : '#000'} />
         </TouchableOpacity>
 
         {/* Attach image */}
@@ -345,7 +368,11 @@ const GroupMessageInput = ({
 
         <TextInput
           style={[styles.input, { color: c.text }]}
-          placeholder={t('chat.type_message')}
+          // A banned user gets a disabled box; say why instead of leaving an
+          // input that silently ignores them.
+          placeholder={isBanned
+            ? t('chat.banned_message', { defaultValue: 'You are banned from sending messages.' })
+            : t('chat.type_message')}
           placeholderTextColor={isDark ? '#999' : '#888'}
           value={input}
           onChangeText={setInput}
@@ -409,7 +436,7 @@ const GroupMessageInput = ({
           }}
         >
           <Text style={{ color: c.textSecondary, fontSize: SIZE.caption }}>
-            {selectedFruits.length} pet(s) selected
+            {selectedFruits.length} item(s) selected
           </Text>
           <TouchableOpacity
             onPress={() => {

@@ -1,0 +1,41 @@
+Check Fisch values, compare offers and plan your next upgrade with Fisch Values Calculator. This unofficial companion combines an item value list, WFL trade calculator, rod comparison, fish sale estimates, event timers and codes.
+
+From looking up a rod skin to reviewing a proposed exchange, find reference tools for the decisions you make while playing Fisch.
+
+TRADE CALCULATOR AND WFL CHECKER
+Add items to both sides of a proposed trade and compare their listed totals. Review the Win, Fair or Lose assessment, then adjust the offer to explore alternatives. Whether you are considering one item or a bundle, use the comparison to understand the difference between what you give and what you receive.
+
+The WFL result is a reference based on available quotes. Consider item details and demand before deciding whether an offer works for you.
+
+FISCH VALUE LIST
+Search for an item by name or browse categories including fish, rod skins, boats, bobbers, gliders and lanterns. Check available trading values and see when a quote is missing. Look up an unfamiliar item before adding it to a proposed trade.
+
+Use the catalogue as a companion while exploring your collection or planning your next exchange. Not every catalogue item is tradeable, and not every tradeable item has a published value.
+
+ROD GUIDE AND SIDE-BY-SIDE COMPARISON
+Choosing a fishing rod involves more than one stat. Compare luck, lure speed, control, resilience, line distance and maximum weight. Sort the rod list by the attribute you want to explore and compare two rods side by side.
+
+If you are looking for the best rod for your needs, use the comparison to weigh the differences yourself. A rod with greater luck may offer a different balance of control or resilience.
+
+FISH VALUE AND MUTATION CALCULATOR
+Estimate how much a catch could sell for to an NPC in C$. Select a fish, enter its weight and choose supported mutations to explore how those inputs affect the calculation. Compare different catch details without confusing a merchant sale estimate with a player trade quote.
+
+Fish sale value and trading value answer different questions. The sale calculator estimates in-game cash; the trade calculator compares available item quotes.
+
+ADMIN ABUSE AND BLACK MARKET TIMERS
+View countdowns for Admin Abuse, the Black Market and weekly updates using the schedule information available in the app. Check the accompanying notes for timing uncertainty when planning your next session.
+
+Schedules may be community-reported or incomplete, and the game developers can change event times. Treat the timers as planning references rather than guaranteed start times.
+
+FISCH CODES
+Browse the available code list and copy a code to try in the game. Codes may expire or have redemption requirements. Rewards and availability are controlled by the game developers, and the companion app does not redeem codes on your behalf.
+
+TRADE POSTS AND COMMUNITY CHAT
+Browse player trade posts, share proposed offers and discuss items through the app's community features. Use the calculator to review an offer before deciding what to discuss with another player. Any resulting in-game exchange takes place in Fisch.
+
+When quotes are missing, review the incomplete value result before trading. An unpriced item may still matter to players. Use the available figures as context when weighing up the whole trade offer.
+
+ABOUT THIS COMPANION
+Values are estimates, not guaranteed prices. Actual offers depend on item details, demand and the players involved. Missing quotes or game changes can affect results. A comparison does not guarantee profit, acceptance or a completed trade.
+
+Fisch Values Calculator is an independent, unofficial fan-made companion for Fisch on Roblox. It is not affiliated with, endorsed by or sponsored by the developers of Fisch or Roblox Corporation. Game names and trademarks belong to their respective owners. This app provides reference information and planning tools; it does not perform in-game trades or grant game items.

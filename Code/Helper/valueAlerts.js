@@ -8,7 +8,7 @@
  * users holding/wanting that item get the push. No server-side subscriber
  * storage needed — FCM topics do the fan-out.
  */
-import messaging from '@react-native-firebase/messaging';
+import { getMessaging, onMessage, requestPermission, subscribeToTopic, unsubscribeFromTopic } from '@react-native-firebase/messaging';
 import notifee, { AndroidImportance } from '@notifee/react-native';
 
 let mmkv = null;
@@ -40,15 +40,19 @@ export const slugItem = (name) =>
  * the app. Call once at startup (index.js); returns the unsubscribe fn.
  */
 export function initValueAlertForegroundHandler() {
-  return messaging().onMessage(async (msg) => {
+  return onMessage(getMessaging(), async (msg) => {
     try {
-      if (msg?.data?.kind !== 'value_change') return;
+      // Value alerts and event-timer pushes (functions/eventTimers.js) both
+      // need showing by hand while the app is open.
+      const kind = msg?.data?.kind;
+      if (kind !== 'value_change' && kind !== 'event_timer') return;
       const title = msg?.notification?.title;
       const body = msg?.notification?.body;
       if (!title && !body) return;
+      const channelId = kind === 'event_timer' ? 'event_timers' : 'value_alerts';
       await notifee.createChannel({
-        id: 'value_alerts',
-        name: 'Value Alerts',
+        id: channelId,
+        name: kind === 'event_timer' ? 'Event timers' : 'Value Alerts',
         importance: AndroidImportance.HIGH,
       });
       await notifee.displayNotification({
@@ -56,8 +60,11 @@ export function initValueAlertForegroundHandler() {
         body,
         data: msg?.data || {},
         android: {
-          channelId: 'value_alerts',
-          smallIcon: 'ic_launcher',
+          channelId,
+          // Status-bar icon must be a white silhouette; the full-colour
+          // launcher icon rendered as a blank white square.
+          smallIcon: 'ic_stat_clown_fish',
+          color: '#E63A2E',
           pressAction: { id: 'default' },
         },
       });
@@ -92,12 +99,12 @@ export async function syncValueAlertTopics(itemNames) {
     // Safe on both platforms; on iOS this is the standard permission ask,
     // on Android 13+ it maps to POST_NOTIFICATIONS.
     try {
-      await messaging().requestPermission();
+      await requestPermission(getMessaging());
     } catch (_) {}
 
     await Promise.all([
-      ...toAdd.map((t) => messaging().subscribeToTopic(t).catch(() => {})),
-      ...toRemove.map((t) => messaging().unsubscribeFromTopic(t).catch(() => {})),
+      ...toAdd.map((t) => subscribeToTopic(getMessaging(), t).catch(() => {})),
+      ...toRemove.map((t) => unsubscribeFromTopic(getMessaging(), t).catch(() => {})),
     ]);
     mmkv?.set(KEY, JSON.stringify([...wanted]));
   } catch (_) {

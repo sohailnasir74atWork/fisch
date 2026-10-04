@@ -4,6 +4,7 @@ import { BannerAd, BannerAdSize } from 'react-native-google-mobile-ads';
 import getAdUnitId from './ads';
 import { useLocalState } from '../LocalGlobelStats';
 import { adsEnabled } from './adsEnabled';
+import { useAdsReady } from './adsGate';
 
 // NPA gating: only force non-personalized ads when we truly have to.
 // Forcing NPA on every user (the old behaviour) cut eCPM ~40-60% for ~80%
@@ -52,6 +53,10 @@ const BannerAdComponent = ({
   // we stop interfering, so we never remount a working banner.
   const [reloadKey, setReloadKey] = useState(0);
   const hasEverLoaded = useRef(false);
+  // The remount re-runs this handler on the next failure with the timer
+  // already cleared, so without this guard the "one" retry became a 30 s loop
+  // for the whole screen visit in no-fill geos.
+  const retriedOnce = useRef(false);
   const retryTimer = useRef(null);
 
   const handleAdLoaded = useCallback(() => {
@@ -62,7 +67,8 @@ const BannerAdComponent = ({
   const handleAdFailedToLoad = useCallback(() => {
     setIsAdLoaded(false);
     // Only nudge the first-ever load; let the SDK own refresh failures.
-    if (hasEverLoaded.current || retryTimer.current) return;
+    if (hasEverLoaded.current || retriedOnce.current || retryTimer.current) return;
+    retriedOnce.current = true;
     retryTimer.current = setTimeout(() => {
       retryTimer.current = null;
       setReloadKey((k) => k + 1);
@@ -107,7 +113,11 @@ const BannerAdComponent = ({
   // this is 0 until an ad loads and exactly the ad's height afterwards.
   const [measuredHeight, setMeasuredHeight] = useState(0);
 
-  const suppressed = !adsEnabled() || !!localState?.isPro || !visible;
+  // Not before consent + SDK init (adsGate.js). Mounting a BannerAd creates
+  // the ad WebView on the UI thread, so doing it during Home's first render
+  // also cost the first frame on low-end Android.
+  const adsReady = useAdsReady();
+  const suppressed = !adsEnabled() || !!localState?.isPro || !visible || !adsReady;
   const showingAd = !suppressed && isAdLoaded;
 
   // Hold the callback in a ref so an inline arrow from the parent can't make

@@ -54,8 +54,13 @@ const STATUS_CACHE_TTL = 30 * 60 * 1000;       // 30 min — refetch only after 
 const FOLLOWING_CACHE_TTL = 30 * 60 * 1000;    // 30 min
 const FOLLOWING_CHUNK_SIZE = 30;               // Firestore 'in' limit
 // Feed = everyone you follow, then the newest statuses from everyone else.
-const GLOBAL_STATUS_LIMIT = 15;                // Latest N from the wider app
-const GLOBAL_FETCH_LIMIT = 15;                 // One query, exactly what we show
+// The feed groups statuses into ONE BUBBLE PER USER, so a cap on statuses is
+// not a cap on what the user sees: the 15 newest statuses can easily come from
+// a handful of prolific posters, leaving the row with a few bubbles while
+// dozens of users have something live. Cap distinct USERS instead, and read a
+// wide enough window to find them.
+const GLOBAL_USER_LIMIT = 20;                  // Max global (non-following) BUBBLES
+const GLOBAL_FETCH_LIMIT = 60;                 // Window to pick those bubbles from
 // Hard bound on the following query, which previously had none.
 const FOLLOWING_FETCH_LIMIT = 40;
 
@@ -189,8 +194,16 @@ const ShimmerPlaceholder = ({ style }) => {
 };
 
 // ── Image with loading shimmer ──
-const LoadingImage = ({ source, style, resizeMode = 'cover', borderRadius }) => {
+// A failed load swaps to `fallbackUri` (avatars) or just ends the shimmer, so
+// a dead URL never leaves a spinner running forever.
+const LoadingImage = ({ source, style, resizeMode = 'cover', borderRadius, fallbackUri }) => {
   const [loaded, setLoaded] = useState(false);
+  const [failed, setFailed] = useState(false);
+  const shown = failed && fallbackUri ? { uri: fallbackUri } : source;
+  const handleError = () => {
+    if (!failed && fallbackUri && source?.uri !== fallbackUri) setFailed(true);
+    else setLoaded(true);
+  };
   return (
     <View style={[style, { overflow: 'hidden', borderRadius: borderRadius || style?.borderRadius || 0 }]}>
       {!loaded && (
@@ -199,10 +212,11 @@ const LoadingImage = ({ source, style, resizeMode = 'cover', borderRadius }) => 
         />
       )}
       <Image
-        source={source}
+        source={shown}
         style={[style, { position: loaded ? 'relative' : 'absolute', opacity: loaded ? 1 : 0 }]}
         resizeMode={resizeMode}
         onLoad={() => setLoaded(true)}
+        onError={handleError}
       />
     </View>
   );
@@ -433,9 +447,19 @@ const StatusFeed = ({ user, firestoreDB, appdatabase, isDarkMode, onRequireSignI
       }
 
       const followingSet = new Set([user?.id, ...followingIds]);
+      // Take whole users, newest-first, until we have GLOBAL_USER_LIMIT of
+      // them — NOT the first N statuses. Slicing statuses let one prolific
+      // poster eat most of the row; this gives every included user their full
+      // story (multiple frames) while still bounding the bubble count.
+      const globalUsers = new Set();
       const globalOnly = (globalResults || [])
         .filter(s => !followingSet.has(s.userId))
-        .slice(0, GLOBAL_STATUS_LIMIT);
+        .filter((s) => {
+          if (globalUsers.has(s.userId)) return true;      // another frame for an included user
+          if (globalUsers.size >= GLOBAL_USER_LIMIT) return false;
+          globalUsers.add(s.userId);
+          return true;
+        });
 
       const allRaw = [...(followingResults || []), ...globalOnly];
       const grouped = groupStatuses(allRaw, user?.id);
@@ -873,6 +897,7 @@ const StatusFeed = ({ user, firestoreDB, appdatabase, isDarkMode, onRequireSignI
               <View style={[styles.gradientRingInner, { backgroundColor: isDarkMode ? config.colors.backgroundDark : '#fff' }]}>
                 <LoadingImage
                   source={{ uri: item.userAvatar || GAME.defaultAvatar }}
+                  fallbackUri={GAME.defaultAvatar}
                   style={styles.bubbleAvatar}
                   borderRadius={(BUBBLE_SIZE - 4) / 2}
                 />
@@ -883,6 +908,7 @@ const StatusFeed = ({ user, firestoreDB, appdatabase, isDarkMode, onRequireSignI
           <View style={[styles.bubbleRing, ringStyle]}>
             <LoadingImage
               source={{ uri: item.userAvatar || GAME.defaultAvatar }}
+              fallbackUri={GAME.defaultAvatar}
               style={styles.bubbleAvatar}
               borderRadius={(BUBBLE_SIZE - 4) / 2}
             />
@@ -924,7 +950,7 @@ const StatusFeed = ({ user, firestoreDB, appdatabase, isDarkMode, onRequireSignI
 
   return (
     <View style={[styles.container, { borderBottomColor: isDarkMode ? config.colors.surfaceDark : 'rgba(0,0,0,0.05)' }]}>
-      <FlatList
+      <FlatList removeClippedSubviews={false}
         data={feedData}
         horizontal
         showsHorizontalScrollIndicator={false}

@@ -9,16 +9,19 @@ import {
   Modal,
   FlatList,
   Image,
+  AppState,
 } from 'react-native';
-import { useFocusEffect, useRoute, useNavigation } from '@react-navigation/native';
+import { useFocusEffect, useRoute, useNavigation, useTheme } from '@react-navigation/native';
 import { getStyles } from '../Style';
 import GroupMessageInput from './GroupMessageInput';
 import GroupMessageList from './GroupMessageList';
 import { useGlobalState } from '../../GlobelStats';
 import { GestureHandlerRootView } from 'react-native-gesture-handler';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import { setActiveChat, clearActiveChat, setActiveGroupChat, clearActiveGroupChat } from '../utils';
-import { get, ref, update, query as dbQuery, orderByKey, limitToLast, orderByValue, equalTo } from '@react-native-firebase/database';
+// setActiveChat/clearActiveChat are deliberately NOT used here: they are the
+// PRIVATE-chat helpers (see the focus effect below).
+import { setActiveGroupChat, clearActiveGroupChat } from '../utils';
+import { get, ref, update, onValue, query as dbQuery, orderByKey, limitToLast, orderByValue, equalTo } from '@react-native-firebase/database';
 import { useTranslation } from 'react-i18next';
 import ConditionalKeyboardWrapper from '../../Helper/keyboardAvoidingContainer';
 import { sendGroupMessage, removeMemberFromGroup, hasGroupPermission, getPendingInviteForGroup, acceptGroupInvite, declineGroupInvite, leaveGroup, makeMemberCreator } from '../utils/groupUtils';
@@ -26,6 +29,8 @@ import { doc, getDoc, onSnapshot, collection, query, where, getDocs } from '@rea
 import { Menu, MenuOptions, MenuOption, MenuTrigger } from 'react-native-popup-menu';
 import Icon from 'react-native-vector-icons/Ionicons';
 import { showSuccessMessage, showErrorMessage } from '../../Helper/MessageHelper';
+import { showMessage } from 'react-native-flash-message';
+import { serverNowMs } from '../../Helper/serverTime';
 import ProfileBottomDrawer from './BottomDrawer';
 import { isUserOnline } from '../utils';
 import { useLocalState } from '../../LocalGlobelStats';
@@ -47,7 +52,14 @@ const GroupChatScreen = () => {
   const navigation = useNavigation();
   const { groupId } = route.params || {};
 
-  const { user, theme, appdatabase, firestoreDB } = useGlobalState();
+  const { user, theme, appdatabase, firestoreDB, strikeInfo, isUserBlocked } = useGlobalState();
+  // The navigation theme is what the community chat passes to PrivateChat as
+  // `selectedTheme` (NavigationContainer's theme), so the DM opened from a
+  // group gets the same params.
+  const navTheme = useTheme();
+  // Hoisted from further down: sendMessage lists localState?.isPro in its
+  // deps, which are evaluated during render, before the old declaration.
+  const { localState } = useLocalState();
 
   // Seed MY OWN profile into the shared cache.
   // Chat message payloads are slim — they carry no frame/text-colour — so the
@@ -83,10 +95,18 @@ const GroupChatScreen = () => {
   const [selectedFruits, setSelectedFruits] = useState([]);
   const [replyTo, setReplyTo] = useState(null); // Reply to message state
   const [highlightedMessageId, setHighlightedMessageId] = useState(null); // Highlighted message ID
+  // The group doc does not exist (deleted, or a stale link). Its own state so
+  // the screen can say so instead of showing "Access Denied".
+  const [groupNotFound, setGroupNotFound] = useState(false);
   const flatListRef = useRef(null); // Ref for FlatList in GroupMessageList
   const lastLoadedKeyRef = useRef(null); // Oldest message ID (for pagination)
   const newestMessageIdRef = useRef(null); // Newest message ID (for real-time listener)
   const previousGroupIdRef = useRef(null);
+  // Unread bookkeeping (see the focus effect). Refs, not state: they are read
+  // from focus/blur callbacks and must not re-render or re-subscribe anything.
+  const isFocusedRef = useRef(false);
+  const unreadWhileFocusedRef = useRef(false);
+  const groupDataRef = useRef(null);
   const { t } = useTranslation();
 
   const isDarkMode = theme === 'dark';
@@ -104,12 +124,19 @@ const GroupChatScreen = () => {
     if (!groupId || !firestoreDB || !user?.id) return;
 
     setCheckingAccess(true);
+    setGroupNotFound(false);
     const groupRef = doc(firestoreDB, 'groups', groupId);
     const unsubscribe = onSnapshot(
       groupRef,
       async (snapshot) => {
-        if (snapshot.exists) {
-          const data = snapshot.data();
+        // exists() is a METHOD in RNFB v23. The bare `snapshot.exists` is a
+        // function reference and always truthy, so a deleted group fell into
+        // this branch, snapshot.data() was undefined, `data.memberIds` threw
+        // inside this async callback, and checkingAccess never cleared -- the
+        // screen spun forever.
+        if (snapshot.exists()) {
+          const data = snapshot.data() || {};
+          setGroupNotFound(false);
           setGroupData(data);
 
           // Check if user is a member
@@ -132,8 +159,12 @@ const GroupChatScreen = () => {
             setPendingInvite(null);
           }
         } else {
-          Alert.alert(t('home.alert.error'), t('group_chat.group_not_found'));
+          // Rendered as a not-found screen below (also covers a group deleted
+          // while it is open), rather than an alert over "Access Denied".
           setGroupData(null);
+          setIsMember(false);
+          setPendingInvite(null);
+          setGroupNotFound(true);
         }
         setCheckingAccess(false);
       },
@@ -478,6 +509,14 @@ const GroupChatScreen = () => {
         newMessage.timestamp = Date.now();
       }
 
+      // Someone else posted while we are looking at the chat. If our
+      // activeGroupChats flag had lapsed, their fan-out bumped our unread
+      // count even though we saw the message -- remember it so blur can
+      // zero it again.
+      if (isFocusedRef.current && newMessage.senderId && newMessage.senderId !== user?.id) {
+        unreadWhileFocusedRef.current = true;
+      }
+
       setMessages((prev) => {
         if (!Array.isArray(prev)) return [newMessage];
         const exists = prev.some((m) => String(m?.id) === String(newMessage.id));
@@ -504,29 +543,97 @@ const GroupChatScreen = () => {
         limitedRef.off('child_added', listener);
       }
     };
-  }, [messagesRef, isMember]); // Re-run when messagesRef or isMember changes
+  }, [messagesRef, isMember, user?.id]); // Re-run when messagesRef or isMember changes
+
+  // Latest group doc for the focus/blur callbacks below, which must not list
+  // groupData as a dependency (that would re-run focus on every doc change).
+  groupDataRef.current = groupData;
+
+  // Zero our unread count on our own group_meta_data row -- but ONLY when we
+  // are really a member. The old focus effect wrote `unreadCount: 0` for
+  // anyone who opened the screen, and update() on a missing row creates it,
+  // so a non-member (an invitee, a stale link) got a nameless "Group" row in
+  // their list. `repair` also re-stamps createdBy and memberCount from the
+  // live doc, which heals rows left stale by older builds.
+  const resetOwnGroupMeta = useCallback((data, repair = true) => {
+    if (!appdatabase || !user?.id || !groupId) return;
+    const memberIds = Array.isArray(data?.memberIds) ? data.memberIds : [];
+    if (!memberIds.includes(user.id)) return;
+
+    const updates = { unreadCount: 0 };
+    if (repair) {
+      updates.memberCount = memberIds.length;
+      if (data.createdBy) updates.createdBy = data.createdBy;
+    }
+    update(ref(appdatabase, `group_meta_data/${user.id}/${groupId}`), updates).catch((error) => {
+      console.error('Error resetting unread count:', error);
+    });
+  }, [appdatabase, user?.id, groupId]);
 
   // Set active chat and reset unread count
   useFocusEffect(
     useCallback(() => {
       if (!user?.id || !groupId) return;
 
-      // Set active chat (both for private chat pattern and group batch checking)
-      setActiveChat(user.id, groupId);
+      isFocusedRef.current = true;
+      unreadWhileFocusedRef.current = false;
+
+      // Only the GROUP flag. This used to call setActiveChat() as well, which
+      // is the private-chat helper: it wrote /activeChats/{uid} = groupId and
+      // a stray private_messages/{groupId}/unread/{uid} = 0 node, and its
+      // blur-time clear could wipe the flag a PrivateChat opened from this
+      // screen had just set.
       setActiveGroupChat(user.id, groupId);
 
-      // Reset unreadCount when entering chat
-      const groupMetaRef = ref(appdatabase, `group_meta_data/${user.id}/${groupId}`);
-      update(groupMetaRef, { unreadCount: 0 }).catch((error) => {
-        console.error('Error resetting unread count:', error);
+      // If the group doc has not loaded yet this is a no-op; the membership
+      // effect below does the reset once it arrives.
+      resetOwnGroupMeta(groupDataRef.current);
+
+      // activeGroupChats/{gid}/{uid} is removed by onDisconnect, and nothing
+      // put it back while the chat stayed open, so after any reconnect (app
+      // backgrounded, network blip) everyone else's messages counted as
+      // unread for us. Re-assert it on return to foreground and on reconnect,
+      // for as long as this screen is focused.
+      const appStateSub = AppState.addEventListener('change', (next) => {
+        if (next === 'active') setActiveGroupChat(user.id, groupId);
       });
+      let wasConnected = null;
+      const unsubConnected = appdatabase
+        ? onValue(ref(appdatabase, '.info/connected'), (snap) => {
+            const connected = snap.val() === true;
+            // Only the false -> true transition: the initial callback just
+            // reports the current state, and focus already set the flag.
+            if (connected && wasConnected === false) {
+              setActiveGroupChat(user.id, groupId);
+            }
+            wasConnected = connected;
+          })
+        : null;
 
       return () => {
-        clearActiveChat(user.id);
+        isFocusedRef.current = false;
+        appStateSub.remove();
+        if (typeof unsubConnected === 'function') unsubConnected();
         clearActiveGroupChat(user.id, groupId);
+        // Messages that arrived while we were reading may have bumped our
+        // count (see handleChildAdded). Clear once on the way out.
+        if (unreadWhileFocusedRef.current) {
+          unreadWhileFocusedRef.current = false;
+          resetOwnGroupMeta(groupDataRef.current, false);
+        }
       };
-    }, [user?.id, groupId, appdatabase])
+    }, [user?.id, groupId, appdatabase, resetOwnGroupMeta])
   );
+
+  // The group doc arrives after focus on first open, and membership can change
+  // while the chat is open (accepting the invite from this screen). Reset then.
+  const isRealMember = !!(user?.id && groupData?.memberIds?.includes(user.id));
+  const groupCreatedBy = groupData?.createdBy || null;
+  const groupMemberTotal = Array.isArray(groupData?.memberIds) ? groupData.memberIds.length : 0;
+  useEffect(() => {
+    if (!isFocusedRef.current || !isRealMember) return;
+    resetOwnGroupMeta(groupDataRef.current);
+  }, [isRealMember, groupCreatedBy, groupMemberTotal, resetOwnGroupMeta]);
 
   // Handle refresh
   const handleRefresh = useCallback(async () => {
@@ -600,7 +707,88 @@ const GroupChatScreen = () => {
     setReplyTo(null);
   }, []);
 
-  // Send message
+  // Can this user post here right now (and is the attachment within limits)?
+  // Shows the reason and returns false if not. GroupMessageInput calls it
+  // BEFORE clearing the box, so a refused send never wipes what was typed;
+  // sendMessage calls it again as the backstop.
+  //
+  // Group chat used to skip the ban check entirely (the input was handed
+  // isBanned={false}), so a banned or strike-muted user could keep talking
+  // in groups. Same gate as the community chat (Trader.jsx): isUserBlocked is
+  // the authoritative, server-time-validated flag; strikeInfo only formats
+  // the message.
+  const checkCanSend = useCallback((fruits = null) => {
+    if (isUserBlocked) {
+      showMessage({
+        message: t('chat.access_denied', { defaultValue: 'Access Denied' }),
+        description: t('chat.banned_message', { defaultValue: 'You are banned from sending messages.' }),
+        type: 'danger',
+      });
+      return false;
+    }
+
+    if (strikeInfo) {
+      const { strikeCount, bannedUntil } = strikeInfo;
+      const now = serverNowMs();
+
+      // Permanent ban
+      if (bannedUntil === 'permanent') {
+        showMessage({
+          message: '⛔ Permanently Banned',
+          description: 'You are permanently banned from sending messages.',
+          type: 'danger',
+        });
+        return false;
+      }
+
+      // Temporary ban (timestamp in ms)
+      if (typeof bannedUntil === 'number' && now < bannedUntil) {
+        const totalMinutes = Math.ceil((bannedUntil - now) / 60000);
+        const hours = Math.floor(totalMinutes / 60);
+        const minutes = totalMinutes % 60;
+        const timeLeftText = hours > 0 ? `${hours}h ${minutes}m` : `${minutes}m`;
+
+        showMessage({
+          message: `⚠️ Strike ${strikeCount}`,
+          description: `You are banned from chatting for ${timeLeftText} more minute(s).`,
+          type: 'warning',
+          duration: 5000,
+        });
+        return false;
+      }
+    }
+
+    // Check if user is member and not muted
+    if (groupData && user?.id) {
+      const isMemberNow = groupData.memberIds?.includes(user.id);
+      const isMuted = groupData.members?.[user.id]?.muted;
+
+      if (!isMemberNow) {
+        showErrorMessage(t('home.alert.error'), t('group_chat.not_member'));
+        return false;
+      }
+
+      if (isMuted) {
+        showErrorMessage(t('home.alert.error'), t('group_chat.muted_in_group'));
+        return false;
+      }
+    }
+
+    // Maximum 18 items per message (stored as `fruits`).
+    if (Array.isArray(fruits) && fruits.length > 18) {
+      showErrorMessage(t('home.alert.error'), t('group_chat.limit_items', { defaultValue: 'You can only send up to 18 items in a message.' }));
+      return false;
+    }
+
+    return true;
+  }, [isUserBlocked, strikeInfo, groupData, user?.id, t]);
+
+  // Send message.
+  // Returns true once the message is written and false when it was refused or
+  // failed -- the reason has already been shown. It used to swallow every
+  // failure and resolve normally, so GroupMessageInput (which clears the box
+  // before sending) never reached its restore-on-failure path and the typed
+  // text was simply lost.
   const sendMessage = useCallback(
     async (text, image, fruits, replyToMessage) => {
       const trimmedText = (text || '').trim();
@@ -608,38 +796,21 @@ const GroupChatScreen = () => {
       const hasImage = !!image && (typeof image === 'string' || (Array.isArray(image) && image.length > 0));
       const hasFruits = Array.isArray(fruits) && fruits.length > 0;
 
-      // Validate fruits count - maximum 18 fruits allowed
-      if (hasFruits && fruits.length > 18) {
-        showErrorMessage(t('home.alert.error'), t('group_chat.limit_pets'));
-        return;
+      // Ban / strike / mute / membership / item limit.
+      if (!checkCanSend(fruits)) {
+        return false;
       }
 
       // Block only if there's no text, no image AND no fruits
       if (!trimmedText && !hasImage && !hasFruits) {
         showErrorMessage(t('home.alert.error'), t('chat.cannot_empty'));
-        return;
+        return false;
       }
 
       // Safety checks
       if (!user?.id || !groupId || !appdatabase || !firestoreDB) {
         showErrorMessage(t('home.alert.error'), t('group_chat.missing_data'));
-        return;
-      }
-
-      // Check if user is member and not muted
-      if (groupData) {
-        const isMember = groupData.memberIds?.includes(user.id);
-        const isMuted = groupData.members?.[user.id]?.muted;
-
-        if (!isMember) {
-          showErrorMessage(t('home.alert.error'), t('group_chat.not_member'));
-          return;
-        }
-
-        if (isMuted) {
-          showErrorMessage(t('home.alert.error'), t('group_chat.muted_in_group'));
-          return;
-        }
+        return false;
       }
 
       // Check if user has recent game win
@@ -707,16 +878,18 @@ const GroupChatScreen = () => {
 
         if (!result.success) {
           showErrorMessage(t('home.alert.error'), result.error || t('group_chat.failed_send'));
-        } else {
-          // Clear reply after successful send
-          setReplyTo(null);
+          return false;
         }
+        // Clear reply after successful send
+        setReplyTo(null);
+        return true;
       } catch (error) {
         console.error('Error sending message:', error);
-        Alert.alert(t('home.alert.error'), t('group_chat.could_not_send'));
+        showErrorMessage(t('home.alert.error'), t('group_chat.could_not_send'));
+        return false;
       }
     },
-    [user, groupId, appdatabase, firestoreDB, groupData, t, localState?.isPro]
+    [user, groupId, appdatabase, firestoreDB, groupData, t, localState?.isPro, checkCanSend]
   );
 
   // Handle remove member (admin action)
@@ -814,9 +987,13 @@ const GroupChatScreen = () => {
   const memberCount = groupData?.memberCount || 0;
   const isCreator = groupData && groupData.createdBy === user?.id;
 
-  // Handle accept invitation
+  // Handle accept invitation. acceptingInviteRef stops a double tap from
+  // firing a second accept (which the transaction would reject, but only
+  // after showing a confusing "already processed" error).
+  const acceptingInviteRef = useRef(false);
   const handleAcceptInvite = useCallback(async () => {
-    if (!pendingInvite || !user?.id) return;
+    if (!pendingInvite || !user?.id || acceptingInviteRef.current) return;
+    acceptingInviteRef.current = true;
 
     try {
       const result = await acceptGroupInvite(
@@ -840,6 +1017,8 @@ const GroupChatScreen = () => {
     } catch (error) {
       console.error('Error accepting invitation:', error);
       showErrorMessage(t('home.alert.error'), t('group_chat.accept_failed'));
+    } finally {
+      acceptingInviteRef.current = false;
     }
   }, [pendingInvite, user, firestoreDB, appdatabase]);
 
@@ -927,8 +1106,26 @@ const GroupChatScreen = () => {
     setIsDrawerVisible(true);
   }, []);
 
-  // Get banned users from local state
-  const { localState } = useLocalState();
+  // Open a DM with the member whose profile drawer is showing. The drawer's
+  // Message button used to be a stub that only closed the drawer. Same route
+  // and params the community chat uses (Trader.jsx startPrivateChat):
+  // PrivateChat keys off selectedUser.senderId, and selectedUserForDrawer is
+  // already { senderId, sender, avatar }.
+  const startPrivateChat = useCallback(() => {
+    if (!selectedUserForDrawer?.senderId) return;
+    setIsDrawerVisible(false);
+    // Tapping your own avatar opens the drawer too; a DM with yourself is a
+    // broken screen, so just close.
+    if (selectedUserForDrawer.senderId === user?.id) return;
+    if (navigation && typeof navigation.navigate === 'function') {
+      navigation.navigate('PrivateChat', {
+        selectedUser: selectedUserForDrawer,
+        selectedTheme: navTheme,
+      });
+    }
+  }, [selectedUserForDrawer, navigation, navTheme, user?.id]);
+
+  // Get banned users from local state (localState is read at the top)
   const bannedUsers = useMemo(() => {
     return Array.isArray(localState?.bannedUsers) ? localState.bannedUsers : [];
   }, [localState?.bannedUsers]);
@@ -987,6 +1184,31 @@ const GroupChatScreen = () => {
       <View style={[styles.container, { justifyContent: 'center', alignItems: 'center' }]}>
         <ActivityIndicator size="large" color="#8B5CF6" />
         <Text style={[styles.text, { marginTop: SPACE.xxl }]}>{t('group_chat.loading')}</Text>
+      </View>
+    );
+  }
+
+  if (groupNotFound) {
+    return (
+      <View style={[styles.container, { justifyContent: 'center', alignItems: 'center', padding: SPACE.xxxl }]}>
+        <Icon name="alert-circle-outline" size={64} color={isDarkMode ? '#9CA3AF' : '#6B7280'} />
+        <Text style={[styles.text, { fontSize: SIZE.title, fontFamily: FONT.bold, marginTop: SPACE.xxxl, marginBottom: SPACE.lg }]}>
+          {t('group_chat.group_not_found')}
+        </Text>
+        <Text style={[styles.text, { fontSize: SIZE.subtitle, textAlign: 'center', marginBottom: 30, opacity: 0.7 }]}>
+          {t('group_chat.group_not_found_msg', { defaultValue: 'This group no longer exists. It may have been deleted.' })}
+        </Text>
+        <TouchableOpacity
+          onPress={() => navigation.goBack()}
+          style={{
+            paddingHorizontal: 30,
+            paddingVertical: SPACE.xl,
+            borderRadius: 8,
+            backgroundColor: '#8B5CF6',
+          }}
+        >
+          <Text style={{ color: c.textInverse, fontFamily: FONT.bold }}>{t('group_chat.btn_go_back')}</Text>
+        </TouchableOpacity>
       </View>
     );
   }
@@ -1095,7 +1317,8 @@ const GroupChatScreen = () => {
 
           <GroupMessageInput
             onSend={(text, image, fruits) => sendMessage(text, image, fruits, replyTo)}
-            isBanned={false}
+            canSend={checkCanSend}
+            isBanned={!!isUserBlocked}
             petModalVisible={petModalVisible}
             setPetModalVisible={setPetModalVisible}
             selectedFruits={selectedFruits}
@@ -1250,18 +1473,17 @@ const GroupChatScreen = () => {
         </View>
       </Modal>
 
-      {/* Profile Bottom Drawer */}
+      {/* Profile Bottom Drawer. No `fromPvtChat`: that flag hides the Chat
+          and Follow buttons for a drawer opened FROM a private chat, where
+          messaging the person you are already messaging is meaningless.
+          Group chat had copied it, so both buttons were missing here. */}
       <ProfileBottomDrawer
         isVisible={isDrawerVisible}
         toggleModal={() => setIsDrawerVisible(false)}
-        startChat={() => {
-          setIsDrawerVisible(false);
-          // Navigate to private chat if needed
-        }}
+        startChat={startPrivateChat}
         selectedUser={selectedUserForDrawer}
         isOnline={selectedUserOnline}
         bannedUsers={bannedUsers}
-        fromPvtChat={true}
       />
 
       <PetModal

@@ -20,6 +20,7 @@ import { SPACE, SIZE, TYPE, RADIUS, SHADOW, STATUS } from '../Design/tokens';
 // The clock lives in the hook so this screen and the Home strip can never
 // disagree about when the Black Market opens.
 import { useScheduledEvents, countdown } from '../Helper/useNextEvent';
+import EventBell from './EventBell';
 
 const localTime = (ms) =>
   new Date(ms).toLocaleString(undefined, {
@@ -53,16 +54,20 @@ const TimerScreen = () => {
               <Icon name={e.icon} size={SIZE.subtitle} color={e.live ? STATUS.success : c.primary} />
               <Text style={s.title}>{e.label}</Text>
             </View>
-            {e.live ? (
-              <View style={s.liveTag}>
-                <View style={s.liveDot} />
-                <Text style={s.liveText}>LIVE</Text>
-              </View>
-            ) : (
-              <Text style={s.confidence}>
-                {e.confidence === 'measured' ? 'Measured' : 'Community'}
-              </Text>
-            )}
+            <View style={s.headRight}>
+              {e.live ? (
+                <View style={s.liveTag}>
+                  <View style={s.liveDot} />
+                  <Text style={s.liveText}>LIVE</Text>
+                </View>
+              ) : (
+                <Text style={s.confidence}>
+                  {e.confidence === 'measured' ? 'Measured' : 'Community'}
+                </Text>
+              )}
+              {/* Push when this event starts (functions/eventTimers.js). */}
+              <EventBell eventKey={e.key} label={e.label} color={e.live ? STATUS.success : c.primary} />
+            </View>
           </View>
 
           <Text style={[s.clock, e.live && s.clockLive]}>
@@ -112,6 +117,7 @@ const makeStyles = (c) =>
 
     head: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
     headLeft: { flexDirection: 'row', alignItems: 'center', gap: SPACE.sm },
+    headRight: { flexDirection: 'row', alignItems: 'center', gap: SPACE.lg },
     title: { ...TYPE.subtitle, color: c.text },
     confidence: {
       ...TYPE.label, color: c.textMuted,

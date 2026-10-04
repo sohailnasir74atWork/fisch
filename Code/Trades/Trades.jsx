@@ -15,18 +15,16 @@ import { useNavigation } from '@react-navigation/native';
 import ReportTradePopup from './ReportTradePopUp';
 import SignInDrawer from '../Firebase/SigninDrawer';
 import { useLocalState } from '../LocalGlobelStats';
-import { ABOVE_BANNER, FLOATING_BUTTON_ICON_SIZE, FLOATING_BUTTON_RIGHT } from '../Helper/floatingButtonLayout';
+import { ABOVE_BANNER, BANNER_HEIGHT, FLOATING_BUTTON_GAP, FLOATING_BUTTON_ICON_SIZE, FLOATING_BUTTON_RIGHT } from '../Helper/floatingButtonLayout';
 import Clipboard from '@react-native-clipboard/clipboard';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useTranslation } from 'react-i18next';
 import { showSuccessMessage, showErrorMessage } from '../Helper/MessageHelper';
 import SubscriptionScreen from '../SettingScreen/OfferWall';
-import { mixpanel } from '../AppHelper/MixPenel';
 import InterstitialAdManager from '../Ads/IntAd';
 import RewardedAdManager from '../Ads/RewardedAdManager';
 import BannerAdComponent from '../Ads/bannerAds';
-import NativeAdCard from '../Ads/NativeAdCard';
-import { releaseByPrefix as releaseNativeAds } from '../Ads/NativeAdManager';
+import FeedBannerAd from '../Ads/FeedBannerAd';
 import FontAwesome from 'react-native-vector-icons/FontAwesome6';
 import ProfileBottomDrawer from '../ChatScreen/GroupChat/BottomDrawer';
 import FramedAvatar from '../ChatScreen/GroupChat/FramedAvatar';
@@ -78,7 +76,7 @@ import { saveTrade, unsaveTrade, fetchSavedTradeRefs } from './tradeHelpers';
 import { resolveItemImage, VALUE_SOURCE, sourceLabel,
 } from '../Helper/valueSources';
 import { GAME } from '../config/game';
-import { STATUS } from '../Design/tokens';
+import { STATUS, ACCENT } from '../Design/tokens';
 import { getThemeColors } from '../Helper/themeColors';
 import { SIZE } from '../Design/tokens';
 import { SPACE } from '../Design/tokens';
@@ -270,14 +268,9 @@ const TradeList = ({ route }) => {
 
   }, [user?.id, localState.bannedUsers]);
 
-  // Free this list's native ad handles on unmount (keys prefixed 'trade-ad-').
-  useEffect(() => {
-    return () => releaseNativeAds('trade-ad-');
-  }, []);
-
-  // Interleave a native ad every TRADE_AD_FREQUENCY trades (non-Pro only).
-  // Unfilled slots collapse to nothing via NativeAdCard, so the list never
-  // shows a blank gap.
+  // Interleave an in-feed ad (FeedBannerAd) every TRADE_AD_FREQUENCY trades
+  // (non-Pro only). Unfilled slots collapse to nothing via FeedBannerAd, so
+  // the list never shows a blank gap.
   const TRADE_AD_FREQUENCY = 8;
   const tradesWithAds = useMemo(() => {
     if (isProStatus || !Array.isArray(filteredTrades)) return filteredTrades;
@@ -447,7 +440,6 @@ const TradeList = ({ route }) => {
               async () => {
                 try {
                   await applyFeaturedToTrade(item);
-                  mixpanel.track("Trade Boosted", { method: "rewarded_ad", user: user?.id });
                   showSuccessMessage(t("trade.feature_success"), t("trade.feature_success_message"));
                 } catch (error) {
                   console.error("Error featuring trade after ad:", error);
@@ -706,8 +698,15 @@ const TradeList = ({ route }) => {
 
 
   const formatValue = formatMarketValue;
+  // onEndReached re-fires whenever the content height changes near the end —
+  // e.g. an in-feed ad popping into its slot — so a second call could start
+  // before the first moved lastDoc on, append the same page again, and give
+  // FlatList duplicate keys (rows dropped/doubled, jumpy scrolling).
+  // Ported from mm2values.
+  const loadingMoreRef = useRef(false);
   const fetchMoreTrades = useCallback(async () => {
-    if (!hasMore || !lastDoc) return;
+    if (!hasMore || !lastDoc || loadingMoreRef.current) return;
+    loadingMoreRef.current = true;
 
     try {
       // ✅ Build query for more normal trades
@@ -737,7 +736,10 @@ const TradeList = ({ route }) => {
       // ✅ Merge & maintain balance
       const mergedTrades = mergeFeaturedWithNormal(newFeaturedTrades, newNormalTrades);
 
-      setTrades((prevTrades) => [...prevTrades, ...mergedTrades]);
+      setTrades((prevTrades) => {
+        const seen = new Set(prevTrades.map((row) => row.id));
+        return [...prevTrades, ...mergedTrades.filter((row) => !seen.has(row.id))];
+      });
       setLastDoc(
         normalTradesQuerySnap.docs[normalTradesQuerySnap.docs.length - 1]
       );      
@@ -747,6 +749,8 @@ const TradeList = ({ route }) => {
       if (error.code === 'failed-precondition') {
         console.warn('⚠️ Firestore index required.');
       }
+    } finally {
+      loadingMoreRef.current = false;
     }
   }, [lastDoc, hasMore, remainingFeaturedTrades, firestoreDB]);
 
@@ -788,7 +792,6 @@ const TradeList = ({ route }) => {
     // Close drawer first (iOS doesn't auto-dismiss modals on navigation)
     setIsDrawerVisible(false);
     setTimeout(() => {
-      mixpanel.track("Inbox Trade");
       navigation.navigate('PrivateChatTrade', {
         selectedUser: selectedUser,
         item: selectedTrade,
@@ -1550,9 +1553,9 @@ const TradeList = ({ route }) => {
 
 
   const renderTrade = ({ item, index }) => {
-    // Native ad slot interleaved into the list (collapses when unfilled / Pro).
+    // In-feed ad slot interleaved into the list (collapses when unfilled / Pro).
     if (item?.__type === 'ad') {
-      return <NativeAdCard adKey={item.id} isDarkMode={isDarkMode} />;
+      return <FeedBannerAd adKey={item.id} isDarkMode={isDarkMode} />;
     }
 
     // ✅ Migration: Normalize totals to handle both old (object.value) and new (number) formats
@@ -1610,7 +1613,6 @@ const TradeList = ({ route }) => {
           setIsSigninDrawerVisible(true);
           return;
         }
-        mixpanel.track("Inbox Trade");
         navigation.navigate('PrivateChatTrade', {
           selectedUser: selectedUser,
           item,
@@ -1719,34 +1721,36 @@ const TradeList = ({ route }) => {
           </View>
         </View>
 
+        {/* Each side carries its own total in a footer, instead of a second
+            row of "You give / You receive" panels that repeated the labels
+            and never lined up with the columns above. marginTop:'auto' pins
+            both totals to the bottom so they align when one side has more
+            rows. No swap arrow between the sides: the tinted, labelled boxes
+            already say which way items move, and its 20pt went to the grids. */}
         <View style={styles.tradeDetails}>
-          {[["You give", perspective.giveItems], ["You receive", perspective.receiveItems]].map(([label, entries], side) => <React.Fragment key={label}>
-            {side === 1 && <View style={styles.transfer}><Icon name="swap-horizontal-outline" size={18} color={config.colors.primary} /></View>}
+          {[["You give", perspective.giveItems, perspective.giveTotal], ["You receive", perspective.receiveItems, perspective.receiveTotal]].map(([label, entries, total], side) => <React.Fragment key={label}>
             <View style={[styles.tradeSideColumn, side === 0 ? styles.giveTint : styles.receiveTint]}>
-              <Text style={styles.gridSideLabel}>{label}</Text>
+              <Text style={[styles.gridSideLabel, side === 0 ? styles.giveInk : styles.receiveInk]}>{label}</Text>
               {entries.filter(Boolean).length ? <View style={styles.itemGrid}>
                 {entries.filter(Boolean).map((tradeItem, idx) => <View key={idx} style={styles.gridCell}
                   accessible accessibilityLabel={tradeItem.name + ', ' + (catchDescription(tradeItem) || 'Quantity 1')}>
-                  <CatalogueImage item={tradeItem} source={{ uri: getImageUrl(tradeItem) }} style={styles.gridItemImage} resizeMode="contain" />
+                  <View>
+                    <CatalogueImage item={tradeItem} source={{ uri: getImageUrl(tradeItem) }} style={styles.gridItemImage} resizeMode="contain" />
+                    {/* Quantity rides on the image rather than taking a line of
+                        its own: the old detail row printed a blank ' ' under
+                        every single item just to keep row heights even. */}
+                    {tradeItem.quantity > 1 && <View style={styles.qtyBadge}><Text style={styles.qtyBadgeText}>×{tradeItem.quantity}</Text></View>}
+                  </View>
                   <Text style={styles.itemName} numberOfLines={1} ellipsizeMode="tail">{tradeItem.name}</Text>
-                  <Text style={styles.itemDetail} numberOfLines={1} ellipsizeMode="tail">{tradeItem.quantity > 1 ? '×' + tradeItem.quantity : ' '}</Text>
                 </View>)}
-              </View> : <TouchableOpacity style={styles.emptyOffer} onPress={() => handleOpenProfile(item)}><Text style={styles.gridSideLabel}>Open to offers</Text></TouchableOpacity>}
+              </View> : <TouchableOpacity style={styles.emptyOffer} onPress={() => handleOpenProfile(item)}><Text style={styles.emptyOfferText}>Open to offers</Text></TouchableOpacity>}
+              <View style={[styles.sideTotal, side === 0 ? styles.giveRule : styles.receiveRule]}>
+                <Text style={styles.totalAmount} numberOfLines={1} adjustsFontSizeToFit>{snapshot ? snapshot.unit + ' ' + formatValue(total) : '—'}</Text>
+              </View>
             </View>
           </React.Fragment>)}
         </View>
 
-        <Text style={styles.description}>{(item.listingKind || listingKind([...(item.hasItems || []), ...(item.wantsItems || [])])).toUpperCase()} · {perspective.own ? 'Your trade' : 'Your perspective'}</Text>
-        <View style={styles.tradeTotals}>
-          {[['You give', perspective.giveTotal], ['You receive', perspective.receiveTotal]].map(([label, total]) => <View key={label} style={[styles.totalPanel, label === 'You give' ? styles.giveTint : styles.receiveTint]}>
-            <Text style={styles.gridSideLabel}>{label}</Text>
-            <Text style={styles.totalAmount} numberOfLines={1} adjustsFontSizeToFit>{snapshot ? (snapshot.scale === 'proto' ? 'P: ' : '$: ') + formatValue(total) : '—'}</Text>
-          </View>)}
-        </View>
-        {snapshot && <Text style={styles.description}>
-          {snapshot.evaluation.status === 'complete' ? 'Market estimate at posting' : 'Priced subtotals only · full value unavailable'}
-          {' · ' + new Date(snapshot.capturedAt).toLocaleDateString()}
-        </Text>}
         {[['You give', perspective.giveItems], ['You receive', perspective.receiveItems]].map(([side, items]) => items.filter(i => i?.catch || i?.quantity > 1).map((tradeItem, idx) => (
           <Text key={side + idx} numberOfLines={1} ellipsizeMode="tail" style={styles.description}>{side}: {tradeItem.name} · {catchDescription(tradeItem)}</Text>
         )))}
@@ -1781,9 +1785,21 @@ const TradeList = ({ route }) => {
           </View>
         )}
 
-        {/* Social Actions Row */}
+        {/* Social Actions Row — provenance sits in the space the buttons
+            leave, rather than on two rows of its own above the totals.
+            "Valued <date>": the totals and verdict are the market estimate
+            captured when the trade was posted, not today's values. "Partly
+            priced" when some items had no quote. No "Your perspective": the
+            YOU GIVE / YOU RECEIVE labels already say whose side this is. */}
         <View style={styles.socialActionsRow}>
-          <View style={{ flex: 1 }} />
+          <Text style={styles.metaText} numberOfLines={1}>
+            {(() => {
+              const kind = item.listingKind || listingKind([...(item.hasItems || []), ...(item.wantsItems || [])]) || '';
+              return kind.charAt(0).toUpperCase() + kind.slice(1);
+            })()}
+            {snapshot && (' · ' + (snapshot.evaluation.status === 'complete' ? 'Valued ' : 'Partly priced ') +
+              new Date(snapshot.capturedAt).toLocaleDateString())}
+          </Text>
 
           {/* Save — only on other people's trades */}
           {item.userId !== user?.id && (
@@ -1984,12 +2000,27 @@ const TradeList = ({ route }) => {
           </TouchableOpacity>
         </View>
       )}
-      <View style={{ flexDirection: 'row', gap: 8, padding: 10 }}>
-        {['all', 'fish', 'cosmetics', 'mixed'].map(kind => (
-          <TouchableOpacity key={kind} onPress={() => setTradeKind(kind)} style={{ padding: 10, borderRadius: 12, backgroundColor: tradeKind === kind ? config.colors.primary : (isDarkMode ? config.colors.surfaceDark : '#e2e8f0') }}>
-            <Text style={{ color: tradeKind === kind ? '#fff' : (isDarkMode ? '#fff' : '#111') }}>{kind === 'all' ? 'All trades' : kind.charAt(0).toUpperCase() + kind.slice(1)}</Text>
-          </TouchableOpacity>
-        ))}
+      {/* Segmented control rather than four free-floating chips: one track,
+          equal segments, so the row reads as a single choice. The old chips
+          set no fontFamily and rendered in the system font. */}
+      <View style={styles.kindTrack} accessibilityRole="tablist">
+        {['all', 'fish', 'cosmetics', 'mixed'].map(kind => {
+          const active = tradeKind === kind;
+          return (
+            <TouchableOpacity
+              key={kind}
+              onPress={() => setTradeKind(kind)}
+              style={[styles.kindSeg, active && styles.kindSegActive]}
+              activeOpacity={0.7}
+              accessibilityRole="tab"
+              accessibilityState={{ selected: active }}
+            >
+              <Text style={[styles.kindText, active && styles.kindTextActive]} numberOfLines={1}>
+                {kind === 'all' ? 'All' : kind.charAt(0).toUpperCase() + kind.slice(1)}
+              </Text>
+            </TouchableOpacity>
+          );
+        })}
       </View>
       <FlatList
         ref={flatListRef}
@@ -2003,7 +2034,7 @@ const TradeList = ({ route }) => {
         contentContainerStyle={{ paddingBottom: 180 }}
         onEndReached={handleEndReached}
         onEndReachedThreshold={0.2}
-        removeClippedSubviews={true} // 🚀 Reduce memory usage
+        removeClippedSubviews={false} // 🚀 Reduce memory usage
         initialNumToRender={10} // 🔹 Render fewer items at start
         maxToRenderPerBatch={10} // 🔹 Load smaller batches
         updateCellsBatchingPeriod={50} // 🔹 Reduce updates per frame
@@ -2068,6 +2099,8 @@ const TradeList = ({ route }) => {
         <Animated.View
           style={[
             styles.scrollToTopButton,
+            // Pro members have no banner ad: drop BANNER_HEIGHT (mm2 bannerAware()).
+            localState?.isPro && { bottom: Math.max(FLOATING_BUTTON_GAP, ABOVE_BANNER - BANNER_HEIGHT) },
             {
               opacity: scrollButtonOpacity,
               transform: [
@@ -2105,12 +2138,13 @@ const getStyles = (isDarkMode, c = getThemeColors(isDarkMode)) =>
       flex: 1,
     },
     tradeItem: {
-      paddingHorizontal: 14,
-      paddingVertical: 10,
+      paddingHorizontal: SPACE.lg,
+      paddingTop: SPACE.lg,
+      paddingBottom: SPACE.md,
       marginHorizontal: SPACE.xs,
       marginBottom: SPACE.lg,
       backgroundColor: isDarkMode ? config.colors.surfaceDark : '#ffffff',
-      borderRadius: 18,
+      borderRadius: 16,
       borderWidth: 1,
       borderColor: c.border,
       shadowColor: c.shadow,
@@ -2119,6 +2153,34 @@ const getStyles = (isDarkMode, c = getThemeColors(isDarkMode)) =>
       shadowRadius: 10,
       elevation: isDarkMode ? 5 : 3,
     },
+    kindTrack: {
+      flexDirection: 'row',
+      padding: 3,
+      marginHorizontal: SPACE.xs,
+      marginTop: SPACE.xs,
+      marginBottom: SPACE.md,
+      borderRadius: 12,
+      backgroundColor: c.bgAlt,
+      borderWidth: 1,
+      borderColor: c.border,
+    },
+    kindSeg: {
+      flex: 1,
+      alignItems: 'center',
+      justifyContent: 'center',
+      paddingVertical: 7,
+      borderRadius: 9,
+    },
+    kindSegActive: {
+      backgroundColor: c.card,
+      shadowColor: c.shadow,
+      shadowOffset: { width: 0, height: 1 },
+      shadowOpacity: isDarkMode ? 0.35 : 0.1,
+      shadowRadius: 3,
+      elevation: 2,
+    },
+    kindText: { fontFamily: FONT.regular, fontSize: SIZE.caption, color: c.textSecondary },
+    kindTextActive: { fontFamily: FONT.bold, color: c.primary },
     featuredTradeItem: {
       backgroundColor: c.card,
       borderColor: STATUS.warning,
@@ -2158,7 +2220,7 @@ const getStyles = (isDarkMode, c = getThemeColors(isDarkMode)) =>
     cardHeader: {
       flexDirection: 'row',
       alignItems: 'center',
-      marginBottom: SPACE.lg,
+      marginBottom: SPACE.md,
     },
     avatarWrapper: {
       shadowColor: config.colors.primary,
@@ -2219,24 +2281,29 @@ const getStyles = (isDarkMode, c = getThemeColors(isDarkMode)) =>
     },
     tradeDetails: {
       flexDirection: 'row',
-      justifyContent: 'space-between',
-      color: isDarkMode ? config.colors.textDark : config.colors.textLight,
-      marginVertical: 8
-
-
+      gap: SPACE.md,
+      marginBottom: SPACE.xs,
     },
-    tradeSideColumn: { flex: 1, minWidth: 0, paddingVertical: 6, borderRadius: 10 },
-    gridSideLabel: { color: c.textSecondary, fontFamily: FONT.regular, fontSize: 10, textAlign: 'center', marginBottom: 5 },
-    itemGrid: { flexDirection: 'row', flexWrap: 'wrap', rowGap: 6 },
-    gridCell: { width: '33.333%', paddingHorizontal: 2, alignItems: 'center' },
+    // Horizontal padding is what keeps a truncated name ("Cathedra...") off
+    // the tinted edge; the columns previously had none at all.
+    tradeSideColumn: { flex: 1, minWidth: 0, paddingTop: SPACE.md, paddingHorizontal: SPACE.sm, borderRadius: 12, borderWidth: 1 },
+    gridSideLabel: { fontFamily: FONT.bold, fontSize: SIZE.label, letterSpacing: 0.6, textTransform: 'uppercase', textAlign: 'center', marginBottom: SPACE.sm },
+    giveInk: { color: isDarkMode ? ACCENT.kelp.dark : ACCENT.kelp.light },
+    receiveInk: { color: isDarkMode ? ACCENT.violet.dark : ACCENT.violet.light },
+    itemGrid: { flexDirection: 'row', flexWrap: 'wrap', rowGap: SPACE.md, marginBottom: SPACE.md },
+    gridCell: { width: '33.333%', paddingHorizontal: SPACE.hair, alignItems: 'center' },
     gridItemImage: { width: 32, height: 32, borderRadius: 6 },
-    itemName: { width: '100%', fontSize: 10, lineHeight: 13, fontFamily: FONT.bold, color: c.text, textAlign: 'center', marginTop: 3 },
-    itemDetail: { fontSize: 9, lineHeight: 12, fontFamily: FONT.regular, color: c.textSecondary, textAlign: 'center' },
-    emptyOffer: { minHeight: 60, justifyContent: 'center' },
-    giveTint: { backgroundColor: isDarkMode ? '#143B3B' : '#E3F5F0' },
-    receiveTint: { backgroundColor: isDarkMode ? '#302644' : '#F0EAFC' },
-    totalPanel: { flex: 1, minWidth: 0, padding: 5, borderRadius: 10, backgroundColor: c.bgAlt },
-    totalAmount: { color: c.text, fontFamily: FONT.bold, fontSize: 14, textAlign: 'center' },
+    itemName: { width: '100%', fontSize: SIZE.label, lineHeight: 13, fontFamily: FONT.bold, color: c.text, textAlign: 'center', marginTop: SPACE.xs },
+    qtyBadge: { position: 'absolute', top: -4, right: -10, minWidth: 18, paddingHorizontal: 3, borderRadius: 9, backgroundColor: config.colors.primary, alignItems: 'center' },
+    qtyBadgeText: { color: '#fff', fontFamily: FONT.bold, fontSize: 9, lineHeight: 13 },
+    emptyOffer: { minHeight: 48, justifyContent: 'center', marginBottom: SPACE.md },
+    emptyOfferText: { color: c.textSecondary, fontFamily: FONT.regular, fontSize: SIZE.small, textAlign: 'center' },
+    giveTint: { backgroundColor: isDarkMode ? '#143B3B' : '#E3F5F0', borderColor: isDarkMode ? '#1E5050' : '#C8EADF' },
+    receiveTint: { backgroundColor: isDarkMode ? '#302644' : '#F0EAFC', borderColor: isDarkMode ? '#43365E' : '#DDD1F6' },
+    sideTotal: { marginTop: 'auto', marginHorizontal: -SPACE.sm, paddingVertical: SPACE.sm, borderTopWidth: 1 },
+    giveRule: { borderTopColor: isDarkMode ? '#1E5050' : '#C8EADF' },
+    receiveRule: { borderTopColor: isDarkMode ? '#43365E' : '#DDD1F6' },
+    totalAmount: { color: c.text, fontFamily: FONT.bold, fontSize: SIZE.body, textAlign: 'center', paddingHorizontal: SPACE.sm },
     deprecatedName: {
       fontSize: SIZE.label,
       fontFamily: FONT.regular,
@@ -2308,7 +2375,6 @@ const getStyles = (isDarkMode, c = getThemeColors(isDarkMode)) =>
       borderRadius: 5,
       // width:'4%',
     },
-    tradeTotals: { flexDirection: 'row', gap: 12, marginVertical: 8 },
     priceText: {
       fontSize: SIZE.label,
       fontFamily: FONT.bold,
@@ -2346,7 +2412,6 @@ const getStyles = (isDarkMode, c = getThemeColors(isDarkMode)) =>
       alignItems: 'center',
     },
 
-    transfer: { width: 22, alignItems: 'center', justifyContent: 'center' },
     actionButtons: {
       flexDirection: 'row', alignItems: 'flex-end', justifyContent: 'space-between',
       borderColor: isDarkMode ? config.colors.borderDark : config.colors.borderLight, marginTop: SPACE.lg, paddingTop: SPACE.lg
@@ -2355,8 +2420,15 @@ const getStyles = (isDarkMode, c = getThemeColors(isDarkMode)) =>
       color: isDarkMode ? config.colors.textSecondaryDark : config.colors.textSecondaryLight,
       fontFamily: FONT.regular,
       fontSize: SIZE.label,
-      marginTop: 5,
+      marginTop: SPACE.xs,
       lineHeight: 15
+    },
+    metaText: {
+      flex: 1,
+      color: isDarkMode ? config.colors.textSecondaryDark : config.colors.textSecondaryLight,
+      fontFamily: FONT.regular,
+      fontSize: SIZE.label,
+      lineHeight: 14,
     },
     descriptionclick: {
       color: config.colors.secondary,

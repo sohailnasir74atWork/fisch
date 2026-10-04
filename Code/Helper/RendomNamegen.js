@@ -1,64 +1,51 @@
 
-const ADOPTME_NAMES = [
-  // Pets / cute
-  'Shadow',
-  'Frost',
-  'NeonFox',
-  'MegaOwl',
-  'BatDrag',
-  'Giraffe',
-  'Parrot',
-  'Crow',
-  'EvilUni',
-  'Uni',
-  'Kitsune',
-  'Cerberus',
-  'Phoenix',
-  'Griffin',
-  'Dragon',
-  'Dodo',
-  'Trex',
-  'Kanga',
-  'Turtle',
-  'Albino',
-  'Arctic',
-  'Golden',
-  'Diamond',
+// Default names for new accounts. These were Adopt Me pet names (NeonFox,
+// MegaOwl, AdoptPro…) left over from the fork.
+const FISCH_NAMES = [
+  // Fishing
+  'Angler',
+  'Reeler',
+  'BaitBoss',
+  'HookLine',
+  'DeepCast',
+  'TideRider',
+  'Lantern',
+  'Bobber',
+  'Glider',
+  'Megalodon',
+  'Shark',
+  'Marlin',
+  'Barracuda',
+  'Swordfish',
+  'Anglerfish',
+  'Koi',
+  'Pike',
+  'Trout',
+  'Squid',
+  'Sailor',
+  'Captain',
+  'Harbor',
+  'Abyss',
+  'Moonlight',
+  'Mythic',
 
   // Trading vibes
   'WFL',
   'BigWin',
-  'Lose',
   'Overpay',
   'FairDeal',
   'TradeKing',
   'TradeQueen',
   'ValuePro',
   'SwapMaster',
-  'OfferUp',
-
-  // Short gamer tags
-  'AdoptPro',
-  'PetLord',
-  'NeonHub',
-  'MegaMode',
-  'EggHatch',
-  'StarTrader',
-  'Frosty',
-  'ShadowX',
-  'OwlGang',
-  'UniVibes',
-  'PetFlex',
-  'TradeX',
-  'HatchX',
-  'NeonX',
-  'MegaX',
+  'ScripRich',
+  'SkinHunter',
 ];
 
   
 
   export const generateOnePieceUsername = () => {
-    const randomName = ADOPTME_NAMES[Math.floor(Math.random() * ADOPTME_NAMES.length)];
+    const randomName = FISCH_NAMES[Math.floor(Math.random() * FISCH_NAMES.length)];
     const randomNumber = Math.floor(100 + Math.random() * 900); // Random 4-digit number
     return `${randomName}_${randomNumber}`;
   };

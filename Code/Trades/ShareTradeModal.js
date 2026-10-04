@@ -8,8 +8,8 @@ import { useGlobalState } from '../GlobelStats';
 import { useLocalState } from '../LocalGlobelStats';
 import config from '../Helper/Environment';
 import { showErrorMessage } from '../Helper/MessageHelper';
-import { mixpanel } from '../AppHelper/MixPenel';
 import InterstitialAdManager from '../Ads/IntAd';
+import AppOpenAdManager from '../Ads/openApp';
 import { resolveItemImage, createTradeSnapshot, formatMarketValue, sourceLabel, catchDescription } from '../Helper/valueSources';
 import { verdictLabel } from '../Helper/feedContract';
 import { getThemeColors } from '../Helper/themeColors';
@@ -64,9 +64,11 @@ const ShareTradeModal = ({ visible, onClose, hasItems, wantsItems, hasTotal, wan
     const handleShare = async () => {
         try {
             if (!viewRef.current) return;
-            mixpanel.track("Trade Share");
             const uri = await viewRef.current.capture();
             const callbackfunction = async ()=>{
+                // The Android share chooser backgrounds the app; coming back
+                // from it is not a real return, so no App Open ad.
+                AppOpenAdManager.skipNextForeground();
                 await Share.open({
                     url: uri,
                     type: 'image/png',
@@ -91,6 +93,7 @@ const ShareTradeModal = ({ visible, onClose, hasItems, wantsItems, hasTotal, wan
               }, 10); }
           
             if(Platform.OS === 'ios'){
+                 AppOpenAdManager.skipNextForeground();
                  await Share.open({
                     url: uri,
                     type: 'image/png',
@@ -223,7 +226,7 @@ const ShareTradeModal = ({ visible, onClose, hasItems, wantsItems, hasTotal, wan
                     </View>
 
                     <ViewShot ref={viewRef} options={{ format: 'png', quality: 0.8 }} style={{ backgroundColor: isDarkMode ? config.colors.backgroundDark : '#f2f2f7' , padding: SPACE.md,}}>
-                        <Text style={styles.offerLabel}>{sourceLabel(valueSource)} · {verdictLabel(valuation.evaluation)} · Game.Guide</Text>
+                        <Text style={styles.offerLabel}>{sourceLabel(valueSource)} · {verdictLabel(valuation.evaluation)}</Text>
                         {valuation.evaluation.status === 'incomplete' && <Text style={styles.offerLabel}>Priced subtotals only. Unpriced or stale quotes are present.</Text>}
                         {[['You give', hasItems], ['You receive', wantsItems]].map(([label, items]) => items.filter(i => i?.catch || i?.quantity > 1).map((item, index) =>
                           <Text key={label + index} style={styles.offerLabel}>{label}: {item.name} · {catchDescription(item)}</Text>

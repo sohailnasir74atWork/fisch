@@ -98,6 +98,7 @@
     "business_enquiries_desc": "For collaborations, partnerships, or other business-related queries, feel free to contact us at:",
     "child_safety_standards": "Child Safety Standards",
     "privacy_policy": "Privacy Policy",
+    "privacy_options": "Privacy options",
     "report_abusive_content": "Report Abusive Content",
     "upload_photo": "Upload Photo",
     "search_items": "Search items...",
@@ -111,7 +112,10 @@
     "give_offer": "Give offer",
     "display_name": "Display Name",
     "profile_picture": "Profile Picture",
-    "edit_cooldown_title": "Edit Cooldown"
+    "edit_cooldown_title": "Edit Cooldown",
+    "success_deleted": "Your account and all associated data have been permanently deleted.",
+    "joined": "Joined",
+    "buy_plan_unlock": "Upgrade to Pro to unlock this feature."
   },
   "home": {
     "you": "YOU",
@@ -210,8 +214,8 @@
     "copy_success": "Code copied to clipboard!",
     "try_other_app": "Try Our other app",
     "download": "Download",
-    "selected_pets": "Selected pets",
-    "owned_pets": "Owned pets",
+    "selected_pets": "Selected items",
+    "owned_pets": "My items",
     "wishlist": "Wishlist",
     "high": "▲ High",
     "low": "▼ Low",
@@ -358,7 +362,10 @@
     "error_google_unavailable_title": "Google sign-in unavailable",
     "error_google_unavailable": "Google Play Services isn't available on this device. Please sign in with email instead — tap \"Sign in with Email\" below.",
     "error_network_title": "Connection problem",
-    "error_network": "We couldn't reach the sign-in server. Check your connection and try again. If Google services are restricted on your network, try email sign-in or a different connection."
+    "error_network": "We couldn't reach the sign-in server. Check your connection and try again. If Google services are restricted on your network, try email sign-in or a different connection.",
+    "password_reset_email_sent": "Password reset email sent!",
+    "error_reset_password": "Failed to send password reset email. Please try again.",
+    "restoring": "Loading your account…"
   },
   "tabs": {
     "calculator": "Calculator",
@@ -372,6 +379,8 @@
     "feed": "Feed"
   },
   "chat": {
+    "today": "Today",
+    "yesterday": "Yesterday",
     "community_chat": "Community Chat",
     "type_message": "Type a message...",
     "sending": "Sending...",
@@ -415,13 +424,13 @@
   "first": {
     "welcome_title": "Welcome to Fruit Values",
     "welcome_text": "Track fruit values & optimize your trades.",
-    "signin_or_guest": "Signin or Continue as Guest",
-    "guest_user": "Continue as Guest User",
-    "signin": "Signin",
+    "signin_or_guest": "Sign in or continue as a guest",
+    "guest_user": "Continue as guest",
+    "signin": "Sign in",
     "continue": "Continue",
     "get_notified_text": "Get notified, create and bid on trades, chat with traders, and join group discussions.",
     "welcome_to": "Welcome to Fisch Values",
-    "track_pets": "Track pets values & optimize your trades.",
+    "track_pets": "Track fish values & optimize your trades.",
     "welcome_user": "Welcome"
   },
   "offer": {
@@ -712,7 +721,7 @@
   "group_chat": {
     "group_not_found": "Group not found",
     "failed_load_group": "Failed to load group",
-    "limit_pets": "You can only send up to 18 pets in a message.",
+    "limit_pets": "You can only send up to 18 items in a message.",
     "not_member": "You are not a member of this group",
     "muted_in_group": "You are muted in this group",
     "missing_data": "Missing required data. Please try again.",
@@ -843,12 +852,12 @@
     "review_thanks": "Thanks for your review!",
     "rating_thanks": "Thanks for your rating!",
     "rating_error": "Error submitting rating. Try again!",
-    "max_pets_error": "You can only send up to 18 pets in a message.",
+    "max_pets_error": "You can only send up to 18 items in a message.",
     "anonymous": "Anonymous",
     "multiple_photos": "📷 {{count}} Photos",
     "single_photo": "📷 Photo",
-    "pets_count_plural": "🐾 {{count}} pets",
-    "pets_count_singular": "🐾 {{count}} pet",
+    "pets_count_plural": "🎣 {{count}} items",
+    "pets_count_singular": "🎣 {{count}} item",
     "send_failed": "Could not send your message. Please try again.",
     "rate_trader": "Rate this Trader",
     "write_review": "Write an optional review...",
@@ -866,8 +875,8 @@
     "message_placeholder": "[Message]",
     "images_attached_plural": "{{count}} images attached",
     "images_attached_singular": "{{count}} image attached",
-    "pets_selected_plural": "{{count}} pets selected",
-    "pets_selected_singular": "{{count}} pet selected",
+    "pets_selected_plural": "{{count}} items selected",
+    "pets_selected_singular": "{{count}} item selected",
     "quick_messages": "Quick Messages",
     "msg_copied": "Message Copied",
     "invalid_translate": "Invalid message to translate.",
@@ -954,7 +963,7 @@
       "Moderators reserve the right to monitor and take action on any violations, including warnings or bans.",
       "Content should be suitable for all approved age groups, adhering to app age requirements.",
       "Do not share links to harmful sites, malware, or malicious content.",
-      "By using the chat feature, you agree to the app’s Terms of Service and Privacy Policy. ${GAME.privacyPolicyUrl}"
+      "By using the chat feature, you agree to the app’s Terms of Service and Privacy Policy. {{privacyUrl}}"
     ]
   },
   "report_popup": {
@@ -1130,7 +1139,7 @@
     "fetch_failed": "Failed to fetch your posts",
     "missing_tag": "Missing Tag",
     "missing_tag_msg": "Please select at least one tag.",
-    "signin_to_post": "Sign in to upload designs",
+    "signin_to_post": "Sign in to post",
     "sort_latest": "Latest",
     "sort_hot": "Hot",
     "sort_trending": "Trending",
@@ -1190,7 +1199,9 @@
       "error_title": "Error 😢",
       "error_msg": "Something went wrong. Please try again.",
       "oops": "Oops! 😅",
-      "failed_hatch": "Failed to hatch egg"
+      "failed_hatch": "Failed to hatch egg",
+      "no_ad_title": "No video right now",
+      "no_ad_msg": "There's no ad to watch at the moment. Try again in a minute!"
     },
     "rewards": {
       "reward_type_frame": "🖼️ Profile Frame",
@@ -1276,6 +1287,34 @@
     "empty": "No team members listed yet.",
     "signin_required": "Sign in to view profiles."
   },
+  "ios_settings": {
+    "premium": "Premium",
+    "remove_ads": "Remove Ads",
+    "remove_ads_desc": "Use the app with no ads",
+    "ads_removed": "Ads removed",
+    "ads_removed_desc": "Thanks for supporting the app!",
+    "manage_subscription": "Manage subscription",
+    "restore": "Restore Purchases",
+    "restore_done": "Purchases restored",
+    "restore_done_desc": "Ads are now removed.",
+    "restore_none": "Nothing to restore",
+    "restore_none_desc": "No active purchase was found for this Apple ID.",
+    "restore_failed": "Restore failed",
+    "restore_failed_desc": "Please check your connection and try again.",
+    "appearance": "Appearance",
+    "theme_system": "System",
+    "theme_light": "Light",
+    "theme_dark": "Dark",
+    "support": "Support",
+    "contact": "Contact support",
+    "rate": "Rate the app",
+    "share": "Share the app",
+    "legal": "Legal",
+    "privacy": "Privacy Policy",
+    "privacy_options": "Privacy options",
+    "terms": "Terms of Use",
+    "version": "Version {{version}}"
+  },
   "paywall": {
     "title": "Be a Pro",
     "subtitle": "No ads. Your trades on top. Gold badge by your name.",
@@ -1297,6 +1336,17 @@
     "free_months_one": "Like {{count}} month free",
     "free_months_other": "Like {{count}} months free",
     "cta": "Go Pro",
+    "cta_continue": "Continue",
+    "ios_title": "Remove Ads",
+    "ios_subtitle": "Enjoy every value, rod and timer with no ads in the way.",
+    "ios_features_title": "All features, ad-free",
+    "ios_features_desc": "Values, rods, fish value, timers and the calculator, with nothing in the way.",
+    "ios_banners_title": "No banner ads",
+    "ios_banners_desc": "Nothing pinned over the values while you browse.",
+    "ios_popups_title": "No pop-up ads",
+    "ios_popups_desc": "No full-screen ads when you come back to the app.",
+    "ios_support_title": "Support new features",
+    "ios_support_desc": "Your plan keeps the values fresh and new tools coming.",
     "cta_trial": "Start Free Trial",
     "cta_sub": "{{price}}, {{billed}}. Cancel anytime.",
     "cta_sub_trial": "{{trial}} free, then {{price}}, {{billed}}. Cancel anytime.",
@@ -1325,5 +1375,37 @@
     "trial_weeks_other": "{{count}} weeks",
     "trial_months_one": "{{count}} month",
     "trial_months_other": "{{count}} months"
+  },
+  "promo": {
+    "settings_row": "Redeem promo code",
+    "paywall_link": "Promo code",
+    "title": "Got a promo code?",
+    "subtitle": "Enter it below to get Pro free for a few days.",
+    "placeholder": "ENTER CODE",
+    "redeem": "Redeem",
+    "sign_in_first": "Sign in first. Your free Pro is saved to your account, so it stays if you change phones.",
+    "sign_in": "Sign in",
+    "active_until": "Pro is on until {{date}}",
+    "plan_label": "Pro (code) until {{date}}",
+    "success_title": "Pro unlocked!",
+    "success_body_one": "You got {{count}} day of Pro. It runs until {{date}}.",
+    "success_body_other": "You got {{count}} days of Pro. It runs until {{date}}.",
+    "error_invalid": "That code doesn't exist. Check the spelling and try again.",
+    "error_inactive": "This code has been switched off.",
+    "error_expired": "This code has expired.",
+    "error_already_redeemed": "You've already used this code.",
+    "error_device_used": "This code was already used on this phone.",
+    "error_used_up": "Too late, this code has run out.",
+    "error_too_many_attempts": "Too many tries. Wait an hour and try again.",
+    "error_sign_in": "Sign in first to use a code.",
+    "error_network": "Couldn't reach the server. Check your internet and try again."
+  },
+  "timers": {
+    "alert_on_title": "You’re in!",
+    "alert_on": "We’ll notify you when {{event}} starts.",
+    "alert_off_title": "Alert off",
+    "alert_off": "No more {{event}} notifications.",
+    "alert_failed": "Couldn’t update the alert. Check your connection and try again.",
+    "notify_me": "Notify me when {{event}} starts"
   }
 }

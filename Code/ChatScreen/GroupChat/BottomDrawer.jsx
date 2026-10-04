@@ -24,10 +24,10 @@ import { getStyles } from '../../SettingScreen/settingstyle';
 import { useLocalState } from '../../LocalGlobelStats';
 import { useTranslation } from 'react-i18next';
 import { showSuccessMessage } from '../../Helper/MessageHelper';
-import { mixpanel } from '../../AppHelper/MixPenel';
 import Clipboard from '@react-native-clipboard/clipboard';
 import { useHaptic } from '../../Helper/HepticFeedBack';
 import SwipeableBottomDrawer from '../../Helper/SwipeableBottomDrawer';
+import { useModalHandoff } from '../../Helper/modalPresentation';
 import ProfileReviewsSection from './ProfileReviewsSection';
 import ProfileTradesSection from './ProfileTradesSection';
 import ProfilePostsSection from './ProfilePostsSection';
@@ -50,7 +50,7 @@ import {
   getCountFromServer, // ✅ Added for follower count
 } from '@react-native-firebase/firestore';
 import { ref, get, set } from '@react-native-firebase/database';
-import { useOnlineStatus, canStaffBanMute, checkBanStatus, setUserStrike, muteUser,
+import { useOnlineStatus, canStaffBanMute, canSanctionTarget, setPersonalBlock, checkBanStatus, setUserStrike, muteUser,
   unbanUserWithEmail, makeModerator, removeModerator, makeBabyMod, removeBabyMod,
   makeTrusted, removeTrusted, makeCMSR, removeCMSR, makeHelper, removeHelper } from '../utils';
 import ProfileAdminActions from './ProfileAdminActions';
@@ -59,6 +59,7 @@ import dayjs from 'dayjs';
 import relativeTime from 'dayjs/plugin/relativeTime';
 import FramedAvatar from './FramedAvatar';
 import { getCachedProfile, warmProfileCache, invalidateFullProfile, getRoleOverride, getOrFetchFullProfile } from '../../Helper/profileCache';
+import { canSeeCountryFlags } from '../../Helper/countryFlag';
 import { resolveItemImage } from '../../Helper/valueSources';
 import { GAME } from '../../config/game';
 import { SIZE } from '../../Design/tokens';
@@ -72,7 +73,6 @@ const REVIEWS_PAGE_SIZE = 3; // how many reviews per page
 
 // ✅ Helper function to format fruit names for image URLs
 const formatName = (name) => {
-  const insets = useSafeAreaInsets();
   if (!name || typeof name !== 'string') return '';
   return name.replace(/^\+/, '').replace(/\s+/g, '-');
 };
@@ -155,6 +155,10 @@ const ProfileBottomDrawer = ({
 }) => {
   const { theme, firestoreDB, appdatabase, user, isAdmin, modControlsEnabled, canGrantJmd } = useGlobalState();
   const { updateLocalState, localState } = useLocalState();
+  // Android draws edge-to-edge (targetSdk 36): sheets must clear the nav bar
+  // themselves. The post viewer below read `insets` without this and threw a
+  // ReferenceError the first time anyone tapped a post in a profile.
+  const insets = useSafeAreaInsets();
   const { t } = useTranslation();
   const { triggerHapticFeedback } = useHaptic();
 
@@ -172,7 +176,11 @@ const ProfileBottomDrawer = ({
   const avatar = selectedUser?.avatar || null;
 
   // 🔒 ban state - ✅ Safety check for array
-  const isBlock = Array.isArray(bannedUsers) && bannedUsers.includes(selectedUserId);
+  // The device list is the source of truth; the prop is [] on the Trades /
+  // Feed / root stacks, which made a blocked user look unblocked there.
+  const deviceBlocks = Array.isArray(localState?.bannedUsers) ? localState.bannedUsers : [];
+  const isBlock = !!selectedUserId && (deviceBlocks.includes(selectedUserId)
+    || (Array.isArray(bannedUsers) && bannedUsers.includes(selectedUserId)));
 
   // Cosmetics of the profile being viewed — drives the avatar frame.
   const [drawerCosmetics, setDrawerCosmetics] = useState(null);
@@ -242,6 +250,21 @@ const ProfileBottomDrawer = ({
   // two never fight over the screen or the keyboard.
   const [showReasonModal, setShowReasonModal] = useState(false);
   const [reasonActionType, setReasonActionType] = useState(null); // {type, value, email}
+
+  // The reason modal is a SIBLING of the drawer. Opening it in the same tick
+  // as toggleModal() asks iOS to present it while the drawer's controller is
+  // still animating out, which UIKit refuses — the app then looks frozen.
+  // The handoff waits for the drawer's onDismiss (Adopt Me e45b4d4).
+  const { handoff, onDismiss: onDrawerDismiss } = useModalHandoff();
+
+  // Every route that dismisses the reason modal must also drop the pending
+  // action: reasonActionType is what tells the "reset when drawer closes"
+  // effect that a sanction is still in flight. Back and backdrop used to
+  // leave it set.
+  const closeReasonModal = useCallback(() => {
+    setShowReasonModal(false);
+    setReasonActionType(null);
+  }, []);
   const [adminReason, setAdminReason] = useState('');
 
   const [isFollowing, setIsFollowing] = useState(false);
@@ -319,6 +342,9 @@ const ProfileBottomDrawer = ({
           isTrusted: roleOv.isTrusted ?? !!record.isTrusted,
           isCMSR: roleOv.isCMSR ?? !!record.isCMSR,
           isHelper: roleOv.isHelper ?? !!record.isHelper,
+          // From the profile record, not the message/trade: new ones no longer
+          // carry a copy. Rendered for admins only.
+          flage: record.flage ?? null,
         });
 
         // Ban state for the Unban chip. checkBanStatus validates against
@@ -472,7 +498,6 @@ const ProfileBottomDrawer = ({
     triggerHapticFeedback('impactLight');
     Clipboard.setString(code);
     showSuccessMessage(t('value.copy'), 'Copied to Clipboard');
-    mixpanel.track('Code UserName', { UserName: code });
   };
 
   // ─────────────────────────────────────────────
@@ -593,19 +618,18 @@ const ProfileBottomDrawer = ({
           style: 'destructive',
           onPress: async () => {
             try {
-              let updatedBannedUsers;
-
-              // ✅ Safety check for array
-              const currentBanned = Array.isArray(bannedUsers) ? bannedUsers : [];
-              if (isBlock) {
-                updatedBannedUsers = currentBanned.filter(
-                  (id) => id !== selectedUserId,
-                );
-              } else {
-                updatedBannedUsers = [...currentBanned, selectedUserId];
-              }
-
-              await updateLocalState('bannedUsers', updatedBannedUsers);
+              // Merges into the device list and mirrors to RTDB so the block
+              // survives a reinstall — see utils.setPersonalBlock.
+              await setPersonalBlock({
+                db: appdatabase,
+                myId: user?.id,
+                targetId: selectedUserId,
+                block: !isBlock,
+                current: deviceBlocks,
+                updateLocalState,
+                displayName: userName,
+                avatar,
+              });
 
               setTimeout(() => {
                 showSuccessMessage(
@@ -633,6 +657,11 @@ const ProfileBottomDrawer = ({
   const canManageBabyMod = isAdmin || !!canGrantJmd;
   const canManageBadges = isAdmin || !!user?.isModerator;
   const isStaff = isAdmin || !!user?.isModerator || !!user?.isBabyMod;
+  // Staff targets are off-limits to everyone but admins. Drives the UI only;
+  // utils.canSanctionTarget is what enforces it at write time.
+  const targetIsStaff = !!(mergedUser?.isModerator || mergedUser?.isBabyMod
+    || mergedUser?.isAdmin || mergedUser?.admin);
+  const canSanction = isAdmin || !targetIsStaff;
 
   // Strike / mute / ban all route through the reason modal, so every entry in
   // the Admin Dashboard's ban list says WHY it happened.
@@ -644,9 +673,9 @@ const ProfileBottomDrawer = ({
     }
     setReasonActionType({ ...action, email: targetEmail });
     setAdminReason('');
-    toggleModal();            // close the drawer; the modal is its sibling
-    setShowReasonModal(true);
-  }, [mergedUser?.email, toggleModal]);
+    // Close the drawer, then present the reason modal once it has gone.
+    handoff(toggleModal, () => setShowReasonModal(true));
+  }, [mergedUser?.email, toggleModal, handoff]);
 
   const handleApplyStrike = useCallback((strikeCount) => {
     openReasonModal({ type: 'strike', value: strikeCount });
@@ -669,17 +698,33 @@ const ProfileBottomDrawer = ({
       return;
     }
 
+    // role lets utils' canSanctionTarget tell an admin (who may sanction
+    // staff) from a moderator (who may not).
+    const actorRole = isAdmin ? 'admin' : (user?.isModerator ? 'moderator' : (user?.isBabyMod ? 'baby_mod' : null));
+    const bannerInfo = { id: user?.id, displayName: user?.displayName || 'Admin', avatar: user?.avatar, role: actorRole };
+
+    // Check staff immunity here too, where selectedUserId is unambiguous, so
+    // the mod learns before anything is written.
+    const allowed = await canSanctionTarget({ targetUid: selectedUserId, bannerInfo, showAlert: true });
+    if (!allowed) {
+      closeReasonModal();
+      return;
+    }
+
     setShowReasonModal(false);
 
-    const bannerInfo = { id: user?.id, displayName: user?.displayName || 'Admin', avatar: user?.avatar };
     const reason = adminReason.trim() || undefined;
     const { type, value, email } = reasonActionType;
+    // selectedUser is built from a chat MESSAGE, so mergedUser.id is the
+    // message key, not the user. The ban record's userId must be the uid —
+    // the Admin Dashboard looks profiles up and grants roles by it.
+    const targetInfo = { ...mergedUser, id: selectedUserId };
 
     let ok = false;
     if (type === 'strike') {
-      ok = await setUserStrike(email, value, selectedUserId, true, bannerInfo, mergedUser, reason);
+      ok = await setUserStrike(email, value, selectedUserId, true, bannerInfo, targetInfo, reason);
     } else if (type === 'mute') {
-      ok = await muteUser(email, value, mergedUser, bannerInfo, true, reason);
+      ok = await muteUser(email, value, targetInfo, bannerInfo, true, reason);
     }
 
     if (ok) {
@@ -687,7 +732,7 @@ const ProfileBottomDrawer = ({
       setIsBanned(true);
     }
     setReasonActionType(null);
-  }, [reasonActionType, adminReason, isAdmin, user, modControlsEnabled, mergedUser, selectedUserId]);
+  }, [reasonActionType, adminReason, isAdmin, user, modControlsEnabled, mergedUser, selectedUserId, closeReasonModal]);
 
   const handleUnbanUser = useCallback(async () => {
     if (!mergedUser?.email) return;
@@ -742,7 +787,9 @@ const ProfileBottomDrawer = ({
   useEffect(() => {
     // showReasonModal guard: the reason modal deliberately closes the drawer,
     // and without this the reset wiped the target user mid-action.
-    if (!isVisible && !showReasonModal) {
+    // reasonActionType covers the handoff gap: it is set before the drawer
+    // closes, while the reason modal only opens once the drawer has gone.
+    if (!isVisible && !showReasonModal && !reasonActionType) {
       setShowModTools(false);
       setLoadDetails(false);
       setRatingSummary(null);
@@ -762,7 +809,7 @@ const ProfileBottomDrawer = ({
       setLastTradeDoc(null);
       setHasMoreTrades(false);
     }
-  }, [isVisible, showReasonModal]);
+  }, [isVisible, showReasonModal, reasonActionType]);
 
   // ─────────────────────────────────────────────
   // Load rating summary + joined
@@ -990,7 +1037,6 @@ const ProfileBottomDrawer = ({
     
     // ✅ Prevent duplicate calls using ref (avoids dependency issues)
     if (isLoadingRef.current) {
-      console.log('🔄 [BottomDrawer] Already loading reviews, skipping...');
       return;
     }
 
@@ -1748,9 +1794,8 @@ const ProfileBottomDrawer = ({
               backgroundColor: isDarkMode ? config.colors.surfaceDark : '#ffffff',
               borderTopLeftRadius: 20,
               borderTopRightRadius: 20,
-              paddingBottom: insets.bottom,
               maxHeight: '85%',
-              paddingBottom: Platform.OS === 'ios' ? 34 : 20,
+              paddingBottom: insets.bottom + 12,
             }}
           >
             {/* Header */}
@@ -1840,6 +1885,7 @@ const ProfileBottomDrawer = ({
       transparent={true}
       visible={isVisible && !selectedPost}
       onRequestClose={toggleModal}
+      onDismiss={onDrawerDismiss}
     >
       {/* Overlay */}
       <Pressable style={[styles.overlay, { backgroundColor: 'rgba(0,0,0,0.5)' }]} onPress={toggleModal} />
@@ -1949,8 +1995,8 @@ const ProfileBottomDrawer = ({
                   >
                     {userName}
                   </Text>
-                  {selectedUser?.flage ? (
-                    <Text style={{ fontSize: SIZE.subtitle }}>{selectedUser.flage}</Text>
+                  {canSeeCountryFlags(isAdmin) && mergedUser?.flage ? (
+                    <Text style={{ fontSize: SIZE.subtitle }}>{mergedUser.flage}</Text>
                   ) : null}
                   <TouchableOpacity onPress={() => copyToClipboard(userName)} style={{ padding: SPACE.hair }}>
                     <Icon name="copy-outline" size={14} color={c.textMuted} />
@@ -2381,6 +2427,8 @@ const ProfileBottomDrawer = ({
                       isBabyMod={!!user?.isBabyMod}
                       isModerator={!!user?.isModerator}
                       isStaff={isStaff}
+                      canSanction={canSanction}
+                      targetIsStaff={targetIsStaff}
                       canManageBabyMod={canManageBabyMod}
                       targetIsBabyMod={!!mergedUser?.isBabyMod}
                       handleMakeBabyMod={handleMakeBabyMod}
@@ -2411,10 +2459,10 @@ const ProfileBottomDrawer = ({
         KeyboardAvoidingView on iOS only: Android already resizes via
         adjustResize, and doubling up makes the modal jump when the keyboard
         dismisses, which lands taps on the wrong button. */}
-    <Modal visible={showReasonModal} transparent animationType="fade" onRequestClose={() => setShowReasonModal(false)}>
+    <Modal visible={showReasonModal} transparent animationType="fade" onRequestClose={closeReasonModal}>
       <KeyboardAvoidingView behavior="padding" enabled={Platform.OS === 'ios'} style={{ flex: 1 }}>
         <Pressable
-          onPress={() => setShowReasonModal(false)}
+          onPress={closeReasonModal}
           style={{ flex: 1, backgroundColor: 'rgba(0,0,0,0.6)', justifyContent: 'center', alignItems: 'center', paddingHorizontal: SPACE.xxxl }}
         >
           <Pressable onPress={(e) => e.stopPropagation()} style={{ width: '100%', backgroundColor: c.bg, borderRadius: 16, padding: SPACE.xxxl, borderWidth: 1, borderColor: c.border }}>
@@ -2439,7 +2487,7 @@ const ProfileBottomDrawer = ({
             />
             <View style={{ flexDirection: 'row', justifyContent: 'flex-end', gap: SPACE.lg, marginTop: SPACE.xxxl }}>
               <TouchableOpacity
-                onPress={() => { setShowReasonModal(false); setReasonActionType(null); }}
+                onPress={closeReasonModal}
                 style={{ paddingVertical: SPACE.lg, paddingHorizontal: SPACE.xxl, borderRadius: 8, backgroundColor: c.bgAlt }}
               >
                 <Text style={{ color: c.text, fontFamily: FONT.regular }}>Cancel</Text>

@@ -17,7 +17,6 @@ import SafeLottieView from '../Helper/SafeLottieView';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useGlobalState } from '../GlobelStats';
 import { useHaptic } from '../Helper/HepticFeedBack';
-import { initGameSounds, releaseGameSounds, playPop, playWoosh, isSoundEnabled, setSoundEnabled } from '../Helper/GameSoundService';
 import { useTranslation } from 'react-i18next';
 import { getUserXP } from './xpUtils';
 import { getStarBalance } from './starUtils';
@@ -26,6 +25,17 @@ import { getMyCosmetics, syncMyCosmetics, getCachedEggData, setCachedEggXP, setC
 import { EGG_LIST, RARITY_CONFIG, COSMETIC_TYPE, ALL_ITEMS } from './shopItems';
 import FramedAvatar from '../ChatScreen/GroupChat/FramedAvatar';
 import RewardedAdManager from '../Ads/RewardedAdManager';
+
+// RewardedAdManager.show() folds "no ad available" into false, which looked
+// exactly like closing the ad early — the button just reset with no feedback.
+// The callback API keeps the three outcomes apart so we can tell the user.
+const showRewardedForResult = () => new Promise((resolve) => {
+  RewardedAdManager.showWithCallback(
+    () => resolve('earned'),
+    () => resolve('closed'),
+    () => resolve('unavailable'),
+  );
+});
 import { STATUS } from '../Design/tokens';
 import { SIZE } from '../Design/tokens';
 import { SPACE } from '../Design/tokens';
@@ -445,26 +455,12 @@ const MysteryEggScreen = ({ navigation }) => {
   const fadeAnim = useRef(new Animated.Value(0)).current;
   const bgPulse = useRef(new Animated.Value(0)).current;
 
-  const [soundOn, setSoundOn] = useState(() => isSoundEnabled('mysteryegg'));
-
-  useEffect(() => {
-    initGameSounds();
-    return () => releaseGameSounds();
-  }, []);
-
   // Warm the rewarded ad on entry — the "Watch Ad for Free Hatch" button
   // needs it loaded BEFORE the tap (cold loads used to time out as
   // "unavailable" and burn the user's tap).
   useEffect(() => {
     try { RewardedAdManager.prepare(); } catch (_) {}
   }, []);
-
-  const toggleSound = () => {
-    const next = !soundOn;
-    setSoundOn(next);
-    setSoundEnabled('mysteryegg', next);
-    triggerHapticFeedback('selection');
-  };
 
   // Subtle bg pulse animation
   useEffect(() => {
@@ -530,7 +526,6 @@ const MysteryEggScreen = ({ navigation }) => {
             setPhase('hatching');
             setLoading(true);
             triggerHapticFeedback('impactMedium');
-            playPop('mysteryegg');
 
             // Start wobble animation — more dramatic for kids
             Animated.loop(
@@ -561,7 +556,6 @@ const MysteryEggScreen = ({ navigation }) => {
                     setPhase('reveal');
                     setLoading(false);
                     triggerHapticFeedback('notificationSuccess');
-                    playWoosh('mysteryegg');
                   });
 
                   // Refresh data
@@ -631,9 +625,6 @@ const MysteryEggScreen = ({ navigation }) => {
         </View>
 
         <View style={{ flexDirection: 'row', alignItems: 'center', gap: SPACE.sm }}>
-          <TouchableOpacity onPress={toggleSound} style={[s.backBtn, { backgroundColor: isDark ? 'rgba(255,255,255,0.1)' : 'rgba(255,255,255,0.3)' }]} activeOpacity={0.7}>
-            <Icon name={soundOn ? 'volume-high' : 'volume-mute'} size={18} color={isDark ? '#e2e8f0' : '#4a2c2a'} />
-          </TouchableOpacity>
           <View style={[s.xpBadge, { backgroundColor: isDark ? '#a855f7' : '#FF6B9D' }]}>
             <Text style={s.xpBadgeText}>⭐ {starBalance.toLocaleString()}</Text>
           </View>
@@ -698,9 +689,16 @@ const MysteryEggScreen = ({ navigation }) => {
                 onPress={async () => {
                   if (adLoading) return;
                   setAdLoading(true);
-                  const earned = await RewardedAdManager.show();
+                  const result = await showRewardedForResult();
                   setAdLoading(false);
-                  if (earned) {
+                  if (result === 'unavailable') {
+                    Alert.alert(
+                      t('mystery_egg.alerts.no_ad_title', { defaultValue: 'No video right now' }),
+                      t('mystery_egg.alerts.no_ad_msg', { defaultValue: "There's no ad to watch at the moment. Try again in a minute!" }),
+                    );
+                    return;
+                  }
+                  if (result === 'earned') {
                     setUsedFreeHatch(true);
                     // Persist to RTDB
                     const { ref: adRef, set: adSet } = require('@react-native-firebase/database');
@@ -830,9 +828,16 @@ const MysteryEggScreen = ({ navigation }) => {
                   onPress={async () => {
                     if (adLoading) return;
                     setAdLoading(true);
-                    const earned = await RewardedAdManager.show();
+                    const result = await showRewardedForResult();
                     setAdLoading(false);
-                    if (earned) {
+                    if (result === 'unavailable') {
+                      Alert.alert(
+                        t('mystery_egg.alerts.no_ad_title', { defaultValue: 'No video right now' }),
+                        t('mystery_egg.alerts.no_ad_msg', { defaultValue: "There's no ad to watch at the moment. Try again in a minute!" }),
+                      );
+                      return;
+                    }
+                    if (result === 'earned') {
                       setUsedFreeHatch(true);
                       // Persist to RTDB
                       const { ref: adRef, set: adSet } = require('@react-native-firebase/database');
@@ -1026,7 +1031,7 @@ const s = StyleSheet.create({
   costBadge: { borderRadius: 12, paddingHorizontal: SPACE.lg, paddingVertical: SPACE.xs, marginTop: SPACE.lg, zIndex: 1 },
   costText: { fontSize: SIZE.caption, fontFamily: FONT.bold },
   lockedOverlay: {
-    ...StyleSheet.absoluteFillObject,
+    ...StyleSheet.absoluteFill,
     backgroundColor: 'rgba(0,0,0,0.4)',
     borderRadius: 24,
     alignItems: 'center',

@@ -15,7 +15,7 @@ import Icon from 'react-native-vector-icons/Ionicons';
 import config from '../../Helper/Environment';
 import { Menu, MenuOptions, MenuOption, MenuTrigger } from 'react-native-popup-menu';
 import { useTranslation } from 'react-i18next';
-import database, { ref, update } from '@react-native-firebase/database';
+import { ref, update, set, remove } from '@react-native-firebase/database';
 import { showSuccessMessage, showErrorMessage } from '../../Helper/MessageHelper';
 import FramedAvatar from './FramedAvatar';
 import { getCachedProfile, warmProfileCache } from '../../Helper/profileCache';
@@ -98,8 +98,10 @@ const InboxScreen = ({ chats, setChats, loading, bannedUsers }) => {
           lastMessage: chatData.lastMessage || t('chat.no_messages_yet'),
           lastMessageTimestamp: chatData.timestamp || 0,
           unreadCount: isBlocked ? 0 : rawUnread,
-          otherUserAvatar: chatData.receiverAvatar || 'https://example.com/default-avatar.jpg',
+          otherUserAvatar: chatData.receiverAvatar || GAME.defaultAvatar,
           otherUserName: chatData.receiverName || t('private_chat.anonymous'),
+          // Per-chat mute lives on this same row, so the bell costs no read.
+          muted: !!chatData.muted,
         });
 
         updateChatsList();
@@ -183,6 +185,7 @@ const InboxScreen = ({ chats, setChats, loading, bannedUsers }) => {
   const isDarkMode = theme === 'dark';
   // ✅ Memoize styles
   const styles = useMemo(() => getStyles(isDarkMode), [isDarkMode]);
+  const themeColors = getThemeColors(isDarkMode);
 
 
  // ✅ Memoize handleDelete with useCallback
@@ -226,19 +229,14 @@ const InboxScreen = ({ chats, setChats, loading, bannedUsers }) => {
               return;
             }
 
-            // 1. Delete chat metadata for the current user
-            const senderChatRef = database().ref(`chat_meta_data/${user.id}/${otherUserId}`);
-            const snapshot = await senderChatRef.once('value');
+            // Delete only MY inbox row. This used to remove the whole
+            // private_messages/{chatId} thread too, which wiped the
+            // conversation for the other person as well. The thread comes
+            // back into my inbox if either of us messages again.
+            const myChatRef = ref(appdatabase, `chat_meta_data/${user.id}/${otherUserId}`);
+            await remove(myChatRef);
 
-            if (snapshot.exists()) {
-              await senderChatRef.remove();
-            }
-
-            // 2. Delete full chat thread using chatId
-            const fullChatRef = database().ref(`private_messages/${chatId}`);
-            await fullChatRef.remove();
-
-            // 3. Update local state - ✅ Validate setChats callback
+            // Update local state - ✅ Validate setChats callback
             setLocalChats((prevChats) => {
               if (!Array.isArray(prevChats)) return [];
               return prevChats.filter((chat) => chat?.chatId !== chatId);
@@ -261,7 +259,49 @@ const InboxScreen = ({ chats, setChats, loading, bannedUsers }) => {
     ],
     { cancelable: true }
   );
-}, [allChats, user?.id, setChats, t]);
+}, [allChats, user?.id, setChats, t, appdatabase]);
+
+  // Flip the `muted` flag on one inbox row, optimistically.
+  const setRowMuted = useCallback((otherUserId, muted) => {
+    const apply = (prevChats) => {
+      if (!Array.isArray(prevChats)) return prevChats;
+      return prevChats.map((chat) =>
+        chat?.otherUserId === otherUserId ? { ...chat, muted } : chat
+      );
+    };
+    setLocalChats(apply);
+    if (setChats && typeof setChats === 'function') setChats(apply);
+  }, [setChats]);
+
+  // 🔔 Per-chat mute. Stored on my own inbox row as
+  // chat_meta_data/{me}/{partner}/muted, for the push notifier to skip
+  // (server side, notifyNewMessage). Written as true or null (never false) so an unmuted row looks
+  // exactly like one from a build that never had the bell. The sender only
+  // ever update()s individual fields of this row, so it cannot clear the flag.
+  const handleToggleMute = useCallback(async (otherUserId, otherUserName, currentlyMuted) => {
+    if (!user?.id || !otherUserId || !appdatabase) return;
+    const nextMuted = !currentlyMuted;
+    setRowMuted(otherUserId, nextMuted);
+    try {
+      await set(
+        ref(appdatabase, `chat_meta_data/${user.id}/${otherUserId}/muted`),
+        nextMuted ? true : null
+      );
+      showSuccessMessage(
+        t('home.alert.success'),
+        nextMuted
+          ? t('inbox.chat_muted', { defaultValue: 'Notifications muted for {{name}}', name: otherUserName })
+          : t('inbox.chat_unmuted', { defaultValue: 'Notifications enabled for {{name}}', name: otherUserName })
+      );
+    } catch (error) {
+      console.error('❌ Error toggling chat mute:', error);
+      setRowMuted(otherUserId, !!currentlyMuted); // roll back
+      showErrorMessage(
+        t('home.alert.error'),
+        t('inbox.mute_failed', { defaultValue: 'Could not update notification settings. Please try again.' })
+      );
+    }
+  }, [user?.id, appdatabase, setRowMuted, t]);
 
 
 
@@ -334,6 +374,7 @@ const InboxScreen = ({ chats, setChats, loading, bannedUsers }) => {
     const unreadCount = item.unreadCount || 0;
     const isOnline = item.isOnline || false;
     const isBanned = item.isBanned || false;
+    const isMuted = !!item.muted;
 
     return (
       <View style={styles.itemContainer}>
@@ -366,6 +407,21 @@ const InboxScreen = ({ chats, setChats, loading, bannedUsers }) => {
             </View>
           )}
         </TouchableOpacity>
+        <TouchableOpacity
+          onPress={() => handleToggleMute(otherUserId, otherUserName, isMuted)}
+          hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+          style={{ paddingHorizontal: SPACE.sm }}
+          accessibilityRole="button"
+          accessibilityLabel={isMuted
+            ? t('inbox.unmute_chat', { defaultValue: 'Unmute chat' })
+            : t('inbox.mute_chat', { defaultValue: 'Mute chat' })}
+        >
+          <Icon
+            name={isMuted ? 'notifications-off' : 'notifications-outline'}
+            size={20}
+            color={isMuted ? themeColors.danger : themeColors.textMuted}
+          />
+        </TouchableOpacity>
         <Menu>
           <MenuTrigger>
             <Icon
@@ -384,7 +440,7 @@ const InboxScreen = ({ chats, setChats, loading, bannedUsers }) => {
       </View>
     );
     // isDarkMode: FramedAvatar needs the theme
-  }, [styles, user, handleOpenChat, handleDelete, t, isDarkMode]);
+  }, [styles, user, handleOpenChat, handleDelete, handleToggleMute, t, isDarkMode, themeColors]);
 
   return (
     <View style={styles.container}>
@@ -397,9 +453,14 @@ const InboxScreen = ({ chats, setChats, loading, bannedUsers }) => {
       ) : (
         <FlatList
           data={displayedChats}
+          // Rows read the partner's frame from the profile cache, which the
+          // warm effect fills after the rows first render. Without this the
+          // FlatList saw no prop change and never repainted them, so warmed
+          // frames did not appear until something else re-rendered the row.
+          extraData={profileCacheVersion}
           keyExtractor={(item, index) => item?.chatId || `chat-${index}`}
           renderItem={renderChatItem}
-          removeClippedSubviews={true}
+          removeClippedSubviews={false}
           maxToRenderPerBatch={10}
           windowSize={10}
           onEndReached={handleLoadMore}

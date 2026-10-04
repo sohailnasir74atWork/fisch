@@ -20,7 +20,7 @@ try {
     getString: () => undefined,
     getNumber: () => undefined,
     set: () => {},
-    delete: () => {},
+    remove: () => {},
   };
 }
 const KEY = 'active';
@@ -74,8 +74,27 @@ export const updateMyCosmeticType = (type, value) => {
 //  purchase/activate/deactivate to ensure consistency.
 //  Skips if recently synced (within TTL).
 // ────────────────────────────────────────────────────────
-export const syncMyCosmetics = async (db, uid, force = false) => {
-  if (!db || !uid) return getMyCosmetics();
+// Home, Trader and Settings all call syncMyCosmetics at startup; before the
+// first one finished (and stamped SYNC_KEY) the TTL check let each of them
+// fire its own RTDB read. Concurrent callers for the same uid now share one
+// in-flight promise. A forced call (after purchase/activate) never joins a
+// non-forced read that may have started before its write landed.
+let inFlightSync = null; // { uid, force, promise }
+
+export const syncMyCosmetics = (db, uid, force = false) => {
+  if (!db || !uid) return Promise.resolve(getMyCosmetics());
+  if (inFlightSync && inFlightSync.uid === uid && (!force || inFlightSync.force)) {
+    return inFlightSync.promise;
+  }
+  const entry = { uid, force, promise: null };
+  entry.promise = runSyncMyCosmetics(db, uid, force).finally(() => {
+    if (inFlightSync === entry) inFlightSync = null;
+  });
+  inFlightSync = entry;
+  return entry.promise;
+};
+
+const runSyncMyCosmetics = async (db, uid, force) => {
 
   // Skip if recently synced (unless forced)
   if (!force) {
@@ -135,13 +154,13 @@ export const syncMyCosmetics = async (db, uid, force = false) => {
 // ────────────────────────────────────────────────────────
 export const clearMyCosmetics = () => {
   try {
-    store.delete(KEY);
-    store.delete(SYNC_KEY);
-    store.delete('egg_xp');
-    store.delete('egg_stats');
-    store.delete('egg_inventory');
-    store.delete('username');
-    store.delete('avatar');
+    store.remove(KEY);
+    store.remove(SYNC_KEY);
+    store.remove('egg_xp');
+    store.remove('egg_stats');
+    store.remove('egg_inventory');
+    store.remove('username');
+    store.remove('avatar');
   } catch {}
 };
 

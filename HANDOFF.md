@@ -33,8 +33,10 @@ signer     SHA1 D1:95:A1:22:F9:1D:23:F1:B1:AD:22:21:FC:CB:F0:99:93:08:7A:F1
 package    com.fischvaluescalc
 ```
 
-**Still not submittable** — the privacy-policy URL is null and the AdMob /
-RevenueCat keys are still Blox Fruit's. See Part 5.
+**Still not submittable** — the privacy-policy URL is set
+(`https://thesolanalabs.com/fisch/privacy`, 2026-09-23) but the page is not live
+yet, the terms URL is a placeholder, and the AdMob / RevenueCat keys are still
+Blox Fruit's. See Part 5.
 
 Read Part 1, then Part 2. Part 2 is the domain knowledge that is wrong by
 default: almost every mistake made in this project came from assuming how Fisch
@@ -1140,11 +1142,19 @@ The paywall footer reads `GAME.termsUrl` / `GAME.privacyPolicyUrl` and renders
 each link only when non-null. adoptme hardcodes its URLs in the screen itself and
 uses a *third* spelling in its own `settinghelper.js`; it is not a source of truth.
 
-Both keys were null, so the footer showed "Restore" alone. They are now set to
+Both keys were null, so the footer showed "Restore" alone. They were then set to
 `https://fischvalues.app/terms` and `/privacy` **so the links render** — but
 checked 2026-09-18, `fischvalues.app`, `fischvalues.com` and `fischvaluescalc.com`
-all fail to resolve. They are placeholders that 404. See the `TODO(legal)` block
-in `Code/config/game.js` for the full four-consumer audit.
+all fail to resolve.
+
+**2026-09-23:** `privacyPolicyUrl` is now the owner's
+`https://thesolanalabs.com/fisch/privacy` (page not published yet — the owner
+will put it live). Every consumer reads it from `game.js`: Settings no longer
+hardcodes Adopt Me's policy, and the chat rules no longer print the literal
+`${GAME.privacyPolicyUrl}` (translations use `{{privacyUrl}}`, passed by
+`ChatRuleModal`). `termsUrl` is still the fischvalues.app placeholder, and
+Settings' child-safety row still opens Adopt Me's page. See the Legal block in
+`Code/config/game.js`.
 
 ## 24. Known issues and what is left
 
@@ -1189,8 +1199,11 @@ Verified against the tree on 2026-09-16, not carried forward on trust.
    >
    > Every sibling app distributed through Play has the same split waiting.
 
-1. **`privacyPolicyUrl` is `null`** in `game.js`. Both stores refuse a listing
-   without one.
+1. **The privacy page is not live and `termsUrl` is a placeholder.**
+   `privacyPolicyUrl` is set to `https://thesolanalabs.com/fisch/privacy`
+   (2026-09-23) but that page 404s until the owner publishes it; `termsUrl`
+   points at the unregistered fischvalues.app. Both stores refuse a listing whose
+   policy link does not load.
 2. **AdMob unit IDs and RevenueCat keys are still Blox Fruit's** — flagged with a
    `⚠️ RELEASE BLOCKERS` header in `Environment.js`. This is why the running app
    logs a RevenueCat `ConfigurationError` on every launch; it is expected until

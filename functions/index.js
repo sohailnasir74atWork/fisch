@@ -58,6 +58,15 @@ for (const [name, fn] of Object.entries(chatMaintenance)) {
   if (name.startsWith('cleanUpNoContent_')) exports[name] = fn;
 }
 
+// ── Group chat push (2026-09-23) ──────────────────────────────────────
+// Nothing notified on group messages, invitations or join requests, and the
+// group mute switch had nothing to mute. Additive: reads only, no writes
+// except clearing a dead FCM token. See groupNotifications.js.
+const groupNotifications = require('./groupNotifications');
+exports.notifyGroupMessage = groupNotifications.notifyGroupMessage;
+exports.notifyGroupInvitation = groupNotifications.notifyGroupInvitation;
+exports.notifyGroupJoinRequest = groupNotifications.notifyGroupJoinRequest;
+
 // ── Push notifications ─────────────────────────────────────────────────
 // Enabled 2026-09-13. notifyPostComment had been written but left commented
 // out here, so it was never deployed and nobody was ever told about a comment
@@ -105,3 +114,22 @@ exports.cleanupOldPosts = retention.cleanupOldPosts;
 // query on lastMessageTimestamp would have matched every group, because
 // nothing ever writes that field.
 // exports.cleanupDeadGroups = require('./cleanupDeadGroups').cleanupDeadGroups;
+
+// ── Promo codes (2026-10-03) ──────────────────────────────────────────
+// v2 callable. Additive: writes only the promo* nodes. See promoCodes.js
+// for how to create a code.
+//   firebase deploy --only functions:redeemPromoCode --project stealanegg-5ac52
+exports.redeemPromoCode = require('./promoCodes').redeemPromoCode;
+
+// ── Boost expiry (2026-10-04, from mm2values 7e446e1) ─────────────────
+// Hourly. Flips isFeatured back to false once featuredUntil has passed;
+// without it an expired boost matched neither feed query and the trade was
+// invisible until cleanupOldTrades deleted it. Writes only isFeatured.
+//   firebase deploy --only functions:expireFeaturedTrades --project stealanegg-5ac52
+exports.expireFeaturedTrades = require('./expireFeaturedTrades').expireFeaturedTrades;
+
+// ── Event timer pushes (2026-10-04) ───────────────────────────────────
+// Every 10 min. One FCM topic send per event start (event_blackMarket,
+// event_adminAbuse, event_update); writes only eventTimers/*.
+//   firebase deploy --only functions:notifyEventTimers --project stealanegg-5ac52
+exports.notifyEventTimers = require('./eventTimers').notifyEventTimers;

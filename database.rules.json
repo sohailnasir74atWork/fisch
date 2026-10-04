@@ -302,8 +302,10 @@
       ".write": true
     },
     "activeChats": {
-      ".read": true,
-      ".write": true
+      "$uid": {
+        ".read": "auth != null && auth.uid === $uid",
+        ".write": "auth != null && auth.uid === $uid"
+      }
     },
     "previousStock": {
       ".read": true,
@@ -338,49 +340,32 @@
       ".write": true
     },
     "private_chat_new": {
-      ".indexOn": [
-        "participants"
-      ],
-      ".read": true,
-      ".write": true,
-      "$chatId": {
-        "messages": {
-          ".indexOn": [
-            "timestamp"
-          ]
-        },
-        "participants": {
-          ".indexOn": [
-            "user1",
-            "user2"
-          ]
-        }
-      }
+      ".read": false,
+      ".write": false
     },
     "chat_meta_data": {
-      ".read": true,
-      ".write": true
+      "$uid": {
+        ".read": "auth != null && (auth.uid === $uid || root.child('users').child(auth.uid).child('admin').val() === true || root.child('users').child(auth.uid).child('isAdmin').val() === true)",
+        ".write": "auth != null && auth.uid === $uid",
+        "$peer": {
+          ".write": "auth != null && (auth.uid === $uid || auth.uid === $peer)"
+        }
+      }
     },
     "private_messages": {
-      ".read": true,
-      ".write": true
-    },
-    "private_chat": {
-      ".read": true,
-      ".write": true,
-      "$chatId": {
+      "$chatKey": {
+        ".read": "auth != null && ($chatKey.beginsWith(auth.uid + '_') || $chatKey.endsWith('_' + auth.uid) || root.child('users').child(auth.uid).child('admin').val() === true || root.child('users').child(auth.uid).child('isAdmin').val() === true)",
+        ".write": "auth != null && ($chatKey.beginsWith(auth.uid + '_') || $chatKey.endsWith('_' + auth.uid))",
         "messages": {
           ".indexOn": [
             "timestamp"
           ]
-        },
-        "participants": {
-          ".indexOn": [
-            "user1",
-            "user2"
-          ]
         }
       }
+    },
+    "private_chat": {
+      ".read": false,
+      ".write": false
     },
     "mods": {
       ".read": true,
@@ -410,6 +395,28 @@
     },
     "helper": {
       ".read": true,
+      ".write": false
+    },
+    "promoCodes": {
+      ".read": false,
+      ".write": false
+    },
+    "promoRedemptions": {
+      ".read": false,
+      ".write": false
+    },
+    "promoAttempts": {
+      ".read": false,
+      ".write": false
+    },
+    "promoPro": {
+      "$uid": {
+        ".read": "auth != null && auth.uid === $uid",
+        ".write": false
+      }
+    },
+    "eventTimers": {
+      ".read": false,
       ".write": false
     }
   }

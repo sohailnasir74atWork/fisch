@@ -2,6 +2,7 @@
   "react-native": {
     "analytics_auto_collection_enabled": true,
     "messaging_auto_init_enabled": true,
+    "messaging_android_notification_color": "@color/notification_color",
     "crashlytics_debug_enabled": true
   },
   "database": {

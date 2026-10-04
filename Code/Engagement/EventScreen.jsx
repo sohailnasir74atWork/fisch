@@ -31,8 +31,19 @@
  */
 import React, { useMemo, useCallback, useState } from 'react';
 import {
-  View, Text, Image, FlatList, StyleSheet, TouchableOpacity, Modal, SafeAreaView,
+  View, Text, Image, FlatList, StyleSheet, TouchableOpacity, Modal, Platform,
 } from 'react-native';
+import { SafeAreaView } from 'react-native-safe-area-context';
+
+// react-native's SafeAreaView was a no-op on Android and only ever inset on
+// iOS. react-native-safe-area-context's insets on BOTH, so the edges are pinned
+// per-platform to keep this screen's layout exactly as it was. See HANDOFF.md
+// "SafeAreaView": stack screens are already padded via the navigator's
+// contentStyle, so applying real insets here would double the gap.
+const LEGACY_SAFE_AREA_EDGES = Platform.OS === 'ios'
+  ? ['top', 'bottom', 'left', 'right']
+  : [];
+
 import Icon from 'react-native-vector-icons/Ionicons';
 import { useLocalState } from '../LocalGlobelStats';
 import config from '../Helper/Environment';
@@ -188,7 +199,7 @@ const EventCard = ({ isDarkMode = false }) => {
         onRequestClose={() => setOpen(false)}
         presentationStyle="pageSheet"
       >
-        <SafeAreaView style={[styles.modal, { backgroundColor: C.screen }]}>
+        <SafeAreaView edges={LEGACY_SAFE_AREA_EDGES} style={[styles.modal, { backgroundColor: C.screen }]}>
           <View style={[styles.modalHeader, { borderBottomColor: C.border }]}>
             <View style={styles.modalTitleWrap}>
               <Text style={[styles.modalTitle, { color: C.text }]} numberOfLines={1}>
@@ -215,7 +226,7 @@ const EventCard = ({ isDarkMode = false }) => {
               renderItem={renderItem}
               initialNumToRender={14}
               windowSize={7}
-              removeClippedSubviews
+              removeClippedSubviews={false}
               contentContainerStyle={styles.listContent}
             />
           )}

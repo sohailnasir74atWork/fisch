@@ -24,13 +24,11 @@ import { showSuccessMessage } from '../../Helper/MessageHelper';
 import { useLocalState } from '../../LocalGlobelStats';
 import axios from 'axios';
 import { getDeviceLanguage } from '../../../i18n';
-import { mixpanel } from '../../AppHelper/MixPenel';
 import { FRUIT_KEYWORDS } from '../../Helper/filter';
 import ScamSafetyBox from './Scamwarning';
 import { useNavigation } from '@react-navigation/native';
 import config from '../../Helper/Environment';
-import { resolveItemImage } from '../../Helper/valueSources';
-import { sourceLabelForItems } from '../../Helper/valueSources';
+import { resolveItemImage, displayValueText, summarizeItems, normalizeScale, sourceLabel } from '../../Helper/valueSources';
 import { GAME } from '../../config/game';
 import { STATUS } from '../../Design/tokens';
 import { getThemeColors } from '../../Helper/themeColors';
@@ -65,6 +63,7 @@ const PrivateMessageList = ({
   setShowRatingModal,
   isPaginating,        // 👈 add this
   otherLastRead, // 👈 Other user's lastRead timestamp for read receipts
+  chatKey, // RTDB key of this conversation; the report popup needs the path
 }) => {
   const { theme, isAdmin, api, freeTranslation } = useGlobalState();
   const isDarkMode = theme === 'dark';
@@ -122,20 +121,31 @@ const PrivateMessageList = ({
   }, [triggerHapticFeedback]);
 
   // ✅ Memoize filteredMessages
+  // Dedupe by id (first occurrence wins). The live listener, a page load and
+  // a gap-fill can each deliver the same row; keys are ids, so a repeat both
+  // shows twice and trips React's duplicate-key path. Cheap: one Set pass.
   const filteredMessages = useMemo(() => {
     if (!Array.isArray(messages)) return [];
-    if (isBanned && userId) {
-      return messages.filter((message) => message?.senderId === userId);
+    const seen = new Set();
+    const out = [];
+    for (const message of messages) {
+      const id = message?.id != null ? String(message.id) : null;
+      if (id && seen.has(id)) continue;
+      if (id) seen.add(id);
+      if (isBanned && userId && message?.senderId !== userId) continue;
+      out.push(message);
     }
-    return messages;
+    return out;
   }, [messages, isBanned, userId]);
 
   // ✅ Memoize handleReport
   const handleReport = useCallback((message) => {
     if (!message) return;
-    setSelectedMessage(message);
+    // Private messages store no sender name, so the popup printed
+    // "Anonymous". Only the partner's messages can be reported here.
+    setSelectedMessage({ ...message, sender: message.sender || selectedUser?.sender });
     setShowReportPopup(true);
-  }, []);
+  }, [selectedUser?.sender]);
 
   // ✅ Memoize handleSubmitReport
   const handleSubmitReport = useCallback((message, reason) => {
@@ -181,7 +191,6 @@ const PrivateMessageList = ({
       Object.entries(placeholders).forEach(([placeholder, word]) => {
         translated = translated.replace(new RegExp(placeholder, 'g'), word);
       });
-      mixpanel.track("Translation", {lang:targetLang});
 
       return translated;
     } catch (err) {
@@ -245,12 +254,36 @@ const PrivateMessageList = ({
 
     const isMyMessage = item.senderId === userId;
 
-    // fruits helpers
-    const fruits = Array.isArray(item.fruits) ? item.fruits : [];
+    // Attached items (the field is still called `fruits` on the wire).
+    // Values go through Code/Helper/valueSources.js, not Number(value): an
+    // unpriced item has value null, so the raw sum printed "Value: 0" with no
+    // unit, and a Proto figure was shown as if it were money. Each item is
+    // priced on the scale it was picked under (valueSource), and the total is
+    // only summed when every item shares one scale — S$ and Proto are
+    // different lists and must never be added together.
+    const fruits = Array.isArray(item.fruits) ? item.fruits.filter(Boolean) : [];
     const hasFruits = fruits.length > 0;
-    const totalFruitValue = hasFruits
-      ? fruits.reduce((sum, f) => sum + (Number(f?.value) || 0), 0)
-      : 0;
+    const fruitScales = hasFruits
+      ? [...new Set(fruits.map(f => normalizeScale(f?.valueSource)))]
+      : [];
+    const singleScale = fruitScales.length === 1 ? fruitScales[0] : null;
+    const fruitSummary = hasFruits && singleScale ? summarizeItems(fruits, singleScale) : null;
+    // Items from before the Fisch catalogue have no `collection`, so the
+    // helpers would call them "Not tradeable"; they simply have no quote.
+    const fruitValueText = (fruit) => (fruit?.collection
+      ? displayValueText(fruit, normalizeScale(fruit.valueSource))
+      : 'Unpriced');
+    let totalText = null;
+    if (fruits.length > 1) {
+      if (!fruitSummary) {
+        totalText = 'Mixed S$ / Proto — not summed';
+      } else if (fruitSummary.observed === 0) {
+        totalText = 'Unpriced';
+      } else {
+        totalText = `${fruitSummary.unit} ${fruitSummary.totalText}` +
+          (fruitSummary.unpriced > 0 ? ` + ${fruitSummary.unpriced} unpriced` : '');
+      }
+    }
 
     const msgBubble = (
       <View
@@ -350,43 +383,34 @@ const PrivateMessageList = ({
                           {`${fruit.name || fruit.Name}  `}
                         </Text>
                         <Text style={[fruitStyles.fruitValue, { color: fruitColors.value }]}>
-                          · Value: {Number(fruit.value || 0).toLocaleString()}{' '}
+                          · {fruitValueText(fruit)}
+                          {Number.isInteger(fruit.quantity) && fruit.quantity > 1 ? ` ×${fruit.quantity}` : ''}{' '}
                         </Text>
-                        <View style={fruitStyles.badgeRow}>
-                          {fruit.isFly && (
-                            <View style={[fruitStyles.badge, fruitStyles.badgeFly]}>
-                              <Text style={fruitStyles.badgeText}>F</Text>
-                            </View>
-                          )}
-                          {fruit.isRide && (
-                            <View style={[fruitStyles.badge, fruitStyles.badgeRide]}>
-                              <Text style={fruitStyles.badgeText}>R</Text>
-                            </View>
-                          )}
-                        </View>
+                        {/* (F/R Fly/Ride badges removed: Adopt Me pet flags
+                            that no Fisch item carries.) */}
                       </View>
                     </View>
                   );
                 })}
 
-                {/* ✅ Total row – only if more than one fruit */}
-                {fruits.length > 1 && (
+                {/* ✅ Total row – only if more than one item */}
+                {totalText != null && (
                   <View style={[fruitStyles.totalRow, { borderTopColor: fruitColors.divider }]}>
                     <Text style={[fruitStyles.totalLabel, { color: fruitColors.totalLabel }]}>{t('private_chat.total_value')}</Text>
                     <Text style={[fruitStyles.totalValue, { color: fruitColors.totalValue }]}>
-                      {totalFruitValue.toLocaleString()}
+                      {totalText}
                     </Text>
                   </View>
                 )}
 
-                {/* Which catalogue priced this list. Replaces a 'D' badge that
-                    was an Adopt Me leftover (Default/Neon/Mega) — MM2 has no such
-                    variants, so it rendered 'D' on every item and meant nothing.
-                    The two catalogues disagree on 70% of the items they share, so
-                    a reader needs to know which one these numbers came from. */}
-                <Text style={fruitStyles.sourceNote}>
-                  Based on {sourceLabelForItems(fruits)} values
-                </Text>
+                {/* Which list priced these items. S$ and Proto are separate
+                    community lists on different scales, so a reader needs to
+                    know which one the numbers came from. */}
+                {singleScale && (
+                  <Text style={fruitStyles.sourceNote}>
+                    Based on {sourceLabel(singleScale)} values
+                  </Text>
+                )}
               </View>
             )}
 
@@ -416,7 +440,7 @@ const PrivateMessageList = ({
             <MenuOption onSelect={() => handleTranslate(item)}>
               <Text style={styles.menuOptionText}>{t('private_chat.translate')}</Text>
             </MenuOption>
-            {!isMyMessage && (
+            {!isMyMessage && !!chatKey && (
               <MenuOption onSelect={() => handleReport(item)}>
                 <Text style={styles.menuOptionText}>{t('chat.report')}</Text>
               </MenuOption>
@@ -465,8 +489,13 @@ const PrivateMessageList = ({
     const nextMsg = filteredMessages[index + 1];
     const showDateSep = !nextMsg || getDateLabel(item.timestamp) !== getDateLabel(nextMsg.timestamp);
 
+    // ONE wrapping View, not a Fragment: since RN 0.7x an inverted list lays
+    // each cell out with column-reverse before flipping it, so a Fragment's
+    // two children came out swapped and the day label sat BELOW the message
+    // ("Today" under the message you just sent). A single child keeps its own
+    // top-to-bottom order. Same fix as mm2values (ec45459).
     return (
-      <>
+      <View>
         {showDateSep && (
           <View style={{ alignItems: 'center', marginVertical: SPACE.lg }}>
             <View style={{
@@ -486,9 +515,9 @@ const PrivateMessageList = ({
           </View>
         )}
         {msgBubble}
-      </>
+      </View>
     );
-  }, [userId, selectedUser, user, styles, fruitColors, handleCopy, handleTranslate, handleReport, onReply, navigation, t, filteredMessages, getDateLabel, otherLastRead, localState?.showReadReceipts, isDarkMode, maxImageRowWidth]);
+  }, [userId, selectedUser, user, styles, fruitColors, handleCopy, handleTranslate, handleReport, onReply, navigation, t, filteredMessages, getDateLabel, otherLastRead, localState?.showReadReceipts, isDarkMode, maxImageRowWidth, chatKey]);
 
   // ✅ Memoize keyExtractor
   const keyExtractor = useCallback((item, index) => {
@@ -514,6 +543,8 @@ const PrivateMessageList = ({
         <FlatList
           style={{ flex: 1 }}
           data={filteredMessages}
+          // Rows must repaint when the partner reads, or the ticks stay grey.
+          extraData={otherLastRead}
           removeClippedSubviews={false}
           keyExtractor={keyExtractor}
           renderItem={renderMessage}
@@ -533,11 +564,14 @@ const PrivateMessageList = ({
         </View>
 
       )}
+      {/* channelPath: without it the popup looked the message up in the
+          public room, so every private report failed "Message not found". */}
       <ReportPopup
         visible={showReportPopup}
         message={selectedMessage}
         onClose={() => setShowReportPopup(false)}
         onSubmit={handleSubmitReport}
+        channelPath={chatKey ? `private_messages/${chatKey}/messages` : undefined}
       />
     </View>
   );
@@ -561,10 +595,11 @@ export const fruitStyles = StyleSheet.create({
     alignItems: 'center',
     justifyContent:'flex-start',
     marginBottom:3,
-
-    flex:1,
-
-
+    // NOT flex:1. These are rows in an auto-height column inside a chat
+    // bubble: flex:1 makes Yoga size the bubble from an unbounded main axis,
+    // which blew it up to ~1200pt and left Android painting the bubble
+    // background with NONE of its children - a blank white rectangle.
+    alignSelf: 'stretch',
   },
   fruitImage: {
     width: 20,

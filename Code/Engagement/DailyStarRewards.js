@@ -52,7 +52,14 @@ const DailyStarRewards = ({ visible, onClose, db, uid, isDarkMode = false }) => 
     const reward = await claimDailyStar(db, uid);
     if (reward) {
       setClaimedReward(reward);
-      setStatus(prev => ({ ...prev, canClaim: false, currentDay: reward.currentDay }));
+      // claimDailyStar increments totalStarsEarned in RTDB; mirror it here so
+      // the total shown in the modal doesn't lag a claim behind.
+      setStatus(prev => ({
+        ...prev,
+        canClaim: false,
+        currentDay: reward.currentDay,
+        totalStarsEarned: (prev?.totalStarsEarned || 0) + (reward.stars || 1),
+      }));
 
       // Bounce animation
       Animated.sequence([

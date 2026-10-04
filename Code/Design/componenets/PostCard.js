@@ -5,7 +5,6 @@ import {
 import Icon from 'react-native-vector-icons/FontAwesome';
 import FontAwesome6 from 'react-native-vector-icons/FontAwesome6';
 import InterstitialAdManager from '../../Ads/IntAd';
-import { mixpanel } from '../../AppHelper/MixPenel';
 import { useNavigation } from '@react-navigation/native';
 import CommentModal from './CommentsModal';
 import config from '../../Helper/Environment';
@@ -74,6 +73,13 @@ const PostCard = ({ item, userId, onLike, onReaction, localState, appdatabase, o
   const [showComments, setShowComments] = useState(false);
   const [showReportModal, setShowReportModal] = useState(false);
   const [isDrawerVisible, setIsDrawerVisible] = useState(false);
+  // The comment, report and profile modals mount on first open and then stay
+  // mounted: the drawer has to outlive its own close while a staff reason
+  // prompt is up. Mounting all three in every card put a large drawer plus two
+  // modals behind each post, and deep scrolls in the feed froze.
+  const [commentsMounted, setCommentsMounted] = useState(false);
+  const [reportMounted, setReportMounted] = useState(false);
+  const [drawerMounted, setDrawerMounted] = useState(false);
   const [showEmojiPicker, setShowEmojiPicker] = useState(false);
   const [heartScale] = useState(new Animated.Value(1));
   const [bannedUsers, setBannedUsers] = useState([]);
@@ -141,6 +147,7 @@ const PostCard = ({ item, userId, onLike, onReaction, localState, appdatabase, o
     } catch (error) {
       setIsOnline(false);
     }
+    setDrawerMounted(true);
     setIsDrawerVisible(true);
   };
 
@@ -162,7 +169,6 @@ const PostCard = ({ item, userId, onLike, onReaction, localState, appdatabase, o
       // Close drawer first (iOS doesn't auto-dismiss modals on navigation)
       setIsDrawerVisible(false);
       setTimeout(() => {
-        mixpanel.track('Design Screen');
         navigation.navigate('PrivateChatDesign', { selectedUser, item });
       }, 300);
     };
@@ -201,6 +207,13 @@ const PostCard = ({ item, userId, onLike, onReaction, localState, appdatabase, o
   const s = useMemo(() => getStyles(isDark), [isDark]);
   const formattedTime = item.createdAt ? dayjs(item.createdAt.toDate()).fromNow() : 'Anonymous';
   const hasNoImages = !Array.isArray(item.imageUrl) || item.imageUrl.length === 0;
+
+  // Posts arrive with padding blank lines that turned a two-line post into a
+  // screen-tall card; trim them and collapse runs of blank lines to one.
+  const descText = useMemo(
+    () => (typeof item?.desc === 'string' ? item.desc.trim().replace(/\n\s*\n(\s*\n)+/g, '\n\n') : ''),
+    [item?.desc],
+  );
 
   return (
     <View style={s.card}>
@@ -268,7 +281,7 @@ const PostCard = ({ item, userId, onLike, onReaction, localState, appdatabase, o
             </View>
           </MenuTrigger>
           <MenuOptions customStyles={{ optionsContainer: { borderRadius: 14, overflow: 'hidden', backgroundColor: isDark ? config.colors.surfaceDark : '#fff', shadowColor: c.shadow, shadowOpacity: 0.15, shadowRadius: 12, elevation: 8, minWidth: 160 } }}>
-            <MenuOption onSelect={() => setShowReportModal(true)}>
+            <MenuOption onSelect={() => { setReportMounted(true); setShowReportModal(true); }}>
               <View style={s.menuItem}>
                 <FontAwesome6 name="flag" size={12} color={STATUS.warning} solid />
                 <Text style={[s.menuItemText, { color: STATUS.warning }]}>Report</Text>
@@ -324,9 +337,9 @@ const PostCard = ({ item, userId, onLike, onReaction, localState, appdatabase, o
               })}
             </View>
           )}
-          {!!item?.desc && (
+          {!!descText && (
             <Text style={[s.desc, item.selectedTags?.length > 0 && { paddingRight: 80 }]}>
-              {item.desc}
+              {descText}
             </Text>
           )}
         </View>
@@ -336,8 +349,8 @@ const PostCard = ({ item, userId, onLike, onReaction, localState, appdatabase, o
       {!hasNoImages && (
         <View style={s.imageWrapper}>
           {/* Desc above image */}
-          {!!item?.desc && (
-            <Text style={[s.desc, { paddingHorizontal: 14, paddingBottom: 8 }]}>{item.desc}</Text>
+          {!!descText && (
+            <Text style={[s.desc, { paddingHorizontal: 14, paddingBottom: 8 }]}>{descText}</Text>
           )}
           {/* Tag overlay */}
           <View style={s.tagOverlay}>
@@ -383,11 +396,13 @@ const PostCard = ({ item, userId, onLike, onReaction, localState, appdatabase, o
               </View>
             )}
           </View>
-          <ReportModal visible={showReportModal} onClose={() => setShowReportModal(false)} item={item} banUserwithEmail={banUserwithEmail} />
+          {reportMounted && (
+            <ReportModal visible={showReportModal} onClose={() => setShowReportModal(false)} item={item} banUserwithEmail={banUserwithEmail} />
+          )}
         </View>
       )}
 
-      {hasNoImages && (
+      {hasNoImages && reportMounted && (
         <ReportModal visible={showReportModal} onClose={() => setShowReportModal(false)} item={item} banUserwithEmail={banUserwithEmail} />
       )}
 
@@ -423,7 +438,11 @@ const PostCard = ({ item, userId, onLike, onReaction, localState, appdatabase, o
         </Animated.View>
 
         {/* Comment button */}
-        <TouchableOpacity style={s.actionBtn} onPress={() => setShowComments(true)} activeOpacity={0.75}>
+        <TouchableOpacity
+          style={s.actionBtn}
+          onPress={() => { setCommentsMounted(true); setShowComments(true); }}
+          activeOpacity={0.75}
+        >
           <Icon name="comment-o" size={14} color={isDark ? '#94a3b8' : '#64748b'} />
           <Text style={s.actionBtnLabel}>
             {item.commentCount ? `${item.commentCount} comments` : '0 Comments'}
@@ -455,21 +474,25 @@ const PostCard = ({ item, userId, onLike, onReaction, localState, appdatabase, o
         </View>
       )}
 
-      <CommentModal
-        visible={showComments}
-        onClose={() => setShowComments(false)}
-        postId={item.id}
-        appdatabase={appdatabase}
-      />
+      {commentsMounted && (
+        <CommentModal
+          visible={showComments}
+          onClose={() => setShowComments(false)}
+          postId={item.id}
+          appdatabase={appdatabase}
+        />
+      )}
 
-      <ProfileBottomDrawer
-        isVisible={isDrawerVisible}
-        toggleModal={closeProfileDrawer}
-        startChat={handleChatNavigation}
-        selectedUser={selectedUser}
-        isOnline={isOnline}
-        bannedUsers={bannedUsers}
-      />
+      {drawerMounted && (
+        <ProfileBottomDrawer
+          isVisible={isDrawerVisible}
+          toggleModal={closeProfileDrawer}
+          startChat={handleChatNavigation}
+          selectedUser={selectedUser}
+          isOnline={isOnline}
+          bannedUsers={bannedUsers}
+        />
+      )}
     </View>
   );
 };
@@ -623,7 +646,7 @@ const getStyles = (isDark, c = getThemeColors(isDark)) =>
       resizeMode: 'cover',
     },
     moreOverlay: {
-      ...StyleSheet.absoluteFillObject,
+      ...StyleSheet.absoluteFill,
       backgroundColor: 'rgba(0,0,0,0.55)',
       justifyContent: 'center',
       alignItems: 'center',

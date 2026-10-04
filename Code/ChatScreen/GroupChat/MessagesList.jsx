@@ -1,4 +1,4 @@
-import React, { useCallback, useMemo, useState, useEffect } from 'react';
+import React, { useCallback, useMemo, useState, useEffect, useRef } from 'react';
 import {
   FlatList,
   View,
@@ -31,10 +31,8 @@ import { getSafeTextColor, RainbowText, isMultiColorText, getMultiColorPalette }
 import axios from 'axios';
 import { useLocalState } from '../../LocalGlobelStats';
 import { getDeviceLanguage } from '../../../i18n';
-import { mixpanel } from '../../AppHelper/MixPenel';
 import { FRUIT_KEYWORDS } from '../../Helper/filter';
-import { banUserwithEmail, unbanUserWithEmail } from '../utils';
-import { sourceLabelForItems } from '../../Helper/valueSources';
+import { sourceLabelForItems, displayValueText, summarizeItems, sourceLabel, DEFAULT_VALUE_SOURCE } from '../../Helper/valueSources';
 import { GAME } from '../../config/game';
 import { STATUS } from '../../Design/tokens';
 import { SIZE } from '../../Design/tokens';
@@ -76,8 +74,18 @@ const MessagesList = ({
   const { triggerHapticFeedback } = useHaptic();
   const scrollButtonOpacity = useMemo(() => new Animated.Value(0), []);
 
+  // Rows read the array through a ref so renderMessage does not list
+  // `messages` in its deps: a fresh renderMessage hands every visible cell a
+  // new renderItem and re-renders all of them. Cells that must repaint when
+  // the array changes (date headers next to an appended or deleted row) are
+  // covered by messages.length in the FlatList's extraData. Adopt Me c137845.
+  const messagesRef = useRef(messages);
+  messagesRef.current = messages;
+
   const { t } = useTranslation();
   const { isAdmin, api, freeTranslation, appdatabase } = useGlobalState();
+  // Moderators get the same message tools as admins, as in Adopt Me.
+  const isAdminOrMod = isAdmin || !!user?.isModerator;
 
   // Warm the profile cache for the senders in view so avatar frames render.
   // Public-chat messages are slim — they carry no cosmetics — so without this
@@ -129,7 +137,7 @@ const MessagesList = ({
     (targetId) => {
       if (!flatListRef?.current || !targetId) return;
   
-      const index = messages.findIndex((m) => m.id === targetId);
+      const index = (messagesRef.current || []).findIndex((m) => m.id === targetId);
       if (index === -1) return;
   
       try {
@@ -151,7 +159,7 @@ const MessagesList = ({
         console.log('scrollToIndex error:', e);
       }
     },
-    [flatListRef, messages],
+    [flatListRef],
   );
 
   // ✅ Scroll to bottom handler
@@ -241,7 +249,6 @@ const MessagesList = ({
       Object.entries(placeholders).forEach(([placeholder, word]) => {
         translated = translated.replace(new RegExp(placeholder, 'g'), word);
       });
-      mixpanel.track("Translation", { lang: targetLang });
 
 
       return translated;
@@ -337,12 +344,27 @@ const MessagesList = ({
     if (replyTo.hasFruits || (Array.isArray(replyTo.fruits) && replyTo.fruits.length > 0)) {
       const count = replyTo.fruitsCount || (Array.isArray(replyTo.fruits) ? replyTo.fruits.length : 0);
       return count > 0
-        ? `[${count} pet(s) message]`
-        : '[Pets message]';
+        ? `[${count} item(s)]`
+        : '[Items]';
     }
   
     return '[Deleted message]';
   }, []);
+
+  // Date header label: Today / Yesterday / a localised date. The comparison
+  // in renderMessage still uses toDateString() as a stable day key; only the
+  // display changes. toDateString() itself always renders in English
+  // ("Sat Oct 04 2026"), which is what this header used to show in every room.
+  const getDateLabel = useCallback((timestamp) => {
+    if (!timestamp) return '';
+    const msgDate = new Date(timestamp);
+    const today = new Date();
+    const yesterday = new Date();
+    yesterday.setDate(yesterday.getDate() - 1);
+    if (msgDate.toDateString() === today.toDateString()) return t('chat.today', { defaultValue: 'Today' });
+    if (msgDate.toDateString() === yesterday.toDateString()) return t('chat.yesterday', { defaultValue: 'Yesterday' });
+    return msgDate.toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' });
+  }, [t]);
 
   const renderMessage = useCallback(({ item, index }) => {
     // ✅ Safety checks
@@ -353,7 +375,7 @@ const MessagesList = ({
     // users, and seeded for the signed-in user by Trader.jsx.
     const msgProfile = resolveProfile(item) || {};
 
-    const previousMessage = messages[index + 1];
+    const previousMessage = messagesRef.current?.[index + 1];
     const currentDate = item.timestamp ? new Date(item.timestamp).toDateString() : null;
     const previousDate = previousMessage?.timestamp
       ? new Date(previousMessage.timestamp).toDateString()
@@ -362,9 +384,11 @@ const MessagesList = ({
 
     const fruits = Array.isArray(item.fruits) ? item.fruits : [];
     const hasFruits = fruits.length > 0;
-    const totalFruitValue = hasFruits
-      ? fruits.reduce((sum, f) => sum + (Number(f?.value) || 0), 0)
-      : 0;
+    // Values go through the same helpers as the calculator: the scale (S$ or
+    // Proto) is labelled, and an unpriced item says so instead of "Value: 0"
+    // being added into the total as if it were worth nothing.
+    const fruitScale = (hasFruits && fruits.find((f) => f?.valueSource)?.valueSource) || DEFAULT_VALUE_SOURCE;
+    const fruitSummary = hasFruits ? summarizeItems(fruits, fruitScale) : null;
     // console.log(user.id)
 
     // Winner badge info comes directly from message payload, similar to isPro / robloxUsernameVerified
@@ -373,12 +397,16 @@ const MessagesList = ({
       (typeof item?.lastGameWinAt === 'number' &&
         Date.now() - item.lastGameWinAt <= 24 * 60 * 60 * 1000);
 
+    // ONE wrapping View with the header first, never a Fragment: an inverted
+    // list lays each cell out column-reverse before flipping it, so a
+    // Fragment's two children come out swapped and the day label lands BELOW
+    // its message. Same fix as PrivateMessageList / mm2values ec45459.
     return (
       <View>
         {/* Display the date header if it's a new day */}
         {shouldShowDateHeader && currentDate && (
           <View>
-            <Text style={styles.dateSeparator}>{currentDate}</Text>
+            <Text style={styles.dateSeparator}>{getDateLabel(item.timestamp)}</Text>
           </View>
         )}
 
@@ -428,17 +456,20 @@ const MessagesList = ({
 
             {/* Render main message */}
 
-            <Menu>
+            {/* Long-press opens the actions, as in Adopt Me. MenuTrigger
+                ignores an onLongPress prop: it opened on any single TAP,
+                and a long-press did nothing. */}
+            <Menu onOpen={() => handleLongPress(item)}>
               <MenuTrigger
-                onLongPress={() => handleLongPress(item)}
+                triggerOnLongPress
                 customStyles={{ triggerTouchable: { activeOpacity: 1 } }}
               >
                 
                 <View style={[
                   item.senderId === user?.id ? styles.myBubbleContent : styles.otherBubbleContent,
                   item.isReportedByUser && styles.reportedMessage,
-                  isAdmin && item.strikeCount === 1 ? { backgroundColor: 'rgba(255, 192, 203, 0.8)' } : null,
-                  isAdmin && item.strikeCount >= 2 ? { backgroundColor: 'rgba(255, 0, 0, 0.8)' } : null,
+                  isAdminOrMod && item.strikeCount === 1 ? { backgroundColor: 'rgba(255, 192, 203, 0.8)' } : null,
+                  isAdminOrMod && item.strikeCount >= 2 ? { backgroundColor: 'rgba(255, 0, 0, 0.8)' } : null,
                 ]}>
 
                   <View style={styles.bubbleInner}>
@@ -452,23 +483,23 @@ const MessagesList = ({
     />
   )}
 
-  {/* Role pills. Authority ranks are stamped on the message itself;
-      community badges come from the profile cache, because older messages
-      predate those fields entirely. */}
+  {/* Role pills. resolveProfile prefers what is stamped on the message and
+      falls back to the profile cache. Mod / JMD are NOT stamped by the send
+      path, so reading item.isModerator here meant those pills never showed. */}
   {(() => {
     const firstBadge = getFirstBadgeType({
-      isAdmin: item.isAdmin, isModerator: item.isModerator, isBabyMod: item.isBabyMod,
+      isAdmin: msgProfile.isAdmin, isModerator: msgProfile.isModerator, isBabyMod: msgProfile.isBabyMod,
       isTrusted: msgProfile.isTrusted, isCMSR: msgProfile.isCMSR, isHelper: msgProfile.isHelper,
     });
     return (
       <>
-        {!!item.isAdmin && (
+        {!!msgProfile.isAdmin && (
           <UserBadgePill type="admin" size="sm" isDarkMode={isDarkMode} labelOverride={t('chat.admin')} glow={firstBadge === 'admin'} />
         )}
-        {!item.isAdmin && item.isModerator && (
+        {!msgProfile.isAdmin && msgProfile.isModerator && (
           <UserBadgePill type="mod" size="sm" isDarkMode={isDarkMode} glow={firstBadge === 'mod'} />
         )}
-        {!item.isAdmin && !item.isModerator && item.isBabyMod && (
+        {!msgProfile.isAdmin && !msgProfile.isModerator && msgProfile.isBabyMod && (
           <UserBadgePill type="jmd" size="sm" isDarkMode={isDarkMode} glow={firstBadge === 'jmd'} />
         )}
         {msgProfile.isTrusted && (
@@ -584,28 +615,10 @@ const MessagesList = ({
             <Text
               style={[fruitStyles.fruitValue, { color: fruitColors.value }]}
             >
-              · Value: {Number(fruit.value || 0).toLocaleString()}
-              {/* {fruit.category
-                ? `  ·  ${String(fruit.category).toUpperCase()}  `
-                : ''} */}{' '}
+              · {displayValueText(fruit, fruit.valueSource || fruitScale)}{' '}
             </Text>
-
-            <View style={fruitStyles.badgeRow}>
-              {/* D / N / M badge */}
-              {/* Fly badge */}
-              {fruit.isFly && (
-                <View style={[fruitStyles.badge, fruitStyles.badgeFly]}>
-                  <Text style={fruitStyles.badgeText}>F</Text>
-                </View>
-              )}
-
-              {/* Ride badge */}
-              {fruit.isRide && (
-                <View style={[fruitStyles.badge, fruitStyles.badgeRide]}>
-                  <Text style={fruitStyles.badgeText}>R</Text>
-                </View>
-              )}
-            </View>
+            {/* Fly / Ride badges were Adopt Me pet variants; no Fisch item
+                carries them. */}
           </View>
         </View>
       );
@@ -627,7 +640,8 @@ const MessagesList = ({
         <Text
           style={[fruitStyles.totalValue, { color: fruitColors.totalValue }]}
         >
-          {totalFruitValue.toLocaleString()}
+          {`${sourceLabel(fruitScale)} ${fruitSummary?.totalText ?? '—'}`}
+          {fruitSummary?.unpriced ? ` · ${fruitSummary.unpriced} unpriced` : ''}
         </Text>
       </View>
     )}
@@ -675,27 +689,10 @@ const MessagesList = ({
 
           {/* Admin Actions or Timestamp */}
           <View style={{ flex: 1, alignItems: item.senderId === user?.id ? 'flex-start' : 'flex-end', justifyContent: 'center', paddingHorizontal: SPACE.xs }}>
-            {(!isAdmin && item.senderId === user?.id) && (
-              <Menu>
-                <MenuTrigger>
-                  <Icon
-                    name="ellipsis-vertical-outline"
-                    size={18}
-                    color={isDarkMode ? '#9ca3af' : '#6b7280'}
-                  />
-                </MenuTrigger>
-                <MenuOptions customStyles={{
-                  optionsContainer: styles.menuoptions,
-                  optionWrapper: styles.menuOption,
-                  optionText: styles.menuOptionText,
-                }}>
-                  <MenuOption onSelect={() => onDeleteMessage(item.id)}>
-                    <Text style={styles.menuOptionTextDanger}>Delete</Text>
-                  </MenuOption>
-                </MenuOptions>
-              </Menu>
-            )}
-            {(isAdmin) && (
+            {/* No self-delete in the public rooms (Adopt Me 04823b3): messages
+                stay so reports and moderation have the evidence. Staff can
+                still remove anything. */}
+            {isAdminOrMod && (
               <Menu>
                 <MenuTrigger>
                   <Icon
@@ -715,12 +712,10 @@ const MessagesList = ({
                   <MenuOption onSelect={() => onDeleteAllMessage(item?.senderId)}>
                     <Text style={styles.menuOptionTextDanger}>Delete All</Text>
                   </MenuOption>
-                  <MenuOption onSelect={() => banUserwithEmail(item.currentUserEmail, isAdmin, item.senderId)}>
-                    <Text style={styles.menuOptionTextDanger}>Block</Text>
-                  </MenuOption>
-                  <MenuOption onSelect={() => unbanUserWithEmail(item.currentUserEmail, isAdmin)}>
-                    <Text style={styles.menuOptionText}>Unblock</Text>
-                  </MenuOption>
+                  {/* Ban/unban lived here as one-tap actions with no confirm
+                      and no reason, and escalated a strike on a mis-tap.
+                      Sanctions now go through the profile's Mod Tools, which
+                      asks for a reason and respects staff immunity. */}
                   <MenuOption onSelect={() => onPinMessage(item)}>
                     <Text style={styles.menuOptionText}>Pin Message</Text>
                   </MenuOption>
@@ -734,18 +729,27 @@ const MessagesList = ({
     );
     // isDarkMode: FramedAvatar needs the theme. Repaint-on-profiles-landing is
     // handled by the FlatList's extraData, not here.
-  }, [messages, highlightedMessageId, user?.id, styles, getReplyPreview, handleCopy, handleTranslate, handleReport, handleLongPress, handleProfileClick, scrollToMessage, isAdmin, t, fruitColors, onReply, onDeleteMessage, onDeleteAllMessage, onPinMessage, banUserwithEmail, unbanUserWithEmail, isDarkMode]);
+    // isAdmin: the platform badge reads it directly.
+  }, [highlightedMessageId, user?.id, styles, getReplyPreview, getDateLabel, handleCopy, handleTranslate, handleReport, handleLongPress, handleProfileClick, scrollToMessage, isAdmin, isAdminOrMod, t, fruitColors, onReply, onDeleteMessage, onDeleteAllMessage, onPinMessage, isDarkMode]);
 
   return (
     <>
       <FlatList
         data={messages}
-        keyExtractor={(item, index) => `${item.id}-${index}`}
-        renderItem={({ item, index }) => renderMessage({ item, index })}
+        // Stable ids only: with the index in the key every new message
+        // (prepended to an inverted list) shifted every key, so every row
+        // remounted. Load/live paths dedupe by id, so ids are unique.
+        keyExtractor={(item, index) => (item?.id ? String(item.id) : `idx-${index}`)}
+        // Pass the memoised function itself: an inline wrapper is a new
+        // renderItem on every render, which re-renders every visible row.
+        renderItem={renderMessage}
         contentContainerStyle={styles.chatList}
         inverted
         // profileCacheVersion so rows repaint once frames/colours land
-        extraData={`${highlightedMessageId}-${profileCacheVersion}`}
+        // messages.length so neighbours repaint their date header when rows
+        // are appended (older page) or deleted; renderMessage reads the
+        // array through a ref and would not notice on its own.
+        extraData={`${highlightedMessageId}-${profileCacheVersion}-${Array.isArray(messages) ? messages.length : 0}`}
         ref={flatListRef}
         scrollEventThrottle={16}
         removeClippedSubviews={false}
@@ -837,9 +841,9 @@ export const fruitStyles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'flex-start',
     justifyContent:'flex-start',
-   
-    flex:1,
-
+    // See PrivateMessageList: flex:1 here sized the bubble off an unbounded
+    // main axis and made its children stop painting.
+    alignSelf: 'stretch',
   },
   fruitImage: {
     width: 20,
@@ -919,4 +923,7 @@ export const fruitStyles = StyleSheet.create({
     color: '#FF6666',
   },
 });
-export default MessagesList;
+// Memoised: Trader re-renders for reasons the list does not care about
+// (banner height, pending queue, cooldown). Every callback Trader passes is
+// a useCallback or a stable setter, so the shallow compare holds.
+export default React.memo(MessagesList);

@@ -224,7 +224,7 @@ const FishValueScreen = () => {
               autoFocus
             />
           </View>
-          <FlatList
+          <FlatList removeClippedSubviews={false}
             data={fishResults}
             keyExtractor={(item) => String(item.page_id)}
             keyboardShouldPersistTaps="handled"

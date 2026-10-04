@@ -138,7 +138,7 @@ export const rulesen = [
   "Moderators reserve the right to monitor and take action on any violations, including warnings or bans.",
   "Content should be suitable for all approved age groups, adhering to app age requirements.",
   "Do not share links to harmful sites, malware, or malicious content.",
-  "By using the chat feature, you agree to the app’s Terms of Service and Privacy Policy.${GAME.privacyPolicyUrl}",
+  `By using the chat feature, you agree to the app’s Terms of Service and Privacy Policy. ${GAME.privacyPolicyUrl}`,
 ];
 
 export const rulesde  = [
@@ -153,7 +153,7 @@ export const rulesde  = [
     "Moderatoren behalten sich das Recht vor, Verstöße zu überwachen und Maßnahmen zu ergreifen, einschließlich Verwarnungen oder Sperren.",
     "Inhalte sollten für alle genehmigten Altersgruppen geeignet sein und den Altersanforderungen der App entsprechen.",
     "Teilen Sie keine Links zu schädlichen Websites, Malware oder bösartigen Inhalten.",
-    "Durch die Nutzung der Chat-Funktion stimmen Sie den Nutzungsbedingungen und der Datenschutzrichtlinie der App zu. ${GAME.privacyPolicyUrl}"
+    `Durch die Nutzung der Chat-Funktion stimmen Sie den Nutzungsbedingungen und der Datenschutzrichtlinie der App zu. ${GAME.privacyPolicyUrl}`
   ]
 
 
@@ -169,7 +169,7 @@ export const rulesde  = [
     "Người điều hành có quyền giám sát và thực hiện hành động đối với bất kỳ vi phạm nào, bao gồm cảnh báo hoặc cấm.",
     "Nội dung phải phù hợp với tất cả các nhóm tuổi được phê duyệt, tuân theo yêu cầu về độ tuổi của ứng dụng.",
     "Không chia sẻ liên kết đến các trang web độc hại, phần mềm độc hại hoặc nội dung độc hại.",
-    "Bằng cách sử dụng tính năng trò chuyện, bạn đồng ý với Điều khoản dịch vụ và Chính sách quyền riêng tư của ứng dụng. ${GAME.privacyPolicyUrl}"
+    `Bằng cách sử dụng tính năng trò chuyện, bạn đồng ý với Điều khoản dịch vụ và Chính sách quyền riêng tư của ứng dụng. ${GAME.privacyPolicyUrl}`
   ]
 
   export const rulesid  = [
@@ -184,7 +184,7 @@ export const rulesde  = [
     "Moderator berhak untuk memantau dan mengambil tindakan terhadap pelanggaran, termasuk peringatan atau larangan.",
     "Konten harus sesuai untuk semua kelompok umur yang disetujui, sesuai dengan persyaratan usia aplikasi.",
     "Jangan bagikan tautan ke situs berbahaya, malware, atau konten berbahaya.",
-    "Dengan menggunakan fitur obrolan, Anda menyetujui Ketentuan Layanan dan Kebijakan Privasi aplikasi. ${GAME.privacyPolicyUrl}"
+    `Dengan menggunakan fitur obrolan, Anda menyetujui Ketentuan Layanan dan Kebijakan Privasi aplikasi. ${GAME.privacyPolicyUrl}`
   ]
 
   export const rulesfr  = [
@@ -199,7 +199,7 @@ export const rulesde  = [
     "Les modérateurs se réservent le droit de surveiller et de prendre des mesures contre toute violation, y compris des avertissements ou des interdictions.",
     "Le contenu doit être adapté à tous les groupes d’âge approuvés, conformément aux exigences d’âge de l’application.",
     "Ne partagez pas de liens vers des sites nuisibles, des logiciels malveillants ou du contenu malveillant.",
-    "En utilisant la fonction de chat, vous acceptez les Conditions d’utilisation et la Politique de confidentialité de l’application. ${GAME.privacyPolicyUrl}"
+    `En utilisant la fonction de chat, vous acceptez les Conditions d’utilisation et la Politique de confidentialité de l’application. ${GAME.privacyPolicyUrl}`
    ]
 
    export const rulesfil  = [
@@ -214,7 +214,7 @@ export const rulesde  = [
     "Ang mga moderator ay may karapatang subaybayan at gumawa ng aksyon laban sa anumang paglabag, kabilang ang mga babala o pagbabawal.",
     "Ang nilalaman ay dapat na angkop para sa lahat ng pinapayagang pangkat ng edad, alinsunod sa mga kinakailangan sa edad ng app.",
     "Huwag magbahagi ng mga link sa nakakapinsalang mga site, malware, o mapanirang nilalaman.",
-    "Sa paggamit ng tampok na chat, sumasang-ayon ka sa Mga Tuntunin ng Serbisyo at Patakaran sa Privacy ng app. ${GAME.privacyPolicyUrl}"
+    `Sa paggamit ng tampok na chat, sumasang-ayon ka sa Mga Tuntunin ng Serbisyo at Patakaran sa Privacy ng app. ${GAME.privacyPolicyUrl}`
    ]
 
    export const rulesru  = [
@@ -229,7 +229,7 @@ export const rulesde  = [
     "Модераторы имеют право контролировать и применять меры против нарушений, включая предупреждения или блокировки.",
     "Контент должен быть подходящим для всех одобренных возрастных групп, соответствуя требованиям приложения по возрасту.",
     "Не делитесь ссылками на вредоносные сайты, вредоносное ПО или вредоносный контент.",
-    "Используя чат, вы соглашаетесь с Условиями использования и Политикой конфиденциальности приложения. ${GAME.privacyPolicyUrl}"
+    `Используя чат, вы соглашаетесь с Условиями использования и Политикой конфиденциальности приложения. ${GAME.privacyPolicyUrl}`
    ]
    export const rulespt = [
     "Comunique-se sempre com respeito. Discursos de ódio, discriminação e assédio são estritamente proibidos.",
@@ -243,7 +243,7 @@ export const rulesde  = [
     "Os moderadores têm o direito de monitorar e tomar medidas contra qualquer violação, incluindo advertências ou banimentos.",
     "O conteúdo deve ser adequado para todas as faixas etárias aprovadas, de acordo com os requisitos de idade do aplicativo.",
     "Não compartilhe links para sites prejudiciais, malware ou conteúdos maliciosos.",
-    "Ao usar o recurso de chat, você concorda com os Termos de Serviço e a Política de Privacidade do aplicativo. ${GAME.privacyPolicyUrl}"
+    `Ao usar o recurso de chat, você concorda com os Termos de Serviço e a Política de Privacidade do aplicativo. ${GAME.privacyPolicyUrl}`
    ]
 
 // export const banUserInChat = async (currentUserId, selectedUser) => {
@@ -321,6 +321,43 @@ export const rulesde  = [
 
 
 
+
+// ─────────────────────────────────────────────────────────────────────────
+// Personal block list.
+//
+// localState.bannedUsers (MMKV) is what every screen filters by; RTDB
+// bannedUsers/{me}/{them} is the copy that survives a reinstall or a new
+// phone (Adopt Me restores its list at sign-in the same way). Blocking from
+// the profile drawer used to write only the device copy, and the drawer and
+// chat header built the new list from a PROP that Trades / Feed pass as [] —
+// so one block from those screens replaced the whole list with one user.
+// Always merge into the current device list.
+export const setPersonalBlock = async ({
+  db, myId, targetId, block, current, updateLocalState, displayName = null, avatar = null,
+}) => {
+  if (!targetId) return null;
+  const list = Array.isArray(current) ? current : [];
+  const next = block
+    ? (list.includes(targetId) ? list : [...list, targetId])
+    : list.filter((id) => id !== targetId);
+  // Device first: the UI must react even when offline.
+  if (typeof updateLocalState === 'function') await updateLocalState('bannedUsers', next);
+  if (db && myId) {
+    const blockRef = ref(db, `bannedUsers/${myId}/${targetId}`);
+    await set(blockRef, block
+      ? { displayName: displayName || 'Anonymous', avatar: avatar || GAME.defaultAvatar, timestamp: Date.now() }
+      : null);
+  }
+  return next;
+};
+
+/** Ids in the RTDB copy of the block list (one small read). */
+export const fetchPersonalBlocks = async (db, myId) => {
+  if (!db || !myId) return [];
+  const snap = await get(ref(db, `bannedUsers/${myId}`));
+  const val = snap.exists() ? snap.val() : null;
+  return val && typeof val === 'object' ? Object.keys(val) : [];
+};
 
 export const isUserOnline = async (userId) => {
   if (!userId) return false; // ✅ Return early if userId is invalid
@@ -570,6 +607,50 @@ const buildBanRecord = ({ strikeCount, bannedUntil, reason, userInfo, bannerInfo
 export const canStaffBanMute = ({ isAdmin, isModerator, isBabyMod, modControlsEnabled } = {}) =>
   !!isAdmin || ((!!isModerator || !!isBabyMod) && modControlsEnabled !== false);
 
+// ─────────────────────────────────────────────────────────────────────────
+// Target-rank guard — ported from Adopt Me (8299678, 2026-09-20).
+//
+// Every gate above looks only at the ACTOR. Nothing checked who was being
+// sanctioned, so a moderator could strike or mute an admin or another
+// moderator. Rule: a target holding ANY staff role (admin / isAdmin /
+// isModerator / isBabyMod) can be sanctioned only by an admin.
+//
+// The actor counts as admin when bannerInfo.role === 'admin' or the legacy
+// `isAdmin` argument is true. Automated paths pass neither, so an automatic
+// sanction never lands on staff.
+//
+// Fails OPEN on a failed role read: a network blip must not stop a moderator
+// handling an ordinary spammer.
+const STAFF_ROLE_FLAGS = ['admin', 'isAdmin', 'isModerator', 'isBabyMod'];
+
+export const isStaffTarget = async (targetUid) => {
+  if (!targetUid || typeof targetUid !== 'string') return false;
+  try {
+    const db = getDatabase();
+    const snaps = await Promise.all(
+      STAFF_ROLE_FLAGS.map((flag) => get(ref(db, `users/${targetUid}/${flag}`)))
+    );
+    return snaps.some((snap) => snap && snap.exists() && snap.val() === true);
+  } catch (e) {
+    console.error('isStaffTarget: role read failed, allowing action:', e);
+    return false;
+  }
+};
+
+// `showAlert` is off by default so automated paths stay silent — telling a
+// stranger their report hit a moderator would leak who the staff are.
+export const canSanctionTarget = async ({ targetUid, bannerInfo, actorIsAdmin = false, showAlert = false } = {}) => {
+  if (actorIsAdmin === true || bannerInfo?.role === 'admin') return true;
+  if (!(await isStaffTarget(targetUid))) return true;
+  if (showAlert) {
+    Alert.alert(
+      'Not allowed',
+      'This user is a staff member. Only an admin can ban, strike or mute them.'
+    );
+  }
+  return false;
+};
+
 /**
  * Ban a user by email, escalating their strike count.
  * Additive signature — the original (email, isAdmin, senderId) call sites
@@ -588,6 +669,14 @@ export const banUserwithEmail = async (
     if (isAdmin) Alert.alert('Error', 'Invalid email address.');
     return false;
   }
+
+  // Only an admin may ban staff. Checked before any write.
+  if (!(await canSanctionTarget({
+    targetUid: senderId || userInfo?.id || null,
+    bannerInfo,
+    actorIsAdmin: isAdmin === true,
+    showAlert: isAdmin === true || !!bannerInfo,
+  }))) return false;
 
   try {
     const db = getDatabase();
@@ -647,6 +736,13 @@ export const setUserStrike = async (
     return false;
   }
 
+  // Only an admin may strike staff. See canSanctionTarget.
+  if (!(await canSanctionTarget({
+    targetUid: senderId || userInfo?.id || null,
+    bannerInfo,
+    showAlert,
+  }))) return false;
+
   try {
     const db = getDatabase();
     const { bannedUntil, banDuration } = strikeSentence(strikeCount);
@@ -691,15 +787,48 @@ export const muteUser = async (
     return false;
   }
 
+  // Only an admin may mute staff. See canSanctionTarget.
+  if (!(await canSanctionTarget({
+    targetUid: userInfo?.id || null,
+    bannerInfo,
+    showAlert,
+  }))) return false;
+
   try {
     const db = getDatabase();
     const banRef = ref(db, `banned_users_by_email/${encodeEmailForBan(email)}`);
     const snap = await get(banRef);
     const existingStrikeCount = snap.exists() ? (snap.val()?.strikeCount || 0) : 0;
 
+    // A mute and a ban share ONE record, written with set(). Without this
+    // guard, muting an already-banned user overwrote the ban with a
+    // few-minute bannedUntil — a 5-minute mute released someone serving a
+    // permanent ban. Never shorten an existing sanction (Adopt Me b879d89).
+    const existingUntil = snap.exists() ? snap.val()?.bannedUntil : null;
+    const muteUntil = Date.now() + minutes * 60 * 1000;
+    if (existingUntil === 'permanent') {
+      if (showAlert) {
+        Alert.alert(
+          'Already Banned',
+          'This user is permanently banned. Muting would lift that ban — unban them first if that is what you intend.'
+        );
+      }
+      return false;
+    }
+    if (typeof existingUntil === 'number' && existingUntil > muteUntil) {
+      if (showAlert) {
+        const hoursLeft = Math.ceil((existingUntil - Date.now()) / (1000 * 60 * 60));
+        Alert.alert(
+          'Already Restricted',
+          `This user is already banned for about ${hoursLeft} more hour${hoursLeft !== 1 ? 's' : ''}. A ${minutes}-minute mute would shorten that, so it was not applied.`
+        );
+      }
+      return false;
+    }
+
     await set(banRef, buildBanRecord({
       strikeCount: existingStrikeCount,
-      bannedUntil: Date.now() + minutes * 60 * 1000,
+      bannedUntil: muteUntil,
       reason: customReason || `Muted for ${minutes} min`,
       userInfo,
       bannerInfo,

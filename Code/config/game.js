@@ -45,44 +45,33 @@ export const GAME = {
   // Per-app and must not be inherited from a sibling app. Shipping another
   // app's privacy policy is a store-review rejection, not a cosmetic bug.
   //
-  // TODO(legal): both are null. Everything below is WIRED and waiting — set
-  // these two values and every consumer starts working at once. Audited
-  // 2026-09-18; four consumers, two of which are currently WRONG rather than
-  // merely empty:
-  //
-  //   1. Code/SettingScreen/OfferWall.jsx — the paywall footer. Reads both
-  //      keys and renders each link ONLY when its value is non-null, so today
-  //      the footer shows "Restore" alone. Nothing to change when you fill
-  //      these in. (adoptme hardcodes https://adoptmevalues.app/terms and
-  //      /privacy directly in its OfferWall — do NOT copy that; a host belongs
-  //      here, not in a screen.)
-  //
-  //   2. Code/SettingScreen/settinghelper.js — BROKEN, ships Adopt Me's legal
-  //      pages to Fisch users. handleOpenPrivacy() hardcodes
-  //      https://adoptmevalues.app/privacy-policy/ and handleOpenChild()
-  //      hardcodes https://adoptmevalues.app/child-safety-standards-policy/.
-  //      Both are reachable from Settings right now. Note there is no
-  //      childSafetyUrl key here yet — add one when the pages exist.
-  //      handleOpenWebsite() reads config.webSite, which is this same null.
-  //
-  //   3. Code/ChatScreen/utils.js — BROKEN differently. The chat rules end
-  //      with "...Privacy Policy.${GAME.privacyPolicyUrl}" inside DOUBLE
-  //      QUOTES, not backticks, in all 8 translated arrays — so users read the
-  //      literal text "${GAME.privacyPolicyUrl}". Fixing the quoting alone is
-  //      not enough; it would then print "null" until this key is set.
-  //
+  // Consumers of privacyPolicyUrl — all read it from here, none hardcode it:
+  //   1. Code/SettingScreen/OfferWall.jsx — paywall footer; renders each link
+  //      only when its value is non-null.
+  //   2. Code/SettingScreen/settinghelper.js — handleOpenPrivacy(), the
+  //      Settings "Privacy Policy" row. It used to hardcode Adopt Me's page.
+  //   3. Code/Translation/*.json chat_rules.rules, via {{privacyUrl}} passed by
+  //      ChatRuleModal, and the fallback arrays in Code/ChatScreen/utils.js.
+  //      Both used to print the literal text "${GAME.privacyPolicyUrl}".
   //   4. Code/Helper/Environment.js — `webSite` is an alias of this key.
-  // ⚠️ PLACEHOLDERS — the domain fischvalues.app is NOT REGISTERED. Both of
-  // these 404 today (checked 2026-09-18: fischvalues.app, fischvalues.com and
-  // fischvaluescalc.com all fail to resolve, while adoptmevalues.app and
-  // bloxfruitscalc.com are live). They are set, rather than left null, so the
-  // paywall footer renders its Terms and Privacy links and the layout is real.
   //
-  // The spelling follows the sibling pattern (adoptmevalues.app/privacy), which
-  // is a guess at the eventual host, not a decision. REPLACE BOTH before any
-  // store submission — a 404 policy link fails review the same as a missing one.
-  privacyPolicyUrl: 'https://fischvalues.app/privacy',
+  // privacyPolicyUrl is the owner's URL, set 2026-09-23. The page itself is
+  // not published yet (404 that day) — the owner will put it live before
+  // submission. A 404 policy link fails store review the same as a missing one.
+  //
+  // termsUrl is still a PLACEHOLDER on fischvalues.app, a domain that is NOT
+  // REGISTERED (checked 2026-09-18). Replace it before any store submission.
+  //
+  // childSafetyUrl: there is no Fisch child-safety standards page yet, so it
+  // opens the privacy policy (section 7, Children's privacy). It used to open
+  // Adopt Me's page. Point it at a dedicated page once one is published.
+  privacyPolicyUrl: 'https://thesolanalabs.com/fisch/privacy',
+  childSafetyUrl: 'https://thesolanalabs.com/fisch/privacy',
   termsUrl: 'https://fischvalues.app/terms',
+  // iOS uses Apple's standard EULA instead of termsUrl. App Review requires a
+  // working Terms/EULA link beside any subscription (guideline 3.1.2), and
+  // termsUrl above is still dead. Read it through termsUrlFor(), never directly.
+  iosTermsUrl: 'https://www.apple.com/legal/internet-services/itunes/dev/stdeula/',
   store: {
     android: 'https://play.google.com/store/apps/details?id=com.fischvaluescalc',
     ios: null, // TODO: fill in after the App Store listing is created
@@ -214,6 +203,14 @@ export const imageUrl = (relative) => {
     ? relative
     : `${GAME.cdn.images}/${relative}`;
 };
+
+
+/**
+ * The Terms link for this platform: Apple's standard EULA on iOS, the app's
+ * own terms page everywhere else. See iosTermsUrl above.
+ */
+export const termsUrlFor = (os) =>
+  (os === 'ios' ? GAME.iosTermsUrl : GAME.termsUrl) || null;
 
 
 /**

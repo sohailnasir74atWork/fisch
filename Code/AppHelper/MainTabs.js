@@ -18,6 +18,22 @@ import DesignStack from '../Design/DesignNavigation';
 import { SIZE } from '../Design/tokens';
 import { SPACE } from '../Design/tokens';
 import { FONT } from '../Design/tokens';
+import { IOS_LIMITED } from '../config/iosLimited';
+import InterstitialAdManager from '../Ads/IntAd';
+import { NATURAL_BREAK } from '../Ads/adPolicy';
+
+// Natural-break interstitial: leaving one tab for another is the standard
+// "between screens" moment. The manager applies every cap (Pro, warm-up,
+// per-session ceiling, 3-minute gap since ANY full-screen ad) and never waits
+// for a fill, so the switch itself is never delayed. Pressing the already
+// active tab (scroll-to-top) and entering Chat are not breaks.
+const tabScreenListeners = ({ navigation, route }) => ({
+  tabPress: () => {
+    if (navigation.isFocused()) return;
+    if (NATURAL_BREAK.EXCLUDED_TABS.includes(route.name)) return;
+    InterstitialAdManager.showAtNaturalBreak(`tab:${route.name}`);
+  },
+});
 
 
 const Tab = createBottomTabNavigator();
@@ -51,7 +67,8 @@ const MainTabs = React.memo(({ selectedTheme, chatFocused, setChatFocused, modal
     Stock: ['cart-shopping', 'cart-shopping'],
     Trade: ['handshake', 'handshake'],
     Chat: ['envelope', 'envelope'],
-    Designs: ['house-chimney-crack', 'house-chimney-crack'],
+    // Was a house (Adopt Me's house-design feed); this tab is the post feed.
+    Designs: ['newspaper', 'newspaper'],
   }), []);
 
   const getTabIcon = useCallback((routeName, focused) => {
@@ -90,12 +107,20 @@ const MainTabs = React.memo(({ selectedTheme, chatFocused, setChatFocused, modal
 
   return (
     <Tab.Navigator
+      screenListeners={tabScreenListeners}
       screenOptions={{
         headerStyle: { backgroundColor: selectedTheme.colors.background },
         headerTintColor: selectedTheme.colors.text,
         headerTitleStyle: { fontFamily: FONT.bold, fontSize: SIZE.title },
+        // Tabs stay mounted; without this a hidden Home / Calculator
+        // re-rendered on every global/local state change. Frozen tabs catch
+        // up the moment they are focused again. (From mm2values.)
+        freezeOnBlur: true,
       }}
       tabBar={({ state, descriptors, navigation }) => {
+        // iOS limited build: Home is the only tab, so a bar would carry one
+        // button. Draw nothing; App.js pads the bottom inset instead.
+        if (IOS_LIMITED) return null;
         return (
           <View style={{
             flexDirection: 'row',
@@ -185,6 +210,11 @@ const MainTabs = React.memo(({ selectedTheme, chatFocused, setChatFocused, modal
         {() => <HomeTabNavigator selectedTheme={selectedTheme} />}
       </Tab.Screen>
 
+      {/* iOS limited build: Home only. Every other tab stays registered for
+          Android; the fragment just drops out of the tree. The calculator is
+          still reachable on iOS — as a stack route from the Home card, see
+          App.js. See Code/config/iosLimited.js. */}
+      {!IOS_LIMITED && (<>
       <Tab.Screen
         name="Calculator"
         options={({ navigation }) => ({
@@ -255,10 +285,7 @@ const MainTabs = React.memo(({ selectedTheme, chatFocused, setChatFocused, modal
           />
         )}
       </Tab.Screen>
-
-
-
-
+      </>)}
     </Tab.Navigator>
   );
 });

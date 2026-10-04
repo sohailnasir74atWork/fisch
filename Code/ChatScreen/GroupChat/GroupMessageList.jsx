@@ -100,20 +100,33 @@ const GroupMessageList = ({
       return imageCount > 1 ? `[${imageCount} Images]` : '[Image]';
     }
 
+    // Display text only; the payload field stays `fruits`. Fisch items are
+    // fish, rods, skins, bobbers and lanterns, not Adopt Me pets.
     if (replyTo.hasFruits || (Array.isArray(replyTo.fruits) && replyTo.fruits.length > 0)) {
       const count = replyTo.fruitsCount || (Array.isArray(replyTo.fruits) ? replyTo.fruits.length : 0);
       return count > 0
-        ? `[${count} pet(s) message]`
-        : '[Pets message]';
+        ? `[${count} item(s) message]`
+        : '[Items message]';
     }
 
     return '[Deleted message]';
   }, []);
 
   // Filtered messages (sorted descending for inverted FlatList)
+  // Deduped by id first (first occurrence wins): the live listener, a page
+  // load and a gap-fill can each deliver the same row, and a repeat would
+  // render twice. One Set pass before the sort.
   const filteredMessages = useMemo(() => {
     if (!Array.isArray(messages)) return [];
-    return [...messages].sort((a, b) => (b?.timestamp || 0) - (a?.timestamp || 0));
+    const seen = new Set();
+    const unique = [];
+    for (const message of messages) {
+      const id = message?.id != null ? String(message.id) : null;
+      if (id && seen.has(id)) continue;
+      if (id) seen.add(id);
+      unique.push(message);
+    }
+    return unique.sort((a, b) => (b?.timestamp || 0) - (a?.timestamp || 0));
   }, [messages]);
 
   // Warm the profile cache for the UNIQUE senders in view so avatar frames +
@@ -363,7 +376,7 @@ const GroupMessageList = ({
                     );
                   })()}
 
-                  {/* 🐾 Fruits list (matching main chat style) */}
+                  {/* Attached items (stored as `fruits`; matching main chat style) */}
                   {hasFruits && (
                     <View
                       style={[
@@ -394,21 +407,10 @@ const GroupMessageList = ({
                                 · Value: {Number(fruit.value || 0).toLocaleString()}
                               </Text>
 
-                              <View style={fruitStyles.badgeRow}>
-                                {/* Fly badge */}
-                                {fruit.isFly && (
-                                  <View style={[fruitStyles.badge, fruitStyles.badgeFly]}>
-                                    <Text style={fruitStyles.badgeText}>F</Text>
-                                  </View>
-                                )}
-
-                                {/* Ride badge */}
-                                {fruit.isRide && (
-                                  <View style={[fruitStyles.badge, fruitStyles.badgeRide]}>
-                                    <Text style={fruitStyles.badgeText}>R</Text>
-                                  </View>
-                                )}
-                              </View>
+                              {/* The F (Fly) / R (Ride) badges that sat here were
+                                  Adopt Me pet variants. Fisch items have no such
+                                  flags, so the row is gone rather than left to
+                                  light up on a stray legacy field. */}
                             </View>
                           </View>
                         );
@@ -536,7 +538,7 @@ const GroupMessageList = ({
       initialNumToRender={15} // ✅ Render 15 messages initially
       maxToRenderPerBatch={10} // ✅ Render 10 per batch
       windowSize={5} // ✅ Optimize memory usage
-      removeClippedSubviews={true} // ✅ Improve performance
+      removeClippedSubviews={false} // ✅ Improve performance
       ListFooterComponent={
         isPaginating ? (
           <View style={{ padding: SPACE.xxl, alignItems: 'center' }}>

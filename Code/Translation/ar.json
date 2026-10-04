@@ -98,6 +98,7 @@
         "business_enquiries_desc": "For collaborations, partnerships, or other business-related queries, feel free to contact us at:",
         "child_safety_standards": "Child Safety Standards",
         "privacy_policy": "Privacy Policy",
+        "privacy_options": "خيارات الخصوصية",
         "report_abusive_content": "Report Abusive Content",
         "upload_photo": "Upload Photo",
         "search_items": "Search items...",
@@ -180,7 +181,7 @@
         "pro": "مُحترف",
         "mini_games": "ألعاب مصغرة",
         "soon": "قريبًا",
-        "made_with_love": "صُنع بـ ❤️ لتجار MM2",
+        "made_with_love": "صُنع بـ ❤️ لتجار Fisch",
         "daily_stars": "نجوم يومية",
         "my_stuff_worth": "قيمة أشيائي",
         "cosmetics": "التجميليات",
@@ -208,8 +209,8 @@
         "copy_success": "تم نسخ الكود إلى الحافظة!",
         "try_other_app": "جرب تطبيقنا الآخر",
         "download": "تنزيل",
-        "selected_pets": "حيوانات مختارة",
-        "owned_pets": "حيوانات مملوكة",
+        "selected_pets": "العناصر المختارة",
+        "owned_pets": "عناصري",
         "wishlist": "قائمة الرغبات",
         "high": "▲ مرتفع",
         "low": "▼ منخفض",
@@ -343,7 +344,8 @@
         "error_google_unavailable_title": "تسجيل الدخول عبر Google غير متاح",
         "error_google_unavailable": "خدمات Google Play غير متاحة على هذا الجهاز. سجّل الدخول بالبريد الإلكتروني — اضغط «تسجيل الدخول بالبريد» بالأسفل.",
         "error_network_title": "مشكلة في الاتصال",
-        "error_network": "تعذّر الوصول إلى خادم تسجيل الدخول. تحقّق من اتصالك وحاول مجدداً. إذا كانت خدمات Google مقيّدة على شبكتك، استخدم تسجيل الدخول بالبريد أو اتصالاً آخر."
+        "error_network": "تعذّر الوصول إلى خادم تسجيل الدخول. تحقّق من اتصالك وحاول مجدداً. إذا كانت خدمات Google مقيّدة على شبكتك، استخدم تسجيل الدخول بالبريد أو اتصالاً آخر.",
+        "restoring": "جارٍ تحميل حسابك…"
     },
     "tabs": {
         "calculator": "الحاسبة",
@@ -357,6 +359,8 @@
         "feed": "الأخبار"
     },
     "chat": {
+        "today": "اليوم",
+        "yesterday": "أمس",
         "community_chat": "الدردشة العامة",
         "type_message": "اكتب رسالة...",
         "sending": "جارٍ الإرسال...",
@@ -401,7 +405,7 @@
         "continue": "متابعة",
         "get_notified_text": "احصل على إشعارات، أنشئ وقدم عروضًا في الصفقات، تحدث مع التجار، وانضم إلى مناقشات المجموعة.",
         "welcome_to": "مرحبًا بك في Fisch Values",
-        "track_pets": "تتبع قيم الحيوانات الأليفة وحسّن تداولاتك.",
+        "track_pets": "تتبع قيم الأسماك وحسّن تداولاتك.",
         "welcome_user": "مرحباً"
     },
     "offer": {
@@ -696,7 +700,7 @@
     "group_chat": {
         "group_not_found": "Group not found",
         "failed_load_group": "Failed to load group",
-        "limit_pets": "You can only send up to 18 pets in a message.",
+        "limit_pets": "You can only send up to 18 items in a message.",
         "not_member": "You are not a member of this group",
         "muted_in_group": "You are muted in this group",
         "missing_data": "Missing required data. Please try again.",
@@ -827,12 +831,12 @@
         "review_thanks": "Thanks for your review!",
         "rating_thanks": "Thanks for your rating!",
         "rating_error": "Error submitting rating. Try again!",
-        "max_pets_error": "You can only send up to 18 pets in a message.",
+        "max_pets_error": "You can only send up to 18 items in a message.",
         "anonymous": "Anonymous",
         "multiple_photos": "📷 {{count}} Photos",
         "single_photo": "📷 Photo",
-        "pets_count_plural": "🐾 {{count}} pets",
-        "pets_count_singular": "🐾 {{count}} pet",
+        "pets_count_plural": "🎣 {{count}} items",
+        "pets_count_singular": "🎣 {{count}} item",
         "send_failed": "Could not send your message. Please try again.",
         "rate_trader": "Rate this Trader",
         "write_review": "Write an optional review...",
@@ -850,8 +854,8 @@
         "message_placeholder": "[Message]",
         "images_attached_plural": "{{count}} images attached",
         "images_attached_singular": "{{count}} image attached",
-        "pets_selected_plural": "{{count}} pets selected",
-        "pets_selected_singular": "{{count}} pet selected",
+        "pets_selected_plural": "{{count}} items selected",
+        "pets_selected_singular": "{{count}} item selected",
         "quick_messages": "Quick Messages",
         "msg_copied": "Message Copied",
         "invalid_translate": "Invalid message to translate.",
@@ -930,7 +934,7 @@
             "يحتفظ المشرفون بالحق في مراقبة واتخاذ الإجراءات ضد أي انتهاكات، بما في ذلك التحذيرات أو الحظر.",
             "يجب أن يكون المحتوى مناسباً لجميع الفئات العمرية المعتمدة، مع الالتزام بمتطلبات العمر الخاصة بالتطبيق.",
             "لا تشارك روابط لمواقع ضارة أو برامج ضارة أو محتوى خبيث.",
-            "باستخدام ميزة الدردشة، فإنك توافق على شروط الخدمة وسياسة الخصوصية الخاصة بالتطبيق. ${GAME.privacyPolicyUrl}"
+            "باستخدام ميزة الدردشة، فإنك توافق على شروط الخدمة وسياسة الخصوصية الخاصة بالتطبيق. {{privacyUrl}}"
         ]
     },
     "report_popup": {
@@ -1084,7 +1088,9 @@
             "error_title": "خطأ 😢",
             "error_msg": "حدث خطأ ما. حاول مرة أخرى.",
             "oops": "أُوبس! 😅",
-            "failed_hatch": "فشل الفتح"
+            "failed_hatch": "فشل الفتح",
+            "no_ad_title": "ما في فيديو الحين",
+            "no_ad_msg": "ما في إعلان متاح حالياً. جرّب مرة ثانية بعد دقيقة!"
         },
         "rewards": {
             "reward_type_frame": "🖼️ إطار الملف",
@@ -1162,5 +1168,41 @@
         "signin_msg": "تحتاج حساباً لتسجيل الصفقات.",
         "error": "خطأ",
         "error_msg": "تعذّر الحفظ. حاول مرة أخرى."
+    },
+    "promo": {
+        "settings_row": "استخدم كود الهدية",
+        "paywall_link": "كود هدية",
+        "title": "عندك كود هدية؟",
+        "subtitle": "اكتبه هنا وخذ Pro مجاناً لعدة أيام.",
+        "placeholder": "اكتب الكود",
+        "redeem": "تفعيل",
+        "sign_in_first": "سجّل الدخول أولاً. الـ Pro المجاني ينحفظ في حسابك، فيبقى معك حتى لو غيّرت جوالك.",
+        "sign_in": "تسجيل الدخول",
+        "active_until": "Pro مفعّل حتى {{date}}",
+        "plan_label": "Pro (كود) حتى {{date}}",
+        "success_title": "صار عندك Pro!",
+        "success_body_zero": "حصلت على Pro حتى {{date}}.",
+        "success_body_one": "حصلت على يوم Pro واحد، حتى {{date}}.",
+        "success_body_two": "حصلت على يومين Pro، حتى {{date}}.",
+        "success_body_few": "حصلت على {{count}} أيام Pro، حتى {{date}}.",
+        "success_body_many": "حصلت على {{count}} يوماً من Pro، حتى {{date}}.",
+        "success_body_other": "حصلت على {{count}} يوم Pro، حتى {{date}}.",
+        "error_invalid": "هذا الكود غير موجود. تأكد من كتابته صح.",
+        "error_inactive": "هذا الكود متوقف.",
+        "error_expired": "انتهت صلاحية هذا الكود.",
+        "error_already_redeemed": "استخدمت هذا الكود من قبل.",
+        "error_device_used": "هذا الكود مستخدم من قبل على هذا الجوال.",
+        "error_used_up": "تأخرت، الكود خلص.",
+        "error_too_many_attempts": "محاولات كثيرة. انتظر ساعة وجرّب مرة ثانية.",
+        "error_sign_in": "سجّل الدخول عشان تستخدم الكود.",
+        "error_network": "ما قدرنا نوصل للسيرفر. تأكد من الإنترنت وجرّب مرة ثانية."
+    },
+    "timers": {
+        "alert_on_title": "تم!",
+        "alert_on": "راح ننبّهك أول ما يبدأ {{event}}.",
+        "alert_off_title": "التنبيه متوقف",
+        "alert_off": "ما راح توصلك تنبيهات {{event}} بعد الحين.",
+        "alert_failed": "ما قدرنا نغيّر التنبيه. تأكد من الإنترنت وجرّب مرة ثانية.",
+        "notify_me": "نبّهني لما يبدأ {{event}}"
     }
 }

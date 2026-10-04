@@ -20,6 +20,80 @@ import {
 const MAX_GROUP_MEMBERS = 50; // Maximum members per group
 
 /**
+ * Keep every member's group_meta_data row showing the current member count.
+ *
+ * The groups list reads `memberCount` off these per-user rows, but until now
+ * nothing ever wrote it there -- only the Firestore group doc carried a count
+ * -- so the "· N members" label on each row never appeared. One RTDB
+ * multi-path update covers every member; the rules allow cross-user writes
+ * under group_meta_data. Best-effort: a failure here leaves a stale count,
+ * never a broken membership, so it is logged rather than thrown.
+ *
+ * `extraUpdates` lets a caller fold its own row writes into the same update.
+ */
+const writeMemberCounts = async (appdatabase, groupId, memberIds, extraUpdates = {}) => {
+  const ids = Array.isArray(memberIds) ? memberIds.filter(Boolean) : [];
+  const updates = { ...extraUpdates };
+  for (const memberId of ids) {
+    // A caller writing a member's whole row already put memberCount inside
+    // it; adding the child path too would make the multi-path update reject
+    // itself ("ancestor of another path").
+    if (updates[`group_meta_data/${memberId}/${groupId}`] !== undefined) continue;
+    updates[`group_meta_data/${memberId}/${groupId}/memberCount`] = ids.length;
+  }
+  if (Object.keys(updates).length === 0) return;
+  await update(ref(appdatabase, '/'), updates);
+};
+
+/**
+ * Tell everything outside the Firestore doc that the group has a new owner.
+ *
+ * makeMemberCreator and the random handover in leaveGroup used to change only
+ * groups/{id}.createdBy. Two copies of the owner were left pointing at the
+ * old one:
+ *   - group_meta_data/{uid}/{gid}/createdBy, which drives the "My Group" pill
+ *     and the owner menu on every member's groups list;
+ *   - pending group_join_requests.creatorId, which is what the new owner's
+ *     "Join Requests" listener queries on -- so requests sent before the
+ *     transfer were invisible to the new owner and still actionable by the
+ *     old one.
+ * Called only after the Firestore transaction has committed. Best-effort for
+ * the same reason as writeMemberCounts: Firestore stays the source of truth
+ * and approve/reject/delete re-check createdBy there.
+ */
+const propagateOwnerChange = async (firestoreDB, appdatabase, groupId, memberIds, newOwnerId) => {
+  if (!newOwnerId) return;
+
+  try {
+    const updates = {};
+    for (const memberId of (memberIds || []).filter(Boolean)) {
+      updates[`group_meta_data/${memberId}/${groupId}/createdBy`] = newOwnerId;
+    }
+    if (Object.keys(updates).length > 0) {
+      await update(ref(appdatabase, '/'), updates);
+    }
+  } catch (metaError) {
+    console.warn('Could not update owner on group metadata:', metaError);
+  }
+
+  try {
+    // groupId-only query + client-side status filter: equality on a single
+    // field needs no composite index, and a group has a handful of requests.
+    const requestsSnap = await getDocs(query(
+      collection(firestoreDB, 'group_join_requests'),
+      where('groupId', '==', groupId),
+    ));
+    await Promise.all(
+      requestsSnap.docs
+        .filter((requestDoc) => requestDoc.data()?.status === 'pending')
+        .map((requestDoc) => updateDoc(requestDoc.ref, { creatorId: newOwnerId })),
+    );
+  } catch (requestError) {
+    console.warn('Could not move pending join requests to the new owner:', requestError);
+  }
+};
+
+/**
  * Get user's group where they are admin/creator
  * @param {Object} firestoreDB - Firestore database instance
  * @param {String} userId - User ID
@@ -186,6 +260,9 @@ export const createGroup = async (firestoreDB, appdatabase, creatorData, memberI
     metaUpdates[`group_meta_data/${creatorData.id}/${groupId}/muted`] = false;
     metaUpdates[`group_meta_data/${creatorData.id}/${groupId}/joinedAt`] = Date.now();
     metaUpdates[`group_meta_data/${creatorData.id}/${groupId}/createdBy`] = creatorData.id; // Store creator ID
+    // Invitees are not members until they accept, so the count starts at the
+    // creator alone; acceptGroupInvite/approveJoinRequest raise it from there.
+    metaUpdates[`group_meta_data/${creatorData.id}/${groupId}/memberCount`] = 1;
 
     // Batch update creator metadata
     await update(ref(appdatabase, '/'), metaUpdates);
@@ -434,10 +511,18 @@ export const acceptGroupInvite = async (firestoreDB, appdatabase, inviteId, user
     }
 
     // Add user to group (transaction to prevent race conditions)
-    await runTransaction(firestoreDB, async (transaction) => {
+    const committed = await runTransaction(firestoreDB, async (transaction) => {
+      // Firestore requires every read before the first write.
+      const freshInviteSnap = await transaction.get(inviteRef);
       const freshGroupSnap = await transaction.get(groupRef);
       if (!freshGroupSnap.exists()) {
         throw new Error('Group not found');
+      }
+
+      // A double tap (or two devices) can both pass the pre-checks above; the
+      // invite is re-read here so only the first accept can consume it.
+      if (!freshInviteSnap.exists() || freshInviteSnap.data()?.status !== 'pending') {
+        throw new Error('Invitation already processed');
       }
 
       const freshData = freshGroupSnap.data();
@@ -474,26 +559,38 @@ export const acceptGroupInvite = async (firestoreDB, appdatabase, inviteId, user
 
       // Mark invite as accepted
       transaction.update(inviteRef, { status: 'accepted' });
+
+      // Hand the committed state back so the RTDB writes below use the fresh
+      // member list and owner, not the pre-transaction read.
+      return { memberIds: newMemberIds, groupData: freshData };
     });
 
-    // Create group_meta_data for new member (1 RTDB write)
-    const groupMetaRef = ref(appdatabase, `group_meta_data/${userData.id}/${inviteData.groupId}`);
-    await set(groupMetaRef, {
-      groupId: inviteData.groupId,
-      groupName: groupData.name || 'Group',
-      groupAvatar: groupData.avatar || null,
-      // Same mirror as createGroup -- a member joining by invite needs the
-      // description too, or the group reads as having none for them.
-      description: groupData.description || null,
-      lastMessage: null,
-      lastMessageTimestamp: 0,
-      unreadCount: 0,
-      createdBy: groupData.createdBy || null, // Store creator ID
-      muted: false,
-      joinedAt: Date.now(),
+    const freshGroup = committed?.groupData || groupData;
+    const committedMemberIds = committed?.memberIds || [...(groupData.memberIds || []), userData.id];
+
+    // Create group_meta_data for the new member and bump memberCount on every
+    // member's row, in one multi-path update. The new member's row is written
+    // as a whole object at its own path, which replaces the node exactly like
+    // the set() this used to be.
+    await writeMemberCounts(appdatabase, inviteData.groupId, committedMemberIds, {
+      [`group_meta_data/${userData.id}/${inviteData.groupId}`]: {
+        groupId: inviteData.groupId,
+        groupName: freshGroup.name || 'Group',
+        groupAvatar: freshGroup.avatar || null,
+        // Same mirror as createGroup -- a member joining by invite needs the
+        // description too, or the group reads as having none for them.
+        description: freshGroup.description || null,
+        lastMessage: null,
+        lastMessageTimestamp: 0,
+        unreadCount: 0,
+        createdBy: freshGroup.createdBy || null, // Store creator ID
+        muted: false,
+        joinedAt: Date.now(),
+        memberCount: committedMemberIds.length,
+      },
     });
 
-    return { success: true, groupId: inviteData.groupId };
+    return { success: true, groupId: inviteData.groupId, groupName: freshGroup.name || null };
   } catch (error) {
     console.error('Error accepting group invite:', error);
     return { success: false, error: error.message || 'Failed to accept invitation' };
@@ -596,6 +693,8 @@ export const leaveGroup = async (firestoreDB, appdatabase, groupId, userId) => {
           memberCount: newMemberIds.length,
           updatedAt: serverTimestamp(),
         });
+
+        return { success: true, remainingMemberIds: newMemberIds, newOwnerId };
       } else {
         // Regular member leaving
         transaction.update(groupRef, {
@@ -606,7 +705,7 @@ export const leaveGroup = async (firestoreDB, appdatabase, groupId, userId) => {
         });
       }
 
-      return { success: true };
+      return { success: true, remainingMemberIds: newMemberIds };
     });
 
     // If group doesn't exist, clean up and return success (user is effectively already "left")
@@ -626,6 +725,20 @@ export const leaveGroup = async (firestoreDB, appdatabase, groupId, userId) => {
         }
       }
       return { success: true, message: 'Group no longer exists' };
+    }
+
+    // The transaction has committed: bring the remaining members' rows up to
+    // date. Both are best-effort and never turn a completed leave into an
+    // error.
+    if (result.remainingMemberIds?.length > 0) {
+      try {
+        await writeMemberCounts(appdatabase, groupId, result.remainingMemberIds);
+      } catch (countError) {
+        console.warn('Could not update memberCount for remaining members:', countError);
+      }
+    }
+    if (result.newOwnerId) {
+      await propagateOwnerChange(firestoreDB, appdatabase, groupId, result.remainingMemberIds, result.newOwnerId);
     }
 
     // If last person left, delete all group data from RTDB
@@ -729,82 +842,112 @@ export const sendGroupMessage = async (appdatabase, firestoreDB, groupId, messag
   }
 
   try {
-    const timestamp = Date.now();
-    const messageRef = ref(appdatabase, `group_messages/${groupId}/messages/${timestamp}`);
-
-    // 1. Save message to RTDB
-    await set(messageRef, {
-      ...messageData,
-      timestamp,
-    });
-
-    // 2. Get group members from Firestore (1 read)
+    // 1. Get group members from Firestore (1 read) and check the sender may
+    // post. This used to run AFTER the message was written, so a send into a
+    // deleted group (or by someone who had been kicked) left an orphan
+    // message under group_messages/{groupId} before failing with "Group not
+    // found". Checking first costs the same single read.
     const groupDoc = await getDoc(doc(firestoreDB, 'groups', groupId));
     if (!groupDoc.exists()) {
       return { success: false, error: 'Group not found' };
     }
 
-    const groupData = groupDoc.data();
+    const groupData = groupDoc.data() || {};
     const memberIds = groupData.memberIds || [];
 
-    // Last message preview
-    const lastMessagePreview =
-      messageData.text?.trim() ||
-      (messageData.imageUrl ? '📷 Photo' : messageData.fruits?.length ? `🐾 ${messageData.fruits.length} pet(s)` : '');
-
-    // 3. Batch check active members (1 read for all)
-    const activeGroupRef = ref(appdatabase, `activeGroupChats/${groupId}`);
-    const activeMembersSnap = await get(activeGroupRef);
-    const activeMemberIds = activeMembersSnap.exists()
-      ? Object.keys(activeMembersSnap.val() || {})
-      : [];
-
-    // 4. Prepare batch updates for all members
-    const updates = {};
-    const inactiveMemberIds = [];
-
-    for (const memberId of memberIds) {
-      const isActive = activeMemberIds.includes(memberId);
-      const isSender = memberId === senderData.id;
-
-      // Always update lastMessage, timestamp, and groupName (for notifications)
-      updates[`group_meta_data/${memberId}/${groupId}/lastMessage`] = lastMessagePreview;
-      updates[`group_meta_data/${memberId}/${groupId}/lastMessageTimestamp`] = timestamp;
-      updates[`group_meta_data/${memberId}/${groupId}/lastMessageSenderId`] = senderData.id;
-      updates[`group_meta_data/${memberId}/${groupId}/lastMessageSenderName`] = senderData.displayName || 'Anonymous';
-      updates[`group_meta_data/${memberId}/${groupId}/groupName`] = groupData.name || 'Group Chat';
-
-      if (isSender) {
-        // Sender: always 0 unread
-        updates[`group_meta_data/${memberId}/${groupId}/unreadCount`] = 0;
-      } else if (isActive) {
-        // Active member: 0 unread
-        updates[`group_meta_data/${memberId}/${groupId}/unreadCount`] = 0;
-      } else {
-        // Inactive member: need to get current count
-        inactiveMemberIds.push(memberId);
-      }
+    if (!memberIds.includes(senderData.id)) {
+      return { success: false, error: 'You are not a member of this group' };
+    }
+    if (groupData.members?.[senderData.id]?.muted) {
+      return { success: false, error: 'You are muted in this group' };
     }
 
-    // 5. Bump unread for inactive members — server-side atomic increment.
-    //
-    // This previously read every inactive member's meta node first (one full
-    // round-trip each, downloading the whole node to extract one integer) and
-    // wrote back `currentUnread + 1`. Two problems:
-    //   • cost — N reads per message in an N-member group
-    //   • correctness — a lost-update race: two people sending at the same
-    //     time both read the same value, so one increment vanished.
-    //
-    // increment() resolves server-side: zero reads, concurrency-safe. On a
-    // missing node it initialises from 0, matching the old
-    // `metaSnap.exists() ? ... : 0` behaviour. Same path, same field, same
-    // value type — older app versions read it exactly as before.
-    inactiveMemberIds.forEach((memberId) => {
-      updates[`group_meta_data/${memberId}/${groupId}/unreadCount`] = increment(1);
+    // 2. Save message to RTDB. The key stays Date.now() as a string: existing
+    // messages are keyed that way and readers page with orderByKey, so a
+    // push() id would sort before every message already stored.
+    const timestamp = Date.now();
+    const messageRef = ref(appdatabase, `group_messages/${groupId}/messages/${timestamp}`);
+    await set(messageRef, {
+      ...messageData,
+      timestamp,
     });
 
-    // 6. Batch update all metadata at once (cost-optimized: 1 write operation)
-    await update(ref(appdatabase, '/'), updates);
+    // Last message preview. Display text only -- the stored field is still
+    // `fruits`. Fisch items are fish, rods, skins, bobbers and lanterns, so
+    // the old Adopt Me "🐾 N pet(s)" preview named the wrong thing.
+    const lastMessagePreview =
+      messageData.text?.trim() ||
+      (messageData.imageUrl ? '📷 Photo' : messageData.fruits?.length ? `🎣 ${messageData.fruits.length} item(s)` : '');
+
+    // Steps 3-6 only fan the preview/unread out to the members' list rows.
+    // The message itself is already saved, so a failure from here on must
+    // not be reported as a failed send: the input restores the text on
+    // failure, and the user would resend a message everyone already has.
+    try {
+      // 3. Batch check active members (1 read for all)
+      const activeGroupRef = ref(appdatabase, `activeGroupChats/${groupId}`);
+      const activeMembersSnap = await get(activeGroupRef);
+      const activeMemberIds = activeMembersSnap.exists()
+        ? Object.keys(activeMembersSnap.val() || {})
+        : [];
+
+      // 4. Prepare batch updates for all members
+      const updates = {};
+      const inactiveMemberIds = [];
+
+      for (const memberId of memberIds) {
+        const isActive = activeMemberIds.includes(memberId);
+        const isSender = memberId === senderData.id;
+
+        // Always update lastMessage, timestamp, and groupName (for notifications)
+        updates[`group_meta_data/${memberId}/${groupId}/lastMessage`] = lastMessagePreview;
+        updates[`group_meta_data/${memberId}/${groupId}/lastMessageTimestamp`] = timestamp;
+        updates[`group_meta_data/${memberId}/${groupId}/lastMessageSenderId`] = senderData.id;
+        updates[`group_meta_data/${memberId}/${groupId}/lastMessageSenderName`] = senderData.displayName || 'Anonymous';
+        updates[`group_meta_data/${memberId}/${groupId}/groupName`] = groupData.name || 'Group Chat';
+        // Ride-along repairs, free because this update is happening anyway:
+        // rows written by older builds never carried memberCount, and an
+        // ownership change made by an older build left createdBy stale. Each
+        // message now brings both back in line with the Firestore doc.
+        updates[`group_meta_data/${memberId}/${groupId}/memberCount`] = memberIds.length;
+        if (groupData.createdBy) {
+          updates[`group_meta_data/${memberId}/${groupId}/createdBy`] = groupData.createdBy;
+        }
+
+        if (isSender) {
+          // Sender: always 0 unread
+          updates[`group_meta_data/${memberId}/${groupId}/unreadCount`] = 0;
+        } else if (isActive) {
+          // Active member: 0 unread
+          updates[`group_meta_data/${memberId}/${groupId}/unreadCount`] = 0;
+        } else {
+          // Inactive member: need to get current count
+          inactiveMemberIds.push(memberId);
+        }
+      }
+
+      // 5. Bump unread for inactive members — server-side atomic increment.
+      //
+      // This previously read every inactive member's meta node first (one full
+      // round-trip each, downloading the whole node to extract one integer) and
+      // wrote back `currentUnread + 1`. Two problems:
+      //   • cost — N reads per message in an N-member group
+      //   • correctness — a lost-update race: two people sending at the same
+      //     time both read the same value, so one increment vanished.
+      //
+      // increment() resolves server-side: zero reads, concurrency-safe. On a
+      // missing node it initialises from 0, matching the old
+      // `metaSnap.exists() ? ... : 0` behaviour. Same path, same field, same
+      // value type — older app versions read it exactly as before.
+      inactiveMemberIds.forEach((memberId) => {
+        updates[`group_meta_data/${memberId}/${groupId}/unreadCount`] = increment(1);
+      });
+
+      // 6. Batch update all metadata at once (cost-optimized: 1 write operation)
+      await update(ref(appdatabase, '/'), updates);
+    } catch (fanOutError) {
+      console.warn('Group message saved, but updating member rows failed:', fanOutError);
+    }
 
     return { success: true };
   } catch (error) {
@@ -973,7 +1116,13 @@ export const removeMemberFromGroup = async (firestoreDB, appdatabase, groupId, m
   try {
     const groupRef = doc(firestoreDB, 'groups', groupId);
 
-    return await runTransaction(firestoreDB, async (transaction) => {
+    // The transaction callback does Firestore work only and hands back what
+    // the RTDB cleanup needs. It used to await an RTDB remove() inside the
+    // callback; Adopt Me hit a native `EnsureCommitNotCalled` crash from
+    // exactly that (non-Firestore awaits inside a transaction that retries on
+    // contention or finalises before they resolve), and a retried callback
+    // could also delete the member's row for a kick that never committed.
+    const committed = await runTransaction(firestoreDB, async (transaction) => {
       const groupSnap = await transaction.get(groupRef);
       if (!groupSnap.exists()) {
         throw new Error('Group not found');
@@ -1025,24 +1174,33 @@ export const removeMemberFromGroup = async (firestoreDB, appdatabase, groupId, m
         });
       }
 
-      // Remove RTDB group_meta_data for the removed member
+      return { remainingMemberIds: updatedMemberIds };
+    });
+
+    // Only reached once the kick has committed. Best-effort RTDB cleanup: a
+    // failure here does not undo the membership change.
+    try {
+      const metaRef = ref(appdatabase, `group_meta_data/${memberIdToRemove}/${groupId}`);
+      // Use remove() to explicitly delete the node
+      await remove(metaRef);
+    } catch (metaError) {
+      console.warn(`Could not delete group metadata for removed member ${memberIdToRemove}:`, metaError);
+      // Fallback: try setting to null if remove fails
       try {
         const metaRef = ref(appdatabase, `group_meta_data/${memberIdToRemove}/${groupId}`);
-        // Use remove() to explicitly delete the node
-        await remove(metaRef);
-      } catch (metaError) {
-        console.warn(`Could not delete group metadata for removed member ${memberIdToRemove}:`, metaError);
-        // Fallback: try setting to null if remove fails
-        try {
-          const metaRef = ref(appdatabase, `group_meta_data/${memberIdToRemove}/${groupId}`);
-          await set(metaRef, null);
-        } catch (fallbackError) {
-          console.warn(`Fallback delete also failed for removed member ${memberIdToRemove}:`, fallbackError);
-        }
+        await set(metaRef, null);
+      } catch (fallbackError) {
+        console.warn(`Fallback delete also failed for removed member ${memberIdToRemove}:`, fallbackError);
       }
+    }
 
-      return { success: true };
-    });
+    try {
+      await writeMemberCounts(appdatabase, groupId, committed?.remainingMemberIds);
+    } catch (countError) {
+      console.warn('Could not update memberCount for remaining members:', countError);
+    }
+
+    return { success: true };
   } catch (error) {
     console.error('Error removing member from group:', error);
     return { success: false, error: error.message || 'Failed to remove member' };
@@ -1182,7 +1340,7 @@ export const makeMemberCreator = async (firestoreDB, appdatabase, groupId, membe
   try {
     const groupRef = doc(firestoreDB, 'groups', groupId);
 
-    return await runTransaction(firestoreDB, async (transaction) => {
+    const committed = await runTransaction(firestoreDB, async (transaction) => {
       const groupSnap = await transaction.get(groupRef);
       if (!groupSnap.exists()) {
         throw new Error('Group not found');
@@ -1213,8 +1371,14 @@ export const makeMemberCreator = async (firestoreDB, appdatabase, groupId, membe
         updatedAt: serverTimestamp(),
       });
 
-      return { success: true };
+      return { memberIds: currentMemberIds };
     });
+
+    // Committed: point the members' list rows and any pending join requests
+    // at the new owner (see propagateOwnerChange).
+    await propagateOwnerChange(firestoreDB, appdatabase, groupId, committed?.memberIds, memberIdToMakeCreator);
+
+    return { success: true };
   } catch (error) {
     console.error('Error making member creator:', error);
     return { success: false, error: error.message || 'Failed to make member creator' };
@@ -1230,7 +1394,7 @@ export const makeMemberCreator = async (firestoreDB, appdatabase, groupId, membe
  * @param {string} avatarUrl - New avatar URL
  * @returns {Promise<{success: boolean, error?: string}>}
  */
-// ✅ Update group name (Admin only)
+// ✅ Update group name (group creator, or staff admin for moderation)
 export const updateGroupName = async (firestoreDB, appdatabase, groupId, userId, groupName, isAdmin = false) => {
   if (!firestoreDB || !appdatabase || !groupId || !userId || !groupName) {
     return { success: false, error: 'Missing required parameters' };
@@ -1246,9 +1410,15 @@ export const updateGroupName = async (firestoreDB, appdatabase, groupId, userId,
 
     const groupData = groupSnap.data();
 
-    // Only admin can update name
-    if (!isAdmin) {
-      return { success: false, error: 'Only admin can update the group name' };
+    // Same ownership model as updateGroupAvatar: the creator owns their
+    // group's identity, global staff admins keep access for moderation. Was
+    // `isAdmin` only, so a non-staff creator could open the edit sheet
+    // (GroupsScreen lets them) and was then rejected on save. createdBy is
+    // read from the Firestore doc above, so a transferred group follows its
+    // current owner.
+    const canEdit = hasGroupPermission(groupData, userId, 'edit_group') || isAdmin;
+    if (!canEdit) {
+      return { success: false, error: 'Only the group creator can update the group name' };
     }
 
     const trimmedName = groupName.trim();
@@ -1284,7 +1454,7 @@ export const updateGroupName = async (firestoreDB, appdatabase, groupId, userId,
   }
 };
 
-// ✅ Update group description (Admin only, max 100 chars)
+// ✅ Update group description (group creator or staff admin, max 100 chars)
 export const updateGroupDescription = async (firestoreDB, appdatabase, groupId, userId, description, isAdmin = false) => {
   if (!firestoreDB || !appdatabase || !groupId || !userId) {
     return { success: false, error: 'Missing required parameters' };
@@ -1300,9 +1470,12 @@ export const updateGroupDescription = async (firestoreDB, appdatabase, groupId, 
 
     const groupData = groupSnap.data();
 
-    // Only admin can update description
-    if (!isAdmin) {
-      return { success: false, error: 'Only admin can update the group description' };
+    // The group creator owns their group's description; global staff admins
+    // keep access for moderation. Previously `isAdmin` only, so a creator who
+    // wasn't staff got "Only admin can update the group description" on save.
+    const canEdit = hasGroupPermission(groupData, userId, 'edit_group') || isAdmin;
+    if (!canEdit) {
+      return { success: false, error: 'Only the group creator can update the group description' };
     }
 
     // Limit description to 100 characters
@@ -1439,7 +1612,6 @@ export const sendJoinRequest = async (firestoreDB, groupId, requesterData) => {
     };
     
     const requestRef = await addDoc(collection(firestoreDB, 'group_join_requests'), requestData);
-    console.log('✅ Join request created:', requestRef.id, 'for group:', groupId, 'creator:', groupData.createdBy);
 
     return { success: true };
   } catch (error) {
@@ -1471,11 +1643,6 @@ export const approveJoinRequest = async (firestoreDB, appdatabase, requestId, cr
 
     const requestData = requestSnap.data();
 
-    // Verify creator authorization
-    if (requestData.creatorId !== creatorId) {
-      return { success: false, error: 'Only the group creator can approve requests' };
-    }
-
     // Check if request is still pending
     if (requestData.status !== 'pending') {
       return { success: false, error: 'This request has already been processed' };
@@ -1493,6 +1660,22 @@ export const approveJoinRequest = async (firestoreDB, appdatabase, requestId, cr
     }
 
     const groupData = groupSnap.data();
+
+    // Verify against the group's CURRENT owner. requestData.creatorId is a
+    // copy taken when the request was sent, so after an ownership transfer it
+    // let the previous owner keep approving and locked the new one out.
+    if (groupData.createdBy !== creatorId) {
+      // A request still addressed to this (former) owner — ownership changed
+      // on an older build, or propagateOwnerChange missed it. Refusing here
+      // stranded it: the old owner could not act, the new owner never saw
+      // it, and the requester could not ask again while it was pending.
+      // Hand it to the current owner, which old builds also understand.
+      if (requestData.creatorId === creatorId && groupData.createdBy && requestData.status === 'pending') {
+        await updateDoc(requestRef, { creatorId: groupData.createdBy });
+        return { success: false, error: 'Ownership of this group changed — the request was forwarded to the new owner.' };
+      }
+      return { success: false, error: 'Only the group creator can approve requests' };
+    }
 
     // Check if group is still not full
     const memberCount = groupData.memberIds?.length || 0;
@@ -1521,9 +1704,32 @@ export const approveJoinRequest = async (firestoreDB, appdatabase, requestId, cr
     const requesterAvatar = requestData.requesterAvatar || null;
 
     // Use transaction to ensure atomicity
-    await runTransaction(firestoreDB, async (transaction) => {
+    const committed = await runTransaction(firestoreDB, async (transaction) => {
+      // Firestore requires every read before the first write.
+      const freshRequestSnap = await transaction.get(requestRef);
       const freshGroupSnap = await transaction.get(groupRef);
+      if (!freshGroupSnap.exists()) {
+        throw new Error('Group not found');
+      }
       const freshGroupData = freshGroupSnap.data();
+
+      // The checks above ran before the transaction, so a double tap on
+      // Approve (or two devices) could both pass them and append the requester
+      // to memberIds twice. Re-check the request, the owner and membership on
+      // the state this transaction will actually commit against.
+      if (!freshRequestSnap.exists() || freshRequestSnap.data()?.status !== 'pending') {
+        throw new Error('This request has already been processed');
+      }
+      if (freshGroupData.createdBy !== creatorId) {
+        throw new Error('Only the group creator can approve requests');
+      }
+      if (freshGroupData.memberIds?.includes(requesterId)) {
+        transaction.update(requestRef, {
+          status: 'approved',
+          approvedAt: serverTimestamp(),
+        });
+        return { alreadyMember: true };
+      }
 
       // Double-check member count
       const freshMemberCount = freshGroupData.memberIds?.length || 0;
@@ -1555,17 +1761,32 @@ export const approveJoinRequest = async (firestoreDB, appdatabase, requestId, cr
         status: 'approved',
         approvedAt: serverTimestamp(),
       });
+
+      return { memberIds: newMemberIds, groupData: freshGroupData };
     });
 
-    // Update RTDB metadata for the new member
-    const updates = {};
-    updates[`group_meta_data/${requesterId}/${groupId}/groupName`] = groupData.groupName || 'Group';
-    updates[`group_meta_data/${requesterId}/${groupId}/groupAvatar`] = groupData.avatar || null;
-    updates[`group_meta_data/${requesterId}/${groupId}/unreadCount`] = 0;
-    updates[`group_meta_data/${requesterId}/${groupId}/lastReadAt`] = Date.now();
-    updates[`group_meta_data/${requesterId}/${groupId}/createdBy`] = groupData.createdBy;
+    if (committed?.alreadyMember) {
+      return { success: false, error: 'User is already a member' };
+    }
 
-    await update(ref(appdatabase, '/'), updates);
+    const freshGroup = committed?.groupData || groupData;
+    const committedMemberIds = committed?.memberIds || [...(groupData.memberIds || []), requesterId];
+
+    // Update RTDB metadata for the new member, plus memberCount on every
+    // member's row, in one multi-path update. Field-by-field (not a whole-row
+    // set) so nothing already on the requester's row is clobbered.
+    const base = `group_meta_data/${requesterId}/${groupId}`;
+    const updates = {};
+    updates[`${base}/groupId`] = groupId;
+    updates[`${base}/groupName`] = freshGroup.groupName || freshGroup.name || 'Group';
+    updates[`${base}/groupAvatar`] = freshGroup.avatar || null;
+    updates[`${base}/description`] = freshGroup.description || null;
+    updates[`${base}/unreadCount`] = 0;
+    updates[`${base}/lastReadAt`] = Date.now();
+    updates[`${base}/joinedAt`] = Date.now();
+    updates[`${base}/createdBy`] = freshGroup.createdBy || null;
+
+    await writeMemberCounts(appdatabase, groupId, committedMemberIds, updates);
 
     return { success: true };
   } catch (error) {
@@ -1596,8 +1817,23 @@ export const rejectJoinRequest = async (firestoreDB, requestId, creatorId) => {
 
     const requestData = requestSnap.data();
 
-    // Verify creator authorization
-    if (requestData.creatorId !== creatorId) {
+    // Verify against the group's CURRENT owner, not the creatorId copied onto
+    // the request when it was sent (stale after an ownership transfer). If the
+    // group is gone there is no owner left to ask, so the stored creatorId is
+    // the only check available -- that path just tidies a dead request.
+    let currentOwnerId = requestData.creatorId;
+    if (requestData.groupId) {
+      const groupSnap = await getDoc(doc(firestoreDB, 'groups', requestData.groupId));
+      if (groupSnap.exists()) {
+        currentOwnerId = groupSnap.data()?.createdBy;
+      }
+    }
+    if (currentOwnerId !== creatorId) {
+      // Same stranded-request case as approveJoinRequest: forward it.
+      if (requestData.creatorId === creatorId && currentOwnerId && requestData.status === 'pending') {
+        await updateDoc(requestRef, { creatorId: currentOwnerId });
+        return { success: false, error: 'Ownership of this group changed — the request was forwarded to the new owner.' };
+      }
       return { success: false, error: 'Only the group creator can reject requests' };
     }
 
@@ -1626,9 +1862,14 @@ export const rejectJoinRequest = async (firestoreDB, requestId, creatorId) => {
  * @param {String} searchQuery - Optional search query for group name
  * @returns {Promise<{success: boolean, groups?: Array, error?: string}>}
  */
-// ✅ Delete group (Admin only)
-export const deleteGroup = async (firestoreDB, appdatabase, groupId) => {
-  if (!firestoreDB || !appdatabase || !groupId) {
+// ✅ Delete group (group owner, or staff admin for moderation)
+//
+// `requesterId` / `isAdmin` are new: this used to take only the groupId and
+// delete whatever it was given, with every ownership check left to the
+// caller -- which read `createdBy` off a group_meta_data copy that goes stale
+// after an ownership transfer. It now checks the Firestore doc itself.
+export const deleteGroup = async (firestoreDB, appdatabase, groupId, requesterId = null, isAdmin = false) => {
+  if (!firestoreDB || !appdatabase || !groupId || (!requesterId && !isAdmin)) {
     return { success: false, error: 'Missing required parameters' };
   }
 
@@ -1640,13 +1881,22 @@ export const deleteGroup = async (firestoreDB, appdatabase, groupId) => {
     try {
       const groupDocRef = doc(firestoreDB, 'groups', groupId);
       const groupSnap = await getDoc(groupDocRef);
-      // Fix: exists is a property, not a function
+      // RNFB v23: exists() is a method; the bare property is always truthy.
       if (groupSnap.exists()) {
         groupData = groupSnap.data();
         memberIds = groupData.memberIds || [];
       }
     } catch (fetchError) {
+      // Without the doc there is no way to confirm ownership, and this is a
+      // destructive call -- refuse rather than guess.
       console.warn('Could not fetch group data from Firestore before deletion:', fetchError.message || fetchError);
+      return { success: false, error: 'Could not verify the group. Please try again.' };
+    }
+
+    // A missing doc means the group is already gone and only leftover RTDB
+    // data remains, so the cleanup below is allowed to run.
+    if (groupData && !isAdmin && groupData.createdBy !== requesterId) {
+      return { success: false, error: 'Only the group creator can delete this group' };
     }
 
     // Also try to get memberIds from RTDB as fallback
@@ -1699,7 +1949,6 @@ export const deleteGroup = async (firestoreDB, appdatabase, groupId) => {
     if (allMemberIds.length === 0) {
       console.warn(`⚠️ Warning: Could not find any memberIds for group ${groupId}. Metadata may not be fully cleaned up.`);
     } else {
-      console.log(`🗑️ Deleting group ${groupId} - Found ${allMemberIds.length} members to clean up metadata for`);
     }
 
     // Delete from Firestore

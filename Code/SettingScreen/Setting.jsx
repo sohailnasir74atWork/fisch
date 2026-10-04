@@ -23,7 +23,7 @@ import { getStyles } from './settingstyle';
 import { handleGetSuggestions, handleOpenFacebook, handleOpenWebsite, handleRateApp, handleShareApp, imageOptions, openOtherApp, handleRefresh, handleReport, handleOpenPrivacy, handleOpenChild} from './settinghelper';
 import { logoutUser } from '../Firebase/UserLogics';
 import SignInDrawer from '../Firebase/SigninDrawer';
-import auth from '@react-native-firebase/auth';
+import { getAuth, deleteUser } from '@react-native-firebase/auth';
 import { resetUserState } from '../Globelhelper';
 import ConditionalKeyboardWrapper from '../Helper/keyboardAvoidingContainer';
 import { useHaptic } from '../Helper/HepticFeedBack';
@@ -31,6 +31,7 @@ import { useLocalState } from '../LocalGlobelStats';
 import config from '../Helper/Environment';
 import notifee from '@notifee/react-native';
 import SubscriptionScreen from './OfferWall';
+import PromoCodeModal from './PromoCodeModal';
 import { ref, remove, get, update, set } from '@react-native-firebase/database';
 import { Menu, MenuOption, MenuOptions, MenuTrigger } from 'react-native-popup-menu';
 import { useLanguage } from '../Translation/LanguageProvider';
@@ -40,6 +41,7 @@ import { showSuccessMessage, showErrorMessage } from '../Helper/MessageHelper';
 import { setAppLanguage } from '../../i18n';
 import { Image as CompressorImage } from 'react-native-compressor';
 import RNFS from 'react-native-fs';
+import { usePrivacyOptionsRequired, showPrivacyOptionsForm } from '../Ads/consentOptions';
 
 
 
@@ -69,6 +71,8 @@ import { pickImages } from '../Helper/imagePicker';
 import FramedAvatar from '../ChatScreen/GroupChat/FramedAvatar';
 import { getMyCosmetics, syncMyCosmetics } from '../Helper/cosmeticsCache';
 import { GAME } from '../config/game';
+import { canSeeCountryFlags } from '../Helper/countryFlag';
+import { resolveItemImage } from '../Helper/valueSources';
 import { getThemeColors } from '../Helper/themeColors';
 import { SIZE } from '../Design/tokens';
 import { SPACE } from '../Design/tokens';
@@ -338,7 +342,7 @@ const EditProfileDrawerContent = ({
         </View>
 
         {/* Avatar Grid - Minimal */}
-        <FlatList
+        <FlatList removeClippedSubviews={false}
           data={filteredAvatarOptions}
           keyExtractor={(item, index) => `${item.url}-${index}`}
           horizontal
@@ -471,10 +475,11 @@ export default function SettingsScreen({ selectedTheme }) {
   const [newDisplayName, setNewDisplayName] = useState('');
   const [selectedImage, setSelectedImage] = useState(null);
   const [openSingnin, setOpenSignin] = useState(false);
-  const { user, theme, updateLocalStateAndDatabase, setUser, appdatabase, firestoreDB , single_offer_wall} = useGlobalState()
+  const { user, theme, updateLocalStateAndDatabase, setUser, appdatabase, firestoreDB , single_offer_wall, isAdmin } = useGlobalState()
   const { updateLocalState, localState, mySubscriptions } = useLocalState()
   const [isPermissionGranted, setIsPermissionGranted] = useState(false);
   const [showOfferWall, setShowofferWall] = useState(false);
+  const [showPromo, setShowPromo] = useState(false);
   const { language, changeLanguage } = useLanguage();
   const [ownedPets, setOwnedPets] = useState([]);
 const [wishlistPets, setWishlistPets] = useState([]);
@@ -527,7 +532,9 @@ const [uploadingAvatar, setUploadingAvatar] = useState(false);
 
 
   const { t } = useTranslation();
-  const BASE_ADOPTME_URL = 'https://elvebredd.com';
+  // UMP "privacy options" entry point — only EEA/UK/CH users who saw the
+  // consent form need it; everyone else never sees the row.
+  const privacyOptionsRequired = usePrivacyOptionsRequired();
 
 
 
@@ -552,14 +559,14 @@ const [uploadingAvatar, setUploadingAvatar] = useState(false);
 
     return parsedValuesData
       .filter(item => item?.image && item?.name)
-      .map(item => {
-        const path = item.image.startsWith('/') ? item.image : `/${item.image}`;
-        return {
-          url: `${BASE_ADOPTME_URL}${path}`,
-          name: item.name,
-          type: item.type || 'pet',
-        };
-      });
+      .map(item => ({
+        // Fisch CDN, via the same resolver as the values list. This used to
+        // prefix Adopt Me's image host (elvebredd.com), so every item avatar
+        // was a broken image.
+        url: resolveItemImage(item),
+        name: item.name,
+        type: item.type || 'item',
+      }));
   }, [parsedValuesData]);
 
   const defaultAvatarOptions = useMemo(
@@ -663,6 +670,9 @@ const [uploadingAvatar, setUploadingAvatar] = useState(false);
 
 
   const { triggerHapticFeedback } = useHaptic();
+  // Pro that comes only from a promo code: no store subscription to manage.
+  const promoOnly = (localState.promoProUntil || 0) > Date.now() && mySubscriptions.length === 0;
+
   const themes = [t('settings.theme_system'), t('settings.theme_light'), t('settings.theme_dark')];
     // const themes = ['System', 'Light','Dark'];
 
@@ -745,7 +755,7 @@ const [uploadingAvatar, setUploadingAvatar] = useState(false);
 
   // ✅ Generate verification code for Roblox username
   const generateVerificationCode = () => {
-    const code = `AMV-${Math.random().toString(36).substring(2, 8).toUpperCase()}`;
+    const code = `FV-${Math.random().toString(36).substring(2, 8).toUpperCase()}`;
     setVerificationCode(code);
     return code;
   };
@@ -962,7 +972,15 @@ const [uploadingAvatar, setUploadingAvatar] = useState(false);
       return;
     }
 
-    const loadBioAndRating = async () => {
+    // A failed read (Firestore 'unavailable' on a flaky or VPN'd connection)
+    // used to overwrite the player's real bio with the "new here" default and
+    // blank their rating, and console.error put a red box over Settings in
+    // dev. Now a transient failure keeps what is on screen and retries with a
+    // backoff; only a successful read changes the profile.
+    let cancelled = false;
+    let retryTimer = null;
+    const RETRY_DELAYS_MS = [2000, 5000, 15000];
+    const loadBioAndRating = async (attempt = 0) => {
       setLoadingRating(true);
       try {
         // ✅ MIGRATED: Read rating summary from Firestore user_ratings_summary (single source of truth)
@@ -1692,36 +1710,15 @@ const renderTradeItem = useCallback((trade) => {
   const groupedHasItems = groupTradeItems(trade.hasItems || []);
   const groupedWantsItems = groupTradeItems(trade.wantsItems || []);
 
-  // Helper to get adoptme image URL (matching Trades.jsx getImageUrl)
+  // Same resolver as Trades.jsx (Fisch CDN). This used to build Adopt Me
+  // image URLs (elvebredd.com / adoptmevalues.gg), so My Trades showed
+  // broken images.
   const getTradeItemImageUrl = (item) => {
     if (!item || !item.name) return '';
-    
-    const baseImgUrl = isGG ? localState.imgurlGG : localState.imgurl;
-    if (!baseImgUrl) return '';
-    
-    if (isGG) {
-      const encoded = encodeURIComponent(item.name);
-      return `${baseImgUrl.replace(/"/g, '')}/items/${encoded}.webp`;
-    }
-    
-    // Try to find item in parsedValuesData to get image path
-    if (parsedValuesData.length > 0) {
-      const foundItem = parsedValuesData.find(
-        (i) => (i?.name || i?.Name || '').toLowerCase() === item.name.toLowerCase()
-      );
-      if (foundItem?.image) {
-        const path = foundItem.image.startsWith('/') ? foundItem.image : `/${foundItem.image}`;
-        return `${baseImgUrl.replace(/"/g, '').replace(/\/$/, '')}${path}`;
-      }
-    }
-    
-    // Fallback: try item.image if available
-    if (item.image) {
-      const path = item.image.startsWith('/') ? item.image : `/${item.image}`;
-      return `${baseImgUrl.replace(/"/g, '').replace(/\/$/, '')}${path}`;
-    }
-    
-    return '';
+    const foundItem = parsedValuesData.find(
+      (i) => (i?.name || i?.Name || '').toLowerCase() === item.name.toLowerCase()
+    );
+    return resolveItemImage(foundItem || item) || '';
   };
 
   return (
@@ -2063,7 +2060,7 @@ const renderTradeItem = useCallback((trade) => {
       )}
     </View>
   );
-}, [isDarkMode, t, deletingTradeId, handleDeleteTrade, localState.isGG, localState.imgurl, localState.imgurlGG, parsedValuesData, firestoreDB]);
+}, [isDarkMode, t, deletingTradeId, handleDeleteTrade, parsedValuesData, firestoreDB]);
 
 // Load more "gave" reviews in modal - keeps loading until all are fetched
 const loadMoreGaveModalReviews = useCallback(async () => {
@@ -2382,9 +2379,9 @@ const loadMoreReceivedModalReviews = useCallback(async () => {
       await remove(userRef);
   
       // Step 4: Delete from Firebase Auth
-      const currentUser = auth().currentUser;
+      const currentUser = getAuth().currentUser;
       if (currentUser) {
-        await currentUser.delete(); // 🔐 Requires recent login
+        await deleteUser(currentUser); // 🔐 Requires recent login
       } else {
         showErrorMessage(t("home.alert.error"), t("settings.user_not_found"));
         return;
@@ -2539,8 +2536,8 @@ const formatPlanName = (plan) => {
               <Text style={!user?.id ? styles.userNameLogout : styles.userName}>
                 {!user?.id ? t("settings.login_register") : displayName}
                 </Text>
-                {/* ✅ Country Flag */}
-                {user?.id && user?.flage && localState?.showFlag !== false && (
+                {/* Country flag: admins only (Code/Helper/countryFlag.js) */}
+                {user?.id && user?.flage && canSeeCountryFlags(isAdmin) && (
                   <Text style={{ fontSize: SIZE.body, marginLeft: SPACE.xs }}>
                     {user.flage}
                   </Text>
@@ -2684,25 +2681,8 @@ const formatPlanName = (plan) => {
           </View>
         )}
         
-        {/* Flag Visibility Toggle */}
-        {user?.id && (
-          <View style={styles.option}>
-            <View style={{ flexDirection: 'row', justifyContent: 'space-between', width: '100%' }}>
-              <TouchableOpacity 
-                style={{ flexDirection: 'row', alignItems: 'center' }}
-                onPress={() => handleToggleFlag(!localState.showFlag)}
-              >
-                <Icon name="flag-outline" size={18} color={'white'} style={{backgroundColor:'#FF6B6B', padding:5, borderRadius:5}} />
-                <Text style={styles.optionText}>{t('settings.country_flag')}</Text>
-              </TouchableOpacity>
-              <Switch
-                value={localState.showFlag ?? true}
-                onValueChange={handleToggleFlag}
-              />
-            </View>
-          </View>
-        )}
-        
+        {/* No "Country flag" switch: flags are an admin-only moderation aid
+            now (Code/Helper/countryFlag.js), so there is nothing to hide. */}
         {/* ✅ Show Online Status Toggle */}
         {user?.id && ( <View style={styles.option}>
           <View style={{ flexDirection: 'row', justifyContent: 'space-between', width: '100%' }}>
@@ -3092,14 +3072,20 @@ const formatPlanName = (plan) => {
         <Text style={styles.subtitle}>{t('settings.pro_subscription')}</Text>
         <View style={[styles.cardContainer, {backgroundColor:'#FFD700'}]}>
 
-          <TouchableOpacity style={[styles.optionLast]} onPress={() => { setShowofferWall(true);     
+          <TouchableOpacity style={[styles.option]} onPress={() => { setShowofferWall(true);     
  }}>
             <Icon name="prism-outline" size={18} color={'white'} style={{backgroundColor:config.colors.hasBlockGreen, padding:5, borderRadius:5}}/>
             <Text style={[styles.optionText, {color:'black'}]}>
-            {t('settings.active_plan')} : {localState.isPro ? t('settings.paid') : t('settings.free')}
+            {t('settings.active_plan')} : {promoOnly
+              ? t('promo.plan_label', { date: dayjs(localState.promoProUntil).format('D MMM YYYY') })
+              : localState.isPro ? t('settings.paid') : t('settings.free')}
             </Text>
           </TouchableOpacity>
-          {localState.isPro && (
+          <TouchableOpacity style={[styles.optionLast]} onPress={() => { setShowPromo(true); triggerHapticFeedback('impactLight'); }}>
+            <Icon name="gift-outline" size={18} color={'white'} style={{backgroundColor:'#B76E79', padding:5, borderRadius:5}}/>
+            <Text style={[styles.optionText, {color:'black'}]}>{t('promo.settings_row')}</Text>
+          </TouchableOpacity>
+          {localState.isPro && !promoOnly && (
             <View style={styles.subscriptionContainer}>
               <Text style={styles.subscriptionText}>
               {t('settings.active_plan')} - 
@@ -3164,6 +3150,14 @@ const formatPlanName = (plan) => {
             <Icon name="link-outline" size={18} color={'white'}  style={{backgroundColor:'green', padding:5, borderRadius:5}}/>
             <Text style={styles.optionText}>{t('settings.privacy_policy')}</Text>
           </TouchableOpacity>
+          {privacyOptionsRequired && (
+            <TouchableOpacity style={user?.id ? styles.option : styles.optionLast} onPress={() => {
+              showPrivacyOptionsForm(); triggerHapticFeedback('impactLight');
+            }}>
+              <Icon name="shield-checkmark-outline" size={18} color={'white'}  style={{backgroundColor:'green', padding:5, borderRadius:5}}/>
+              <Text style={styles.optionText}>{t('settings.privacy_options', { defaultValue: 'Privacy options' })}</Text>
+            </TouchableOpacity>
+          )}
           <TouchableOpacity style={user?.id ? styles.option : styles.optionLast} onPress={() => {
             handleOpenChild(); triggerHapticFeedback('impactLight');
           }}>
@@ -3273,6 +3267,11 @@ const formatPlanName = (plan) => {
 
      
       <SubscriptionScreen visible={showOfferWall} onClose={() => setShowofferWall(false)} track='Setting' oneWallOnly={single_offer_wall} showoffer={!single_offer_wall}/>
+      <PromoCodeModal
+        visible={showPromo}
+        onClose={() => setShowPromo(false)}
+        onNeedSignIn={() => { setShowPromo(false); setOpenSignin(true); }}
+      />
       <SignInDrawer
         visible={openSingnin}
         onClose={() => setOpenSignin(false)}

@@ -1,6 +1,20 @@
 apply plugin: "com.android.application"
 apply plugin: "org.jetbrains.kotlin.android"
 apply plugin: "com.facebook.react"
+// Moved above `android {}` on 2026-09-21: the Crashlytics plugin registers its
+// `firebaseCrashlytics {}` extension per build type AT APPLY TIME, so with
+// these at the bottom the extension does not exist while buildTypes is
+// evaluated and configuration fails with "Could not find method
+// firebaseCrashlytics()".
+apply plugin: 'com.google.gms.google-services'
+apply plugin: 'com.google.firebase.crashlytics'
+// Ship only the icon fonts the app imports (Ionicons, FontAwesome,
+// FontAwesome6 solid/regular). Without this list fonts.gradle copies all 19
+// into the APK. Using a new icon family means adding its .ttf here, or it
+// renders as blanks. (From mm2values 18d09fe.)
+project.ext.vectoricons = [
+    iconFontNames: [ "Ionicons.ttf", "FontAwesome.ttf", "FontAwesome6_Regular.ttf", "FontAwesome6_Solid.ttf" ]
+]
 apply from: file("../../node_modules/react-native-vector-icons/fonts.gradle")
 
 /**
@@ -83,8 +97,8 @@ android {
         applicationId "com.fischvaluescalc"
         minSdkVersion rootProject.ext.minSdkVersion
         targetSdkVersion rootProject.ext.targetSdkVersion
-        versionCode 7
-        versionName "1.1.1"
+        versionCode 8
+        versionName "1.1.2"
 
         ndk {
             // x86_64 is required, not optional: without it SoLoader on an
@@ -136,6 +150,23 @@ android {
             signingConfig signingConfigs.release
             minifyEnabled enableProguardInReleaseBuilds
             proguardFiles getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro"
+            // Upload native debug symbols so native crashes arrive symbolicated
+            // instead of as a wall of bare `at` frames. There was no
+            // firebaseCrashlytics block here, so every native crash this app
+            // has reported was undiagnosable.
+            //
+            // The task-name segment ("mergeReleaseNativeLibs") is NOT optional:
+            // AGP 8 moved intermediates from <type>/out/ to
+            // <type>/<taskName>/out/, and the old layout fails SILENTLY - the
+            // plugin uploads nothing and never errors.
+            //
+            // NOTE: uploadCrashlyticsSymbolFileRelease does NOT run as part of
+            // bundleRelease. Invoke it for every shipped build:
+            //   ./gradlew :app:bundleRelease :app:uploadCrashlyticsSymbolFileRelease
+            firebaseCrashlytics {
+                nativeSymbolUploadEnabled true
+                unstrippedNativeLibsDir "build/intermediates/merged_native_libs/release/mergeReleaseNativeLibs/out/lib"
+            }
         }
     }
 }
@@ -155,5 +186,3 @@ dependencies {
     }
 }
 
-apply plugin: 'com.google.gms.google-services'
-apply plugin: 'com.google.firebase.crashlytics'

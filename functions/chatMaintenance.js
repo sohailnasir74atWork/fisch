@@ -113,6 +113,11 @@ for (const path of CHAT_CHANNEL_PATHS) {
 // tokens stayed on user records forever and every future send to them failed.
 // Unregistered tokens are now cleared, and the app's own `isTokenInvalid`
 // flag is set so the client re-registers.
+//
+// 2026-09-23: also honours the per-chat mute bell in the inbox
+// (`chat_meta_data/{u}/{p}/muted`, Adopt Me parity) and the recipient's block
+// list (`bannedUsers/{u}/{p}`) — a blocked sender no longer reaches the lock
+// screen even though the app already hides their messages.
 exports.notifyNewMessage = functions
   .runWith({ memory: '128MB', timeoutSeconds: 30 })
   .database
@@ -127,10 +132,11 @@ exports.notifyNewMessage = functions
     // reset-to-zero write the reader performs when opening a chat.
     if (!afterUnread || afterUnread <= beforeUnread) return null;
 
-    const [activeChatSnap, chatMetaSnap, fcmTokenSnap] = await Promise.all([
+    const [activeChatSnap, chatMetaSnap, fcmTokenSnap, blockedSnap] = await Promise.all([
       db().ref(`/activeChats/${userId}`).once('value'),
       db().ref(`/chat_meta_data/${userId}/${chatPartnerId}`).once('value'),
       db().ref(`/users/${userId}/fcmToken`).once('value'),
+      db().ref(`/bannedUsers/${userId}/${chatPartnerId}`).once('value'),
     ]);
 
     if (!chatMetaSnap.exists()) return null;
@@ -140,6 +146,10 @@ exports.notifyNewMessage = functions
 
     // Guards against a half-written metadata row addressing the wrong person.
     if (receiverId !== chatPartnerId) return null;
+
+    // Muted from the inbox bell, or the recipient blocked this sender.
+    if (chatData.muted === true) return null;
+    if (blockedSnap.exists()) return null;
 
     // Silence ONLY the conversation the user is currently reading.
     if (chatId && activeChatSnap.val() === chatId) {

@@ -29,14 +29,12 @@ export const showUniqueMessage = (options) => {
   
   // Check if this exact message is currently visible
   if (currentlyVisibleMessage === messageKey) {
-    console.log('🚫 [MessageHelper] Duplicate message blocked (currently visible):', messageKey);
     return; // Skip if the same message is already visible
   }
   
   // Check if this message was shown recently
   const lastShown = messageHistory.get(messageKey);
   if (lastShown && (now - lastShown) < DEBOUNCE_TIME) {
-    console.log('🚫 [MessageHelper] Duplicate message blocked (recent):', messageKey, `(${now - lastShown}ms ago)`);
     return; // Skip if shown within debounce time
   }
   

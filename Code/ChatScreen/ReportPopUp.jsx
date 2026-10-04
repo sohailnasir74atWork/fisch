@@ -13,7 +13,6 @@ import { useGlobalState } from "../GlobelStats";
 import config from "../Helper/Environment";
 import { ref, get, update, remove } from "@react-native-firebase/database";
 import { useTranslation } from "react-i18next";
-import { banUserwithEmail } from "./utils";
 import { DEFAULT_CHANNEL } from './chatChannels';
 import { SIZE } from '../Design/tokens';
 import { SPACE } from '../Design/tokens';
@@ -26,7 +25,7 @@ const ReportPopup = ({ visible, message, onClose, channelPath = DEFAULT_CHANNEL.
   const [customReason, setCustomReason] = useState("");
   const [showCustomInput, setShowCustomInput] = useState(false);
   const [loading, setLoading] = useState(false);
-  const { theme, appdatabase } = useGlobalState();
+  const { theme, appdatabase, user } = useGlobalState();
   const isDarkMode = theme === "dark";
   const { t } = useTranslation();
 
@@ -77,20 +76,29 @@ const ReportPopup = ({ visible, message, onClose, channelPath = DEFAULT_CHANNEL.
         }
 
         const reportCount = Number(data?.reportCount || 0);
-  
-        if (reportCount >= 1) {
-          // ✅ Second report: delete the message
-          // ✅ Await banUserwithEmail to ensure it completes
-          if (message.currentUserEmail) {
-            banUserwithEmail(message.currentUserEmail).catch((error) => {
-              console.error("Error banning user:", error);
-            });
-          }
-          return remove(messageRef).then(() => ({ action: "deleted" }));
-        } else {
-          // ✅ First report: set to 1 (don't increment beyond this)
-          return update(messageRef, { reportCount: 1 }).then(() => ({ action: "reported" }));
+        const reporterId = user?.id || null;
+        const reportedBy = (data.reportedBy && typeof data.reportedBy === 'object') ? data.reportedBy : {};
+
+        // One person reporting twice used to count as two reports and delete
+        // the message. Reporters are now recorded; a report with no recorded
+        // reporter came from an older build and still counts as someone else.
+        if (reporterId && reportedBy[reporterId]) {
+          return { action: "already_reported" };
         }
+        const byOthers = Object.keys(reportedBy).some((id) => id !== reporterId)
+          || (reportCount >= 1 && Object.keys(reportedBy).length === 0);
+
+        if (reportCount >= 1 && byOthers) {
+          // Second report from a different user: delete the message. The
+          // automatic ban of its sender is gone (as in Adopt Me, 8299678):
+          // any two accounts could ban anyone, staff included, with it.
+          // Banning is a deliberate staff action only.
+          return remove(messageRef).then(() => ({ action: "deleted" }));
+        }
+        // First report: set to 1 (don't increment beyond this).
+        const patch = { reportCount: 1 };
+        if (reporterId) patch[`reportedBy/${reporterId}`] = true;
+        return update(messageRef, patch).then(() => ({ action: "reported" }));
       })
       .then((res) => {
         setLoading(false);
@@ -109,8 +117,11 @@ const ReportPopup = ({ visible, message, onClose, channelPath = DEFAULT_CHANNEL.
     return null;
   }
 
+  // onClose(false) on every dismiss: callers treat a truthy argument as
+  // "reported" and hide the message — Cancel and Back used to pass the press
+  // event, which is truthy, so cancelling hid the message too.
   return (
-    <Modal visible={visible} transparent animationType="fade" onRequestClose={onClose}>
+    <Modal visible={visible} transparent animationType="fade" onRequestClose={() => onClose(false)}>
       <ModalKeyboardView style={styles.overlay}>
         <View style={styles.popup}>
           <Text style={styles.title}>{t("report_popup.title")}</Text>
@@ -174,7 +185,7 @@ const ReportPopup = ({ visible, message, onClose, channelPath = DEFAULT_CHANNEL.
 
           {/* Action Buttons */}
           <View style={styles.actions}>
-            <TouchableOpacity style={styles.button} onPress={onClose}>
+            <TouchableOpacity style={styles.button} onPress={() => onClose(false)}>
               <Text style={styles.buttonText}>{t("home.cancel")}</Text>
             </TouchableOpacity>
             <TouchableOpacity

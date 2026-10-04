@@ -8,8 +8,8 @@
  *       ✅ AdMob is DONE on both platforms: the unit IDs and app IDs are this
  *         app's own (fisch_* on Android, ios_* on iOS, same publisher), and
  *         adUnitsConfigured is true for both in Code/config/game.js.
- *       • rev_cat_id / apiKey: the ANDROID RevenueCat key is now this app's
- *         own. The iOS key (appl_…) is still Blox Fruit's.
+ *       ✅ rev_cat_id / apiKey: both RevenueCat keys are this app's own
+ *         (goog_… on Android, appl_… on iOS, set 2026-09-24).
  *       • supportEmail is the Blox Fruit support address.
  *       ✅ gameInterstitialAndroid / gameInterstitialIOS, likewise — both now
  *         point at this app's own interstitial unit.
@@ -27,10 +27,10 @@ const isNoman = true; // Toggle this to switch configurations
 //waqas app id = ca-app-pub-3701208411582706~4267174419
 // noman pkgName= com.mm2tradesvalues
 //waqas pkgName = com.bloxfruitstock
-// Android is this app's OWN RevenueCat public SDK key (goog_ keys are meant to
-// ship in the client; the secret sk_ keys are not and must never live here).
-// iOS is STILL Blox Fruit's — see the release-blocker note above.
-const rev_cat_id = Platform.OS === 'ios' ? 'appl_pjMIQFzBcdWtHdGHYbxVLuWcMvA' : 'goog_UCbCmyZVAXxDXrLpaKvpgPVQTfr'
+// This app's OWN RevenueCat public SDK keys, one per store (goog_/appl_ keys
+// are meant to ship in the client; the secret sk_ keys are not and must never
+// live here).
+const rev_cat_id = Platform.OS === 'ios' ? 'appl_uMcDAaCtCejHCsGxznqXbbZaPmb' : 'goog_UCbCmyZVAXxDXrLpaKvpgPVQTfr'
 
 const config = {
   appName: GAME.displayName,
@@ -44,6 +44,9 @@ const config = {
   IOsRewarded: 'ca-app-pub-5740215782746766/7139704479',        // ios_reward
   IOsOpenApp: 'ca-app-pub-5740215782746766/1424343366',         // ios_open
   IOsNative: 'ca-app-pub-5740215782746766/9765867815',          // ios_native
+  // In-feed inline banner units (Code/Ads/FeedBannerAd.jsx); null = fall back to the anchored banner unit until the dedicated AdMob units are filled in.
+  andriodFeedBanner: 'ca-app-pub-5740215782746766/7105031560', // feed_inline_banner
+  IOsFeedBanner: 'ca-app-pub-5740215782746766/6737451623', // feed_inline_banner
   // No separate "game" interstitial units exist in this AdMob app, so the
   // IntAd A/B slot B points at the real interstitial unit (valid unit, no
   // no-fill). Create a 2nd interstitial unit per platform later for true A/B.

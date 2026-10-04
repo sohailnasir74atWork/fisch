@@ -34,7 +34,7 @@ const TradeRulesModal = ({ visible, onClose }) => {
         <View style={[styles.modalContainer, { backgroundColor: isDarkMode ? config.colors.surfaceDark : 'white' }]}>
           <View style={styles.modalHeader}>
             <Text style={[styles.modalTitle, { color: isDarkMode ? 'white' : 'black' }]}>
-              How Trading Works in Adopt Me
+              How Trading Works in Fisch
             </Text>
             <TouchableOpacity onPress={onClose}>
               <Icon name="close-circle" size={28} color={isDarkMode ? '#bbb' : '#333'} />
@@ -42,12 +42,14 @@ const TradeRulesModal = ({ visible, onClose }) => {
           </View>
           <ScrollView showsVerticalScrollIndicator={false}>
             <Text style={[styles.modalText, { color: isDarkMode ? '#ccc' : '#333' }]}>
-              1. <HighlightedText text="Basics:" /> Players trade pets, items, and vehicles using the in-game trading system.{"\n"}{"\n"}
-              2. <HighlightedText text="Trade Window:" /> Each player can offer up to 9 items per trade.{"\n"}{"\n"}
-              3. <HighlightedText text="Two-Step Confirmation:" /> Players must first select items, then confirm again to finalize the trade.{"\n"}{"\n"}
-              4. <HighlightedText text="Trade License:" /> Required for trading ultra-rare or legendary items (obtained by passing a short test).{"\n"}{"\n"}
-              5. <HighlightedText text="Safe Trading:" /> Warnings appear for unfair trades; players should review offers carefully.{"\n"}{"\n"}
-              6. <HighlightedText text="Report Feature:" /> Suspicious trades can be reported directly from the trade window.{"\n"}
+              {/* Facts from the official wiki's Trading page — see HANDOFF.md §4-5.
+                  This used to be Adopt Me's guide (pets, vehicles, trade license). */}
+              1. <HighlightedText text="What you can trade:" /> Fish, rod skins, bobbers, boats and gliders. Rods themselves, bait and mutations cannot be traded.{"\n"}{"\n"}
+              2. <HighlightedText text="Where:" /> Trade face to face with the in-game Trading Menu, or sell from a booth at the Trade Plaza.{"\n"}{"\n"}
+              3. <HighlightedText text="Shady Scrips (S$):" /> The Trade Plaza's currency. Community values for skins, bobbers and boats are quoted in S$.{"\n"}{"\n"}
+              4. <HighlightedText text="One scale per trade:" /> S$ and Proto are separate value lists, and fish are worth C$. Never compare a Proto number with an S$ number.{"\n"}{"\n"}
+              5. <HighlightedText text="Check first:" /> Put both sides in the calculator to see if a trade is a Win, Fair or Loss before you accept.{"\n"}{"\n"}
+              6. <HighlightedText text="Stay safe:" /> Only trade through the game's own trade window, never share your account, and report scammers in the app.{"\n"}
             </Text>
           </ScrollView>
           <TouchableOpacity

@@ -4,6 +4,7 @@ import Share from 'react-native-share';
 import DeviceInfo from 'react-native-device-info';
 import Purchases from 'react-native-purchases';
 import { GAME } from '../config/game';
+import AppOpenAdManager from '../Ads/openApp';
 
 export const getAppDownloadLink = () => {
     return Platform.OS === 'ios'
@@ -15,9 +16,10 @@ export const getAppDownloadLink = () => {
     try {
       const appLink = getAppDownloadLink();
       const shareOptions = {
-        message: `Explore the Adoptme value calculator, check values, and make smarter trades. Download now: ${appLink}`,
+        message: `Check Fisch values, see if your trade is a win, and trade smarter with ${GAME.displayName}. Download now: ${appLink}`,
         title: 'Share App',
       };
+      AppOpenAdManager.skipNextForeground(); // returning from the share sheet is not a fresh open
       await Share.open(shareOptions);
     } catch (error) {
       // console.error('Share error:', error);
@@ -144,14 +146,14 @@ export const openOtherApp = (app) => {
   };
 
   export const handleOpenPrivacy = () => {
-    const websiteUrl = 'https://adoptmevalues.app/privacy-policy/';
+    const websiteUrl = GAME.privacyPolicyUrl;
     Linking.openURL(websiteUrl).catch(() =>
       Alert.alert('Error', 'Unable to open the website. Please try again later.')
     );
   };
 
   export const handleOpenChild = () => {
-    const websiteUrl = 'https://adoptmevalues.app/child-safety-standards-policy/';
+    const websiteUrl = GAME.childSafetyUrl;
     Linking.openURL(websiteUrl).catch(() =>
       Alert.alert('Error', 'Unable to open the website. Please try again later.')
     );

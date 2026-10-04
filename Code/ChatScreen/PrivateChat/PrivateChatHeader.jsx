@@ -4,11 +4,10 @@ import Icon from 'react-native-vector-icons/Ionicons';
 import config from '../../Helper/Environment';
 import { useLocalState } from '../../LocalGlobelStats';
 import { useTranslation } from 'react-i18next';
-import { isUserOnline } from '../utils';
+import { useOnlineStatus, setPersonalBlock } from '../utils';
 import { showSuccessMessage } from '../../Helper/MessageHelper';
 import Clipboard from '@react-native-clipboard/clipboard';
 import { useHaptic } from '../../Helper/HepticFeedBack';
-import { mixpanel } from '../../AppHelper/MixPenel';
 import { useGlobalState } from '../../GlobelStats';
 import { ref, get, set, remove } from '@react-native-firebase/database';
 import FramedAvatar from '../GroupChat/FramedAvatar';
@@ -27,9 +26,11 @@ const ONLINE_COLOR = '#10B981';
 const OFFLINE_COLOR = '#9CA3AF';
 
 const PrivateChatHeader = React.memo(({ selectedUser, selectedTheme, bannedUsers, isDrawerVisible, setIsDrawerVisible }) => {
-  const { updateLocalState } = useLocalState();
+  const { localState, updateLocalState } = useLocalState();
   const { t } = useTranslation();
-  const [isOnline, setIsOnline] = useState(false); // ✅ Add state to store online status
+  // Live presence. This was a one-time read when the header mounted, so the
+  // dot stayed on whatever it was when the chat opened.
+  const isOnline = useOnlineStatus(selectedUser?.senderId || selectedUser?.id);
   const { triggerHapticFeedback } = useHaptic();
   const { user, appdatabase } = useGlobalState();
   
@@ -54,19 +55,16 @@ const PrivateChatHeader = React.memo(({ selectedUser, selectedTheme, bannedUsers
     triggerHapticFeedback('impactLight');
     Clipboard.setString(code);
     showSuccessMessage(t("value.copy"), "Copied to Clipboard");
-    mixpanel.track("Code UserName", { UserName: code });
   }, [triggerHapticFeedback, t]);
 
-  // ✅ Fetch user data from Firebase if roblox data is missing
+  // Fetch the profile record for roles, Pro and verification. This used to
+  // bail out whenever the caller already passed robloxUsername — which Trades
+  // and the Feed always do — so those headers never showed any role badge.
+  // getOrFetchFullProfile is cached, so fetching unconditionally is cheap;
+  // mergedUser still keeps the caller's name and avatar.
   useEffect(() => {
     const selectedUserId = selectedUser?.senderId || selectedUser?.id;
     if (!selectedUserId || !appdatabase) return;
-    
-    // Only fetch if robloxUsername is not already in selectedUser
-    if (selectedUser?.robloxUsername || selectedUser?.robloxUserId) {
-      setUserData(null); // Clear fetched data if already in selectedUser
-      return;
-    }
 
     let isMounted = true;
 
@@ -103,7 +101,7 @@ const PrivateChatHeader = React.memo(({ selectedUser, selectedTheme, bannedUsers
     return () => {
       isMounted = false;
     };
-  }, [selectedUser?.senderId, selectedUser?.id, selectedUser?.robloxUsername, selectedUser?.robloxUserId, appdatabase]);
+  }, [selectedUser?.senderId, selectedUser?.id, appdatabase]);
 
   // ✅ Merge selectedUser with fetched userData
   const mergedUser = useMemo(() => {
@@ -112,9 +110,9 @@ const PrivateChatHeader = React.memo(({ selectedUser, selectedTheme, bannedUsers
       ...selectedUser,
       robloxUsername: selectedUser?.robloxUsername || userData.robloxUsername,
       robloxUserId: selectedUser?.robloxUserId || userData.robloxUserId,
-      robloxUsernameVerified: selectedUser?.robloxUsernameVerified !== undefined 
-        ? selectedUser.robloxUsernameVerified 
-        : userData.robloxUsernameVerified,
+      // The live record wins: Trades and the Feed pass a snapshot that is
+      // `|| false` when absent, which used to hide a real verified tick.
+      robloxUsernameVerified: userData.robloxUsernameVerified || !!selectedUser?.robloxUsernameVerified,
       isPro: selectedUser?.isPro !== undefined ? selectedUser.isPro : userData.isPro,
       // Roles only ever come from the RTDB record.
       isAdmin: userData.isAdmin,
@@ -140,24 +138,15 @@ const PrivateChatHeader = React.memo(({ selectedUser, selectedTheme, bannedUsers
     [mergedUser?.sender]
   );
 
-  useEffect(() => {
-    const selectedUserId = mergedUser?.senderId || mergedUser?.id;
-    if (selectedUserId) {
-      isUserOnline(selectedUserId)
-        .then(setIsOnline)
-        .catch(() => setIsOnline(false));
-    } else {
-      setIsOnline(false);
-    }
-  }, [mergedUser?.senderId, mergedUser?.id]); // ✅ Use mergedUser
-
   // ✅ Check if user is banned with array validation
   const isBanned = useMemo(() => {
     const selectedUserId = mergedUser?.senderId || mergedUser?.id;
     if (!selectedUserId) return false;
+    // Device list first: the prop is [] on the Trades / Feed stacks.
+    const device = Array.isArray(localState?.bannedUsers) ? localState.bannedUsers : [];
     const banned = Array.isArray(bannedUsers) ? bannedUsers : [];
-    return banned.includes(selectedUserId);
-  }, [bannedUsers, mergedUser?.senderId, mergedUser?.id]);
+    return device.includes(selectedUserId) || banned.includes(selectedUserId);
+  }, [bannedUsers, localState?.bannedUsers, mergedUser?.senderId, mergedUser?.id]);
 
   // ✅ Memoize handleBanToggle
   const handleBanToggle = useCallback(async () => {
@@ -178,44 +167,28 @@ const PrivateChatHeader = React.memo(({ selectedUser, selectedTheme, bannedUsers
           style: 'destructive',
           onPress: async () => {
             try {
-              const currentBanned = Array.isArray(bannedUsers) ? bannedUsers : [];
-              let updatedBannedUsers;
-              
-              if (isBanned) {
-                // 🔹 Unban: Remove from bannedUsers
-                updatedBannedUsers = currentBanned.filter(id => id !== selectedUserId);
-                
-                // 🔹 Unban from Firebase (Remove Node)
-                if (user?.id && appdatabase) {
-                  await remove(ref(appdatabase, `bannedUsers/${user?.id}/${selectedUserId}`));
-                }
-
-              } else {
-                // 🔹 Ban: Add to bannedUsers
-                updatedBannedUsers = [...currentBanned, selectedUserId];
-                
-                // 🔹 Ban in Firebase (Add Node)
-                if (user?.id && appdatabase) {
-                  await set(ref(appdatabase, `bannedUsers/${user?.id}/${selectedUserId}`), {
-                    displayName: userName || 'Anonymous',
-                    avatar: avatarUri || GAME.defaultAvatar,
-                    timestamp: Date.now()
-                  });
-                }
-              }
-
-              // ✅ Update local storage & state
-              if (updateLocalState && typeof updateLocalState === 'function') {
-                await updateLocalState('bannedUsers', updatedBannedUsers);
-              }
+              // Merge into the DEVICE list: the bannedUsers prop is [] when
+              // this chat was opened from Trades / Feed, and building from it
+              // replaced the whole block list with this one user.
+              await setPersonalBlock({
+                db: appdatabase,
+                myId: user?.id,
+                targetId: selectedUserId,
+                block: !isBanned,
+                current: Array.isArray(localState?.bannedUsers) ? localState.bannedUsers : bannedUsers,
+                updateLocalState,
+                displayName: userName,
+                avatar: avatarUri,
+              });
             } catch (error) {
               console.error('❌ Error toggling ban status:', error);
+              Alert.alert(t('home.alert.error'), 'Could not update the block list. Please try again.');
             }
           },
         },
       ]
     );
-  }, [isBanned, bannedUsers, mergedUser?.senderId, mergedUser?.id, userName, t, updateLocalState]);
+  }, [isBanned, bannedUsers, localState?.bannedUsers, mergedUser?.senderId, mergedUser?.id, userName, avatarUri, user?.id, appdatabase, t, updateLocalState]);
 
   // ✅ Memoize drawer open handler
   const handleOpenDrawer = useCallback(() => {
@@ -305,7 +278,9 @@ const PrivateChatHeader = React.memo(({ selectedUser, selectedTheme, bannedUsers
               { color: isOnline ? ONLINE_COLOR : OFFLINE_COLOR },
             ]}
           >
-            {isOnline ? 'Online' : 'Offline'}
+            {isOnline
+              ? t('chat.online', { defaultValue: 'Online' })
+              : t('chat.offline', { defaultValue: 'Offline' })}
           </Text>
           {badgeTypes.map((type) => (
             <UserBadgePill

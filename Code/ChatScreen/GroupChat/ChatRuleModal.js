@@ -8,6 +8,7 @@ import {
   StyleSheet,
 } from 'react-native';
 import { rulesen } from '../utils';
+import { GAME } from '../../config/game';
 import config from '../../Helper/Environment';
 import { useTranslation } from 'react-i18next';
 import { SIZE } from '../../Design/tokens';
@@ -18,7 +19,7 @@ const ChatRulesModal = ({ visible, onClose, isDarkMode }) => {
   const { t } = useTranslation();
   
   // ✅ Safety check and memoize rules array
-  const translatedRules = t('chat_rules.rules', { returnObjects: true });
+  const translatedRules = t('chat_rules.rules', { returnObjects: true, privacyUrl: GAME.privacyPolicyUrl });
   const rules = useMemo(() => {
     return Array.isArray(translatedRules) ? translatedRules : (Array.isArray(rulesen) ? rulesen : []);
   }, [translatedRules]);

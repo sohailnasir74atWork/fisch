@@ -7,4 +7,7 @@
     -->
     <color name="bootsplash_background">#F4F9FB</color>
     <color name="app_window_background">#F4F9FB</color>
+    <!-- Push notification accent: tints the clownfish small icon. Keep in step
+         with the color in Code/Helper/valueAlerts.js. -->
+    <color name="notification_color">#E63A2E</color>
 </resources>

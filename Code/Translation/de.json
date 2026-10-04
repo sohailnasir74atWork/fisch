@@ -96,6 +96,7 @@
         "business_enquiries_desc": "For collaborations, partnerships, or other business-related queries, feel free to contact us at:",
         "child_safety_standards": "Child Safety Standards",
         "privacy_policy": "Privacy Policy",
+        "privacy_options": "Datenschutzoptionen",
         "report_abusive_content": "Report Abusive Content",
         "upload_photo": "Upload Photo",
         "search_items": "Search items...",
@@ -178,7 +179,7 @@
         "pro": "PRO",
         "mini_games": "Minispiele",
         "soon": "Bald",
-        "made_with_love": "Mit ❤️ gemacht für MM2-Händler",
+        "made_with_love": "Mit ❤️ gemacht für Fisch-Trader",
         "daily_stars": "Tägliche Sterne",
         "my_stuff_worth": "Mein Inventarwert",
         "cosmetics": "Kosmetik",
@@ -206,8 +207,8 @@
         "copy_success": "Code in die Zwischenablage kopiert!",
         "try_other_app": "Probiere unsere andere App",
         "download": "Herunterladen",
-        "selected_pets": "Ausgewählte Haustiere",
-        "owned_pets": "Eigene Haustiere",
+        "selected_pets": "Ausgewählte Items",
+        "owned_pets": "Meine Items",
         "wishlist": "Wunschzettel",
         "high": "▲ Hoch",
         "low": "▼ Niedrig",
@@ -341,7 +342,8 @@
         "error_google_unavailable_title": "Google-Anmeldung nicht verfügbar",
         "error_google_unavailable": "Google Play Services ist auf diesem Gerät nicht verfügbar. Melde dich stattdessen per E-Mail an — tippe unten auf „Mit E-Mail anmelden\".",
         "error_network_title": "Verbindungsproblem",
-        "error_network": "Der Anmeldeserver war nicht erreichbar. Prüfe deine Verbindung und versuche es erneut. Falls Google-Dienste in deinem Netzwerk eingeschränkt sind, nutze die E-Mail-Anmeldung oder eine andere Verbindung."
+        "error_network": "Der Anmeldeserver war nicht erreichbar. Prüfe deine Verbindung und versuche es erneut. Falls Google-Dienste in deinem Netzwerk eingeschränkt sind, nutze die E-Mail-Anmeldung oder eine andere Verbindung.",
+        "restoring": "Dein Konto wird geladen…"
     },
     "tabs": {
         "calculator": "Rechner",
@@ -355,6 +357,8 @@
         "feed": "Feed"
     },
     "chat": {
+        "today": "Heute",
+        "yesterday": "Gestern",
         "community_chat": "Community-Chat",
         "type_message": "Nachricht eingeben...",
         "sending": "Senden...",
@@ -399,7 +403,7 @@
         "continue": "Fortsetzen",
         "get_notified_text": "Lassen Sie sich benachrichtigen, erstellen Sie Angebote und bieten Sie auf Trades, chatten Sie mit Händlern und nehmen Sie an Gruppendiskussionen teil.",
         "welcome_to": "Willkommen bei Fisch Values",
-        "track_pets": "Verfolge Haustierwerte & optimiere Handel.",
+        "track_pets": "Verfolge Fischwerte & optimiere deine Trades.",
         "welcome_user": "Willkommen"
     },
     "offer": {
@@ -694,7 +698,7 @@
     "group_chat": {
         "group_not_found": "Group not found",
         "failed_load_group": "Failed to load group",
-        "limit_pets": "You can only send up to 18 pets in a message.",
+        "limit_pets": "You can only send up to 18 items in a message.",
         "not_member": "You are not a member of this group",
         "muted_in_group": "You are muted in this group",
         "missing_data": "Missing required data. Please try again.",
@@ -825,12 +829,12 @@
         "review_thanks": "Thanks for your review!",
         "rating_thanks": "Thanks for your rating!",
         "rating_error": "Error submitting rating. Try again!",
-        "max_pets_error": "You can only send up to 18 pets in a message.",
+        "max_pets_error": "You can only send up to 18 items in a message.",
         "anonymous": "Anonymous",
         "multiple_photos": "📷 {{count}} Photos",
         "single_photo": "📷 Photo",
-        "pets_count_plural": "🐾 {{count}} pets",
-        "pets_count_singular": "🐾 {{count}} pet",
+        "pets_count_plural": "🎣 {{count}} items",
+        "pets_count_singular": "🎣 {{count}} item",
         "send_failed": "Could not send your message. Please try again.",
         "rate_trader": "Rate this Trader",
         "write_review": "Write an optional review...",
@@ -848,8 +852,8 @@
         "message_placeholder": "[Message]",
         "images_attached_plural": "{{count}} images attached",
         "images_attached_singular": "{{count}} image attached",
-        "pets_selected_plural": "{{count}} pets selected",
-        "pets_selected_singular": "{{count}} pet selected",
+        "pets_selected_plural": "{{count}} items selected",
+        "pets_selected_singular": "{{count}} item selected",
         "quick_messages": "Quick Messages",
         "msg_copied": "Message Copied",
         "invalid_translate": "Invalid message to translate.",
@@ -928,7 +932,7 @@
             "Moderatoren behalten sich das Recht vor, Verstöße zu überwachen und Maßnahmen zu ergreifen, einschließlich Verwarnungen oder Sperren.",
             "Inhalte sollten für alle genehmigten Altersgruppen geeignet sein und den Altersanforderungen der App entsprechen.",
             "Teilen Sie keine Links zu schädlichen Websites, Malware oder bösartigen Inhalten.",
-            "Durch die Nutzung der Chat-Funktion stimmen Sie den Nutzungsbedingungen und der Datenschutzrichtlinie der App zu. ${GAME.privacyPolicyUrl}"
+            "Durch die Nutzung der Chat-Funktion stimmen Sie den Nutzungsbedingungen und der Datenschutzrichtlinie der App zu. {{privacyUrl}}"
         ]
     },
     "report_popup": {
@@ -1082,7 +1086,9 @@
             "error_title": "Fehler 😢",
             "error_msg": "Etwas ist schiefgelaufen.",
             "oops": "Ups! 😅",
-            "failed_hatch": "Öffnen fehlgeschlagen"
+            "failed_hatch": "Öffnen fehlgeschlagen",
+            "no_ad_title": "Gerade kein Video",
+            "no_ad_msg": "Im Moment ist keine Werbung verfügbar. Versuch es in einer Minute nochmal!"
         },
         "rewards": {
             "reward_type_frame": "🖼️ Profilrahmen",
@@ -1160,5 +1166,37 @@
         "signin_msg": "Du brauchst ein Konto, um Trades einzutragen.",
         "error": "Fehler",
         "error_msg": "Konnte nicht gespeichert werden. Versuch es erneut."
+    },
+    "promo": {
+        "settings_row": "Promo-Code einlösen",
+        "paywall_link": "Promo-Code",
+        "title": "Du hast einen Promo-Code?",
+        "subtitle": "Gib ihn unten ein und hol dir ein paar Tage Pro gratis.",
+        "placeholder": "CODE EINGEBEN",
+        "redeem": "Einlösen",
+        "sign_in_first": "Melde dich zuerst an. Dein Gratis-Pro hängt an deinem Konto und bleibt auch beim Handywechsel.",
+        "sign_in": "Anmelden",
+        "active_until": "Pro aktiv bis {{date}}",
+        "plan_label": "Pro (Code) bis {{date}}",
+        "success_title": "Pro freigeschaltet!",
+        "success_body_one": "Du hast {{count}} Tag Pro, bis {{date}}.",
+        "success_body_other": "Du hast {{count}} Tage Pro, bis {{date}}.",
+        "error_invalid": "Diesen Code gibt es nicht. Prüf die Schreibweise.",
+        "error_inactive": "Dieser Code ist nicht mehr aktiv.",
+        "error_expired": "Dieser Code ist abgelaufen.",
+        "error_already_redeemed": "Du hast diesen Code schon benutzt.",
+        "error_device_used": "Dieser Code wurde auf diesem Handy schon benutzt.",
+        "error_used_up": "Zu spät, der Code ist aufgebraucht.",
+        "error_too_many_attempts": "Zu viele Versuche. Warte eine Stunde und probier es dann nochmal.",
+        "error_sign_in": "Melde dich an, um einen Code zu nutzen.",
+        "error_network": "Server nicht erreichbar. Prüf dein Internet und versuch es nochmal."
+    },
+    "timers": {
+        "alert_on_title": "Alles klar!",
+        "alert_on": "Wir sagen dir Bescheid, sobald {{event}} startet.",
+        "alert_off_title": "Erinnerung aus",
+        "alert_off": "Keine Benachrichtigungen mehr für {{event}}.",
+        "alert_failed": "Erinnerung konnte nicht geändert werden. Prüf dein Internet und versuch es nochmal.",
+        "notify_me": "Benachrichtige mich, wenn {{event}} startet"
     }
 }

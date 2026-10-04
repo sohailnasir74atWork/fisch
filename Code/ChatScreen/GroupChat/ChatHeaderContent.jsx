@@ -33,7 +33,9 @@ const ChatHeaderContent = ({
   onlineUsersVisible,
   setOnlineUsersVisible,
 }) => {
-  const { theme, isAdmin } = useGlobalState();
+  const { theme, isAdmin, user } = useGlobalState();
+  // Moderators pin, so they can unpin too (Adopt Me allows both).
+  const canManagePins = isAdmin || !!user?.isModerator;
   const isDarkMode = theme === 'dark';
   const { t } = useTranslation();
   const [pinMessageOpen, setPinMessageOpen] = useState(false);
@@ -82,7 +84,7 @@ const ChatHeaderContent = ({
         flexDirection: 'row', justifyContent: 'space-between', padding: SPACE.lg, alignItems: 'center', borderBottomWidth: .3, borderBottomColor: 'lightgrey',
       }}>
         <Text style={{ fontSize: SIZE.caption, color: isDarkMode ? 'white' : 'black' }}>
-          🚫 No Spamming ❌ No Abuse 🛑 Be Civil & Polite 😊
+          {t('chat.rules_banner', { defaultValue: '🚫 No Spamming ❌ No Abuse 🛑 Be Civil & Polite 😊' })}
         </Text>
         <TouchableOpacity onPress={() => { setModalVisibleChatinfo(true); triggerHapticFeedback('impactLight'); }}>
           <Icon name="information-circle-outline" size={20} color={config.colors.primary} style={{ marginRight: SPACE.lg }} />
@@ -131,7 +133,7 @@ const ChatHeaderContent = ({
                 return (
                   <View key={msg.firebaseKey} style={styles.singlePinnedMessageModal}>
                     {renderMessageWithLinks(msg.text || '')}
-                    {isAdmin && (
+                    {canManagePins && (
                       <TouchableOpacity 
                         onPress={() => {
                           if (onUnpinMessage && typeof onUnpinMessage === 'function') {

@@ -13,6 +13,7 @@ import config from '../Helper/Environment';
 import { SIZE } from '../Design/tokens';
 import { SPACE } from '../Design/tokens';
 import { FONT } from '../Design/tokens';
+import { resolveItemImage } from '../Helper/valueSources';
 
 const NotifierDrawer = () => {
   // Full-screen Modal painting its own surface — without these the heading sat
@@ -55,30 +56,14 @@ const NotifierDrawer = () => {
     const itemName = itemNameOverride || item?.name || item?.Name || '';
     if (!itemName) return '';
     
-    // ✅ Generate image URL client-side based on item name
-    // This reduces Firebase storage costs (we only store name, not image URL)
-    const encoded = encodeURIComponent(itemName);
-    if (localState.isGG) {
-      return `${localState.imgurlGG?.replace(/"/g, '')}/items/${encoded}.webp`;
-    }
-    
-    // ✅ For non-GG mode, try to get image from item object if available
-    if (item?.image) {
-      return `${localState.imgurl?.replace(/"/g, '')}/${item.image.replace(/^\/+/, '')}`;
-    }
-    
-    // ✅ Fallback: try to find item in parsedValuesData to get image
-    if (itemName && parsedValuesData.length > 0) {
-      const foundItem = parsedValuesData.find(
-        (i) => (i?.name || i?.Name || '').toLowerCase() === itemName.toLowerCase()
-      );
-      if (foundItem?.image) {
-        return `${localState.imgurl?.replace(/"/g, '')}/${foundItem.image.replace(/^\/+/, '')}`;
-      }
-    }
-    
-    return '';
-  }, [localState.isGG, localState.imgurlGG, localState.imgurl, parsedValuesData]);
+    // Fisch CDN, via the shared resolver. This used to build Adopt Me image
+    // URLs (elvebredd.com / adoptmevalues.gg), so every image was broken.
+    if (item?.image) return resolveItemImage(item) || '';
+    const foundItem = parsedValuesData.find(
+      (i) => (i?.name || i?.Name || '').toLowerCase() === itemName.toLowerCase()
+    );
+    return resolveItemImage(foundItem) || '';
+  }, [parsedValuesData]);
 
   // const showMessage = (msg) => {
   //   if (Platform.OS === 'android') ToastAndroid.show(msg, ToastAndroid.SHORT);
@@ -331,7 +316,7 @@ const NotifierDrawer = () => {
         <View style={[styles.drawerContainer, { backgroundColor: isDarkMode ? config.colors.surfaceDark : '#fff', paddingTop: insets.top + SPACE.xl, paddingBottom: insets.bottom }]}>
           <Text style={[styles.sectionTitle, { fontFamily: FONT.bold, color: isDarkMode ? '#fff' : '#000' }]}>Select Items to Notify</Text>
 
-          <FlatList
+          <FlatList removeClippedSubviews={false}
             data={parsedValuesData}
             renderItem={renderItem}
             keyExtractor={(item, index) => item?.name || item?.Name || `item-${index}`}

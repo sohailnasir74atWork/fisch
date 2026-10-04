@@ -19,6 +19,20 @@ target 'FischValues' do
   # mm2values, where it is the configuration that actually builds.
   use_frameworks! :linkage => :static
   $RNFirebaseAsStaticFramework = true
+  # Pin the Firebase iOS SDK ahead of React Native Firebase's default (12.10.0).
+  #
+  # Firebase iOS 12.19.0 (#16498): "Fixed an issue on iOS 15+ where users were
+  # randomly logged out during prewarming while the device was locked." iOS
+  # prewarms the app process before the user taps the icon, often while locked;
+  # the keychain is unreadable then, Auth cannot restore the persisted session,
+  # and the user appears signed out for no reason.
+  #
+  # Measured in adoptme-jan7 (Crashlytics 98edaf64: 256 events / 100 users a
+  # week). Unmeasured here, but this app ships the same SDK, so same bug.
+  #
+  # Use 12.19.0 EXACTLY: 12.19.1/12.19.2 were never published to the CocoaPods
+  # trunk and CocoaPods misreports that as a deployment-target error.
+  $FirebaseSDKVersion = '12.19.0'
 
   config = use_native_modules!
 
@@ -41,6 +55,21 @@ target 'FischValues' do
         config.build_settings['CLANG_ALLOW_NON_MODULAR_INCLUDES_IN_FRAMEWORK_MODULES'] = 'YES'
         if config.build_settings['IPHONEOS_DEPLOYMENT_TARGET'].to_f < 15.1
           config.build_settings['IPHONEOS_DEPLOYMENT_TARGET'] = '15.1'
+        end
+        # RN 0.87 ships React-Core as a PREBUILT xcframework, so its headers
+        # exist only inside React.framework/Headers. react-native-purchases-ui
+        # (pod RNPaywalls) does `#import "UIView+React.h"` with quotes, which
+        # resolves only through a header search path — without this every iOS
+        # build dies with "'UIView+React.h' file not found". mm2values never
+        # hit it because RN 0.83 still compiled React-Core from source. Both
+        # slices are listed so device and simulator builds resolve it; the
+        # headers in each are identical.
+        if target.name == 'RNPaywalls'
+          config.build_settings['HEADER_SEARCH_PATHS'] = [
+            '$(inherited)',
+            '"${PODS_ROOT}/React-Core-prebuilt/React.xcframework/ios-arm64_x86_64-simulator/React.framework/Headers"',
+            '"${PODS_ROOT}/React-Core-prebuilt/React.xcframework/ios-arm64/React.framework/Headers"',
+          ].join(' ')
         end
       end
     end

@@ -32,7 +32,6 @@ const BUNNY_CDN_BASE     = 'https://pull-gag.b-cdn.net';
 
 // ✅ Move base64ToBytes outside component (pure function)
 const base64ToBytes = (base64) => {
-  const insets = useSafeAreaInsets();
   if (!base64 || typeof base64 !== 'string') {
     throw new Error('Invalid base64 input');
   }
@@ -89,6 +88,10 @@ const PrivateMessageInput = ({
 
   const { localState } = useLocalState();
   const { theme, user } = useGlobalState();
+  // Clears the Android nav bar under the quick-message sheet. This used to be
+  // called inside base64ToBytes, which left `insets` unbound here: every
+  // render of the input threw, so opening ANY private chat crashed the app.
+  const insets = useSafeAreaInsets();
   const isDark = theme === 'dark';
   const c = getThemeColors(isDark);
   const { t } = useTranslation();
@@ -294,16 +297,32 @@ const PrivateMessageInput = ({
       // Send single image URL if only one, or array if multiple
       const imageUrlToSend = imageUrls.length === 1 ? imageUrls[0] : (imageUrls.length > 1 ? imageUrls : null);
 
+      // Restore the user's content so a refused or failed send doesn't
+      // silently lose the text, images, or selected items they had typed.
+      const restoreDraft = () => {
+        setInput(textToSend);
+        setImageUris(imagesToSend);
+        if (setSelectedFruits && typeof setSelectedFruits === 'function') {
+          setSelectedFruits(fruitsToSend);
+        }
+      };
+
       // 🔺 onSend: text, imageUrl (single or array), fruits
-      await onSend(textToSend, imageUrlToSend, fruitsToSend);
+      // onSend returns false when it refused or failed the send (ban, chat
+      // switched off, network) — it has already told the user why, so just
+      // put the draft back. It used to swallow every failure and resolve, so
+      // this restore never ran and the typed text was lost.
+      const sent = await onSend(textToSend, imageUrlToSend, fruitsToSend);
+      if (sent === false) {
+        restoreDraft();
+        return;
+      }
 
       if (onCancelReply && typeof onCancelReply === 'function') {
         onCancelReply();
       }
     } catch (error) {
       console.error('Error sending message:', error);
-      // Restore the user's content so a failed send/upload doesn't silently
-      // lose the text, images, or selected pets they had typed.
       setInput(textToSend);
       setImageUris(imagesToSend);
       if (setSelectedFruits && typeof setSelectedFruits === 'function') {
@@ -326,7 +345,11 @@ const PrivateMessageInput = ({
     [input, imageUris, hasFruits]
   );
 
-  // ✅ Quick message templates for Adopt Me trading (matching blox style)
+  // Quick message templates for Fisch trading. These were Adopt Me copy
+  // ("What pets do you have?", "Meet me at the trading hub"). Fisch trades
+  // happen at the Trade Plaza, what changes hands is fish, rod skins, bobbers,
+  // boats and lanterns (rods themselves are not tradeable), and trade values
+  // are quoted in S$ — C$ is cash and must not be mixed into an offer.
   const messageTemplates = useMemo(() => [
     "Interested in your trade!",
     "Can we negotiate?",
@@ -335,19 +358,19 @@ const PrivateMessageInput = ({
     "Let me check my inventory",
     "Deal accepted!",
     "Can you add more?",
-    "Meet me at the trading hub",
-    "What pets do you have?",
+    "Meet me at the Trade Plaza",
+    "What rod skins do you have?",
     "Is this still available?",
-    "I'll add more pets",
+    "I can add a bobber or lantern",
+    "What's the S$ value on your side?",
+    "Any rare fish to trade?",
     "Fair trade, let's do it!",
     "Can you change something?",
     "I'm interested, let's discuss",
     "Thanks for the trade!",
     "Are you online?",
     "When can you trade?",
-    "I have what you need",
     "Let's make a deal!",
-    "Can we do this trade?",
   ], []);
 
   // Handle template selection
@@ -395,7 +418,8 @@ const PrivateMessageInput = ({
           />
         </TouchableOpacity>
 
-        {/* Pets drawer icon */}
+        {/* Item picker (fish, skins, bobbers…). Was a cat icon left over
+            from the Adopt Me pets picker. */}
         <TouchableOpacity
           style={[styles.sendButton, { marginRight: 3, paddingHorizontal: 3 }]}
           onPress={() => {
@@ -406,7 +430,7 @@ const PrivateMessageInput = ({
           disabled={isSending || isBanned}
         >
           <Icon
-            name="logo-octocat"
+            name="cube-outline"
             size={20}
             color={isDark ? config.colors.textDark : config.colors.textLight}
           />

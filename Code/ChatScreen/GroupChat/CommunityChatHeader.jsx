@@ -22,7 +22,9 @@ const CommunityChatHeader = ({
   onOnlineUsersPress,
 
 }) => {
-  const { user, firestoreDB, theme } = useGlobalState();
+  const { user, firestoreDB, theme, isAdmin, canGrantJmd } = useGlobalState();
+  // Same gate Home uses for its Moderation tile.
+  const canOpenModeration = isAdmin || !!user?.isModerator || !!user?.isBabyMod || !!canGrantJmd;
   const navigation = useNavigation();
   const { t } = useTranslation();
   // ✅ MM2: Removed gameModalVisible, hasValidInvite - MM2 doesn't use gaming features
@@ -114,7 +116,9 @@ const CommunityChatHeader = ({
             onPress={() => {
               navigation.navigate('Inbox');
               triggerHapticFeedback('impactLight');
-              setunreadcount(0);
+              // No local zeroing: the chats are still unread until opened. The
+              // inbox listener owns this count; clearing it here made the badge
+              // vanish and then reappear on the next chat_meta_data event.
             }}
             style={{ position: 'relative', padding: SPACE.md, marginRight: SPACE.xs }}
           >
@@ -137,9 +141,7 @@ const CommunityChatHeader = ({
             onPress={() => {
               navigation.navigate('Groups');
               triggerHapticFeedback('impactLight');
-              if (setGroupUnreadCount && typeof setGroupUnreadCount === 'function') {
-                setGroupUnreadCount(0);
-              }
+              // Not zeroed here either — see the Inbox button.
             }}
             style={{ position: 'relative', padding: SPACE.md, marginRight: SPACE.xs }}
           >
@@ -159,6 +161,32 @@ const CommunityChatHeader = ({
           </TouchableOpacity>
         </>
       )}
+      {/* Online users. The sheet was already mounted by ChatHeaderContent and
+          wired through ChatNavigator, but no button ever opened it. */}
+      <TouchableOpacity
+        onPress={() => {
+          triggerHapticFeedback('impactLight');
+          if (onOnlineUsersPress) onOnlineUsersPress();
+        }}
+        style={{ padding: SPACE.md, marginRight: SPACE.xs }}
+        accessibilityLabel={t('chat.online_users', { defaultValue: 'Online users' })}
+      >
+        <Icon name="globe-outline" size={24} color={config.colors.primary} />
+      </TouchableOpacity>
+
+      {user?.id && canOpenModeration && (
+        <TouchableOpacity
+          onPress={() => {
+            triggerHapticFeedback('impactLight');
+            navigation.navigate('Admin');
+          }}
+          style={{ padding: SPACE.md, marginRight: SPACE.xs }}
+          accessibilityLabel="Moderation"
+        >
+          <Icon name="shield-checkmark-outline" size={24} color={config.colors.primary} />
+        </TouchableOpacity>
+      )}
+
       {user?.id && (
         <>
 

@@ -1,4 +1,4 @@
-import React, { useState, useMemo, useCallback } from 'react';
+import React, { useState, useMemo, useCallback, useEffect, useRef } from 'react';
 import { View, TextInput, TouchableOpacity, Text, Modal, StyleSheet, Image, ScrollView } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { getStyles } from './../Style';
@@ -51,8 +51,7 @@ const Emojies = [
 ];
 
 const MessageInput = ({
-  input,
-  setInput,
+  draftResetKey,
   handleSendMessage,
   selectedTheme,
   replyTo,
@@ -69,11 +68,28 @@ const MessageInput = ({
   
   const [isSending, setIsSending] = useState(false);
   const [messageCount, setMessageCount] = useState(0);
+  // The draft lives here, not in Trader. Lifted up, every keystroke
+  // re-rendered the whole room and, through fresh callback props, every
+  // message row. Trader only needs the trimmed text, which handleSend passes.
+  const [input, setInput] = useState('');
+
+  // Switching language rooms drops the half-typed draft (Trader used to do
+  // this from its own copy). Skip the first run so mounting clears nothing.
+  const lastDraftKeyRef = useRef(draftResetKey);
+  useEffect(() => {
+    if (lastDraftKeyRef.current === draftResetKey) return;
+    lastDraftKeyRef.current = draftResetKey;
+    setInput('');
+  }, [draftResetKey]);
 
   const { triggerHapticFeedback } = useHaptic();
   const { t } = useTranslation();
   const { localState } = useLocalState();
-  const { theme } = useGlobalState();
+  const { theme, isAdmin, user } = useGlobalState();
+  // Admins and full moderators (not Junior Mods) bypass the word filter, and
+  // Pro users may post links — the send path in Trader.jsx allows both, but
+  // this pre-check used to refuse them first, so neither ever worked.
+  const canBypassModeration = !!isAdmin || (!!user?.isModerator && !user?.isBabyMod);
   const isDark = theme === 'dark';
   const insets = useSafeAreaInsets();
   const [showEmojiPopup, setShowEmojiPopup] = useState(false);
@@ -99,7 +115,10 @@ const MessageInput = ({
 
     // ✅ Comprehensive content moderation check
     if (trimmedInput) {
-      const validation = validateContent(trimmedInput);
+      const validation = validateContent(trimmedInput, {
+        skipAll: canBypassModeration,
+        skipLinkCheck: canBypassModeration || !!localState?.isPro,
+      });
       if (!validation.isValid) {
         showMessage({
           message: validation.reason || "Inappropriate content detected.",
@@ -117,7 +136,13 @@ const MessageInput = ({
     };
 
     try {
-      await handleSendMessage(replyTo, trimmedInput, fruits, emojiToSend);
+      const sent = await handleSendMessage(replyTo, trimmedInput, fruits, emojiToSend);
+      // Refused (muted, banned, cooldown, duplicate, too long...): keep what
+      // the user typed so they can fix it instead of retyping.
+      if (sent === false) {
+        setIsSending(false);
+        return;
+      }
 
       // Clear input + reply UI
       setInput('');
@@ -142,7 +167,7 @@ const MessageInput = ({
       console.error('Error sending message:', error);
       setIsSending(false);
     }
-  }, [input, hasFruits, selectedEmoji, replyTo, handleSendMessage, onCancelReply, setInput, setSelectedFruits, setSelectedEmoji, localState?.isPro, messageCount, triggerHapticFeedback]);
+  }, [input, hasFruits, selectedEmoji, replyTo, handleSendMessage, onCancelReply, setSelectedFruits, setSelectedEmoji, localState?.isPro, messageCount, triggerHapticFeedback, canBypassModeration, isSending, selectedFruits]);
 
   // ✅ Memoize selectEmoji
   const selectEmoji = useCallback((emojiUrl) => {
@@ -161,8 +186,10 @@ const MessageInput = ({
         {/* Reply context UI */}
         {replyTo && (
           <View style={styles.replyContainer}>
-            <Text style={styles.replyText}>
-              {t('chat.replying_to')}: {replyTo.text}
+            <Text style={styles.replyText} numberOfLines={2}>
+              {t('chat.replying_to')}: {replyTo.text
+                || (replyTo.gif ? '[Emoji]'
+                  : (Array.isArray(replyTo.fruits) && replyTo.fruits.length > 0 ? `[${replyTo.fruits.length} item(s)]` : ''))}
             </Text>
             <TouchableOpacity
               onPress={onCancelReply}
@@ -180,7 +207,7 @@ const MessageInput = ({
           disabled={isSending}
         >
           <Icon
-            name="logo-octocat"
+            name="fish-outline"
             size={20}
             color={isDark ? config.colors.textDark : config.colors.textLight}
           />
@@ -199,6 +226,9 @@ const MessageInput = ({
           value={input}
           onChangeText={setInput}
           multiline
+          // The send path refuses anything longer; stop it at the keyboard
+          // rather than after the user has typed it all.
+          maxLength={250}
         />
 
 <TouchableOpacity onPress={() => setShowEmojiPopup(true)} style={styles.gifButton}>
@@ -232,7 +262,7 @@ const MessageInput = ({
           }}
         >
           <Text style={{ color: isDark ? config.colors.textSecondaryDark : config.colors.textSecondaryLight, fontSize: SIZE.caption }}>
-            {selectedFruits.length} pet(s) selected
+            {selectedFruits.length} item(s) selected
           </Text>
 
           <TouchableOpacity
@@ -247,13 +277,13 @@ const MessageInput = ({
           </TouchableOpacity>
         </View>
       )}
-      <Modal visible={showEmojiPopup} transparent animationType="slide">
+      <Modal visible={showEmojiPopup} transparent animationType="slide" onRequestClose={() => setShowEmojiPopup(false)}>
         <TouchableOpacity 
           style={[modalStyles.backdrop, { backgroundColor: isDark ? 'rgba(0,0,0,0.6)' : 'rgba(0,0,0,0.35)' }]} 
           onPress={() => setShowEmojiPopup(false)}
           activeOpacity={1}
         >
-          <View style={[modalStyles.sheet, { backgroundColor: isDark ? config.colors.surfaceDark : config.colors.surfaceLight, paddingBottom: insets.bottom }]} onStartShouldSetResponder={() => true}>
+          <View style={[modalStyles.sheet, { backgroundColor: isDark ? config.colors.surfaceDark : config.colors.surfaceLight, paddingBottom: SPACE.xxxl + insets.bottom }]} onStartShouldSetResponder={() => true}>
             <ScrollView 
               style={[modalStyles.emojiScrollContainer, { backgroundColor: isDark ? config.colors.surfaceDark : config.colors.surfaceLight }]}
               showsVerticalScrollIndicator={false}

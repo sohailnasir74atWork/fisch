@@ -328,9 +328,11 @@ const AdminDashboard = () => {
     return false;
   };
 
+  // `role` lets utils.canSanctionTarget allow admins (only) to sanction staff.
   const bannerInfo = useMemo(() => ({
     id: user?.id, displayName: user?.displayName || 'Admin', avatar: user?.avatar,
-  }), [user]);
+    role: isAdmin ? 'admin' : (isModerator ? 'moderator' : (isBabyMod ? 'baby_mod' : null)),
+  }), [user, isAdmin, isModerator, isBabyMod]);
 
   const doStrike = useCallback(async (n) => {
     if (!requireBanPower() || !merged?.email) return;
@@ -624,7 +626,7 @@ const AdminDashboard = () => {
           <Text style={s.sectionLabel}>
             {searching ? `Search results · ${filteredBans.length}` : `Active bans · ${filteredBans.length}`}
           </Text>
-          <FlatList
+          <FlatList removeClippedSubviews={false}
             data={filteredBans}
             keyExtractor={(i) => i.encodedEmail}
             contentContainerStyle={s.list}
@@ -660,7 +662,7 @@ const AdminDashboard = () => {
             </TouchableOpacity>
           </View>
           {usersLoading ? <ActivityIndicator style={{ marginTop: 30 }} color={c.primary} /> : (
-            <FlatList
+            <FlatList removeClippedSubviews={false}
               data={users}
               keyExtractor={(i) => i.id}
               contentContainerStyle={s.list}
@@ -852,7 +854,7 @@ const AdminDashboard = () => {
               <Icon name="add" size={20} color="#fff" />
             </TouchableOpacity>
           </View>
-          <FlatList
+          <FlatList removeClippedSubviews={false}
             data={granters}
             keyExtractor={(i) => i.id}
             contentContainerStyle={s.list}

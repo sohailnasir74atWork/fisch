@@ -13,7 +13,8 @@
 // Every discount here is arithmetic on LIVE store prices — never hardcoded — so
 // it stays true in every currency and survives a price change. The store
 // currently serves monthly / 3-month / yearly; the maths is written against
-// packageType, so adding or dropping a plan needs no edit here.
+// planTypeOf() (the product's billing period), so adding or dropping a plan
+// needs no edit here.
 //
 // The surface FOLLOWS THE APP THEME. adoptme pins one dark look on the argument
 // that a paywall is a storefront, not a settings page — but this app ships a
@@ -40,8 +41,10 @@ import { useTranslation } from 'react-i18next';
 import { useLocalState } from '../LocalGlobelStats';
 import { useGlobalState } from '../GlobelStats';
 import { useHaptic } from '../Helper/HepticFeedBack';
-import { mixpanel } from '../AppHelper/MixPenel';
-import { GAME } from '../config/game';
+import { GAME, termsUrlFor } from '../config/game';
+import { IOS_LIMITED } from '../config/iosLimited';
+import PromoCodeModal from './PromoCodeModal';
+import SignInDrawer from '../Firebase/SigninDrawer';
 import SystemNavigationBar from 'react-native-system-navigation-bar';
 
 const { width, height } = Dimensions.get('window');
@@ -55,8 +58,11 @@ const SMALL = height < 700;
 // belongs to dark mode. Both are transparent PNGs; assets/logo.png is Blox
 // Fruits' BFVC mark (fork residue) and assets/logo.webp is this app's mark but
 // baked onto an opaque tile — neither belongs on this screen.
-const LOGO_ON_DARK = require('../../assets/brand/bootsplash-logo-dark.png');
-const LOGO_ON_LIGHT = require('../../assets/brand/bootsplash-logo.png');
+// 512 px copies of assets/brand/bootsplash-logo*.png (1254 px, 1.4 MB for the
+// pair, kept as the splash generator's source). Shown at most 116 pt, so 512 px
+// is sharp on any screen and the pair costs 291 KB. (2026-10-04)
+const LOGO_ON_DARK = require('../../assets/brand/app-logo-dark.png');
+const LOGO_ON_LIGHT = require('../../assets/brand/app-logo.png');
 
 // GOLD_TEXT exists because gold-as-a-surface and gold-as-text need different
 // values: #F5B13D on near-black is bright and legible, but the same gold as
@@ -97,7 +103,11 @@ const makePalette = (isDark) => (isDark
 
     TILE_BG: 'rgba(255,255,255,0.05)',
     TILE_LINE: 'rgba(255,255,255,0.13)',
-    TILE_ON_BG: 'rgba(245,177,61,0.13)',
+    // Must be OPAQUE: the selected tile has an Android elevation shadow in
+    // gold, and a translucent fill lets it show through everywhere except
+    // behind the text — a dark box around the plan, price and per-month
+    // lines. Dark amber in gold's hue (~39°); gold text on it is ~7:1.
+    TILE_ON_BG: '#3D2E12',
     SAVINGS_BG: 'rgba(245,177,61,0.14)',
     SAVINGS_LINE: 'rgba(245,177,61,0.30)',
 
@@ -155,17 +165,42 @@ const CLOSE_TIMER_SECONDS = 2;
 
 // ── What Pro actually unlocks ──
 // Every line is a real gate in this codebase, not a marketing claim:
-//   noads   → bannerAds.js / openApp.js / NativeAdManager skip Pro accounts,
+//   noads   → bannerAds.js / openApp.js / FeedBannerAd skip Pro accounts,
 //             and Trades.jsx stops injecting an ad row every 8 trades
 //   feature → Trades.jsx handleMakeFeatureTrade is Pro-only; free users get
 //             the "feature_pro_only" alert
 //   badge   → assets/pro.png renders beside the name in trades and chat
 const PRO_BADGE = require('../../assets/pro.png');
-const benefitsFor = (P) => [
+// The iOS limited build sells Remove Ads only: it has no trade feed and no
+// sign-in, so "feature your trades" and the Pro badge would be promises the
+// app cannot keep — a guideline 2.3.1 rejection, not just odd copy. Every row
+// here must stay TRUE of that build: every tool is already free on iOS, so
+// the copy says "ad-free", never "unlock". Each ad type named is one the Pro
+// check really suppresses on iOS: bannerAds and openApp (the only full-screen
+// ad there — ShareTradeModal skips its interstitial on iOS).
+const benefitsFor = (P) => (IOS_LIMITED ? [
+  { key: 'ios_features', icon: 'apps', tint: P.ACCENT_B },
+  { key: 'ios_banners', icon: 'close-circle', tint: P.ACCENT_A },
+  { key: 'ios_popups', icon: 'eye-off', tint: P.ACCENT_A },
+  { key: 'ios_support', icon: 'heart', tint: P.GOLD },
+] : [
   { key: 'noads', icon: 'close-circle', tint: P.ACCENT_A },
   { key: 'feature', icon: 'arrow-up-circle', tint: P.ACCENT_B },
   { key: 'badge', image: PRO_BADGE, tint: P.GOLD },
-];
+]);
+
+// A plan's REAL length comes from the store product's billing period, not from
+// the RevenueCat package slot it was filed under. The 3-month product sits in
+// the LIFETIME slot on both stores, so trusting packageType labelled a
+// renewing subscription "Forever" and promised "Yours forever" — a refund and
+// App Review risk. The slot is only the fallback, for one-time purchases
+// (no period) and Amazon (never reports one).
+const PERIOD_TYPE = {
+  P1W: 'WEEKLY', P7D: 'WEEKLY', P1M: 'MONTHLY', P2M: 'TWO_MONTH',
+  P3M: 'THREE_MONTH', P6M: 'SIX_MONTH', P1Y: 'ANNUAL', P12M: 'ANNUAL',
+};
+const planTypeOf = (pkg) =>
+  PERIOD_TYPE[pkg?.product?.subscriptionPeriod] || pkg?.packageType;
 
 // Longest plan first — the best deal should sit under the thumb, on the left,
 // where the eye lands first.
@@ -264,6 +299,8 @@ const SubscriptionScreen = ({ visible, onClose, track, showoffer, oneWallOnly, i
   const { packages, purchaseProduct, restorePurchases, localState } = useLocalState();
   const { theme } = useGlobalState();
   const { triggerHapticFeedback } = useHaptic();
+  const [showPromo, setShowPromo] = useState(false);
+  const [showSignIn, setShowSignIn] = useState(false);
   const { t } = useTranslation();
 
   // Same signal every other screen uses (Setting.jsx, OnBoardingScreen): the
@@ -299,10 +336,10 @@ const SubscriptionScreen = ({ visible, onClose, track, showoffer, oneWallOnly, i
   // savings percentage and the amount saved.
   const plans = useMemo(() => {
     const list = (packages || []).slice().sort(
-      (a, b) => (PLAN_ORDER[a.packageType] ?? 9) - (PLAN_ORDER[b.packageType] ?? 9)
+      (a, b) => (PLAN_ORDER[planTypeOf(a)] ?? 9) - (PLAN_ORDER[planTypeOf(b)] ?? 9)
     );
     const monthlyRate = (p) => {
-      const months = MONTHS_IN_PERIOD[p.packageType];
+      const months = MONTHS_IN_PERIOD[planTypeOf(p)];
       const price = p.product?.price;
       return months && price > 0 ? price / months : null;
     };
@@ -310,7 +347,7 @@ const SubscriptionScreen = ({ visible, onClose, track, showoffer, oneWallOnly, i
     const anchorRate = rates.length ? Math.max(...rates) : null;
 
     return list.map(pkg => {
-      const months = MONTHS_IN_PERIOD[pkg.packageType];
+      const months = MONTHS_IN_PERIOD[planTypeOf(pkg)];
       const price = pkg.product?.price;
       const rate = monthlyRate(pkg);
       const anchorTotal = (anchorRate && months) ? anchorRate * months : null;
@@ -441,34 +478,17 @@ const SubscriptionScreen = ({ visible, onClose, track, showoffer, oneWallOnly, i
     }
   }, [visible]);
 
-  useEffect(() => {
-    if (visible && !disabled) mixpanel.track('custom_paywall_presented', { source: track || 'unknown' });
-  }, [visible, track, disabled]);
-
   const handleSelect = useCallback((pkg) => {
     triggerHapticFeedback('impactLight');
     setSelectedPkg(pkg);
-    mixpanel.track('custom_paywall_plan_select', {
-      source: track || 'unknown',
-      package: pkg.identifier,
-    });
   }, [triggerHapticFeedback, track]);
 
   const handlePurchase = useCallback(async () => {
     if (!selectedPkg || loading) return;
     triggerHapticFeedback('impactMedium');
-    mixpanel.track('custom_paywall_purchase_tap', {
-      source: track || 'unknown',
-      package: selectedPkg.identifier,
-      price: selectedPkg.product?.price,
-    });
     await purchaseProduct(selectedPkg, setLoading, track);
     setTimeout(() => {
       if (localState?.isPro) {
-        mixpanel.track('custom_paywall_purchase_success', {
-          source: track || 'unknown',
-          package: selectedPkg.identifier,
-        });
         onClose?.();
       }
     }, 500);
@@ -486,15 +506,19 @@ const SubscriptionScreen = ({ visible, onClose, track, showoffer, oneWallOnly, i
   // The selected tile already shows it in gold, and the line under the button
   // states exactly what gets charged — a third copy on the button itself only
   // gives the eye one more number to stop and re-check before tapping.
-  const ctaLabel = trial ? t('paywall.cta_trial') : t('paywall.cta');
+  // iOS limited build: a plain "Continue" (owner's call, 2026-09-24).
+  const ctaLabel = IOS_LIMITED
+    ? t('paywall.cta_continue')
+    : trial ? t('paywall.cta_trial') : t('paywall.cta');
 
   // ── And the line under it says exactly what is charged, and when. ──
   const ctaSubtitle = (() => {
     if (!selectedPkg) return null;
     const price = trimZeroDecimals(selectedPkg.product?.priceString);
     if (!price) return null;
-    if (selectedPkg.packageType === 'LIFETIME') return t('paywall.cta_sub_lifetime', { price });
-    const billedKey = BILLED_KEY[selectedPkg.packageType];
+    const type = planTypeOf(selectedPkg);
+    if (type === 'LIFETIME') return t('paywall.cta_sub_lifetime', { price });
+    const billedKey = BILLED_KEY[type];
     const billed = billedKey ? t(`paywall.${billedKey}`) : '';
     if (trial) return t('paywall.cta_sub_trial', { trial, price, billed });
     return t('paywall.cta_sub', { price, billed });
@@ -503,8 +527,9 @@ const SubscriptionScreen = ({ visible, onClose, track, showoffer, oneWallOnly, i
   // Both are null until the site exists (Code/config/game.js). Linking.openURL
   // on a null throws, and a dead "Terms" link is worse than no link — so each
   // renders only when there is somewhere to go.
+  const termsUrl = termsUrlFor(Platform.OS);
   const legalLinks = [
-    GAME.termsUrl ? { key: 'terms', url: GAME.termsUrl } : null,
+    termsUrl ? { key: 'terms', url: termsUrl } : null,
     GAME.privacyPolicyUrl ? { key: 'privacy', url: GAME.privacyPolicyUrl } : null,
   ].filter(Boolean);
 
@@ -512,7 +537,7 @@ const SubscriptionScreen = ({ visible, onClose, track, showoffer, oneWallOnly, i
 
   const content = (
     <View style={s.container}>
-      <StatusBar barStyle={P.STATUS_STYLE} backgroundColor={P.BG} translucent={false} />
+      <StatusBar barStyle={P.STATUS_STYLE} />
       <Backdrop P={P} />
 
       {/* ══ TOP: what you get ══ */}
@@ -538,8 +563,8 @@ const SubscriptionScreen = ({ visible, onClose, track, showoffer, oneWallOnly, i
               />
             </View>
 
-            <Text style={s.title}>{t('paywall.title')}</Text>
-            <Text style={s.subtitle}>{t('paywall.subtitle')}</Text>
+            <Text style={s.title}>{t(IOS_LIMITED ? 'paywall.ios_title' : 'paywall.title')}</Text>
+            <Text style={s.subtitle}>{t(IOS_LIMITED ? 'paywall.ios_subtitle' : 'paywall.subtitle')}</Text>
           </View>
 
           {/* ── One glass card, three promises, no scrolling to find them ── */}
@@ -558,6 +583,8 @@ const SubscriptionScreen = ({ visible, onClose, track, showoffer, oneWallOnly, i
               </View>
             ))}
 
+            {/* Translate and trade ad rows do not exist on the iOS limited build. */}
+            {!IOS_LIMITED && (
             <View style={s.extrasRow}>
               <Icon name="add-circle" size={13} color={P.TEXT_MUTE} />
               <Text style={s.extras} numberOfLines={2}>
@@ -567,6 +594,7 @@ const SubscriptionScreen = ({ visible, onClose, track, showoffer, oneWallOnly, i
                 ].join(' · ')}
               </Text>
             </View>
+            )}
           </View>
         </Animated.View>
       </ScrollView>
@@ -597,11 +625,13 @@ const SubscriptionScreen = ({ visible, onClose, track, showoffer, oneWallOnly, i
             <View style={s.tiles}>
               {plans.map(({ pkg, rate, savings }, i) => {
                 const isSelected = selectedPkg?.identifier === pkg.identifier;
-                const isBest = recommended?.identifier === pkg.identifier;
-                const planKey = PLAN_KEY[pkg.packageType];
+                // A lone plan is not a "deal" against anything (iOS sells one).
+                const isBest = plans.length > 1 && recommended?.identifier === pkg.identifier;
+                const type = planTypeOf(pkg);
+                const planKey = PLAN_KEY[type];
                 const showPerMonth = rate != null
-                  && pkg.packageType !== 'MONTHLY'
-                  && pkg.packageType !== 'LIFETIME';
+                  && type !== 'MONTHLY'
+                  && type !== 'LIFETIME';
                 return (
                   <TouchableOpacity
                     key={pkg.identifier || i}
@@ -704,6 +734,15 @@ const SubscriptionScreen = ({ visible, onClose, track, showoffer, oneWallOnly, i
               ? <ActivityIndicator size="small" color={P.GOLD} />
               : <Text style={s.footerLink}>{t('paywall.restore')}</Text>}
           </TouchableOpacity>
+          {/* Android only: App Store rule 3.1.1, and iOS has no sign-in. */}
+          {!IOS_LIMITED && (
+            <>
+              <Text style={s.footerDot}>·</Text>
+              <TouchableOpacity onPress={() => setShowPromo(true)} hitSlop={FOOTER_SLOP}>
+                <Text style={s.footerLink}>{t('promo.paywall_link')}</Text>
+              </TouchableOpacity>
+            </>
+          )}
           {legalLinks.map(({ key, url }) => (
             <React.Fragment key={key}>
               <Text style={s.footerDot}>·</Text>
@@ -714,6 +753,23 @@ const SubscriptionScreen = ({ visible, onClose, track, showoffer, oneWallOnly, i
           ))}
         </View>
       </View>
+      {!IOS_LIMITED && (
+        <>
+          <PromoCodeModal
+            visible={showPromo}
+            onClose={() => setShowPromo(false)}
+            onNeedSignIn={() => { setShowPromo(false); setShowSignIn(true); }}
+            onRedeemed={onClose}
+          />
+          <SignInDrawer
+            visible={showSignIn}
+            onClose={() => setShowSignIn(false)}
+            selectedTheme={{ colors: { text: P.TEXT } }}
+            message='Signin to access all features'
+            screen='Paywall'
+          />
+        </>
+      )}
     </View>
   );
 

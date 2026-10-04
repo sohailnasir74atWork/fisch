@@ -184,7 +184,7 @@ const ModsScreen = () => {
       {loading ? (
         <ActivityIndicator size="large" color={c.primary} style={{ marginTop: 40 }} />
       ) : (
-        <SectionList
+        <SectionList removeClippedSubviews={false}
           sections={sections}
           keyExtractor={(item) => item.uid}
           contentContainerStyle={{ padding: SPACE.xl, paddingBottom: 40 }}

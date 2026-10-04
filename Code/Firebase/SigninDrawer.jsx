@@ -21,7 +21,6 @@ import { useGlobalState } from '../GlobelStats';
 import ConditionalKeyboardWrapper from '../Helper/keyboardAvoidingContainer';
 import { useTranslation } from 'react-i18next';
 import { showSuccessMessage, showErrorMessage, showWarningMessage } from '../Helper/MessageHelper';
-import { mixpanel } from '../AppHelper/MixPenel';
 import { requestPermission } from '../Helper/PermissionCheck';
 import config from '../Helper/Environment';
 // import { showMessage } from 'react-native-flash-message';
@@ -41,7 +40,17 @@ import {
   GoogleAuthProvider,
   AppleAuthProvider,
   signOut,
+  onAuthStateChanged,
+  sendEmailVerification,
 } from '@react-native-firebase/auth';
+
+// When Google's servers refuse a network (403) the SDK hands back the HTML
+// error page inside error.message ("Json conversion failed ... <!DOCTYPE
+// html>"), and the sheet printed that page verbatim. Treat it as the
+// connection problem it is, and never show raw text that is long or markup.
+const isServerPageError = (msg) => /<!DOCTYPE|<html|Json conversion failed|\b403\b/i.test(msg || '');
+const readableError = (msg, fallback) =>
+  msg && !isServerPageError(msg) && msg.length <= 160 ? msg : fallback;
 
 const SignInDrawer = ({ visible, onClose, selectedTheme, message, screen }) => {
   const insets = useSafeAreaInsets();
@@ -55,12 +64,48 @@ const SignInDrawer = ({ visible, onClose, selectedTheme, message, screen }) => {
   const [isForgotPasswordMode, setIsForgotPasswordMode] = useState(false);
 
   const { triggerHapticFeedback } = useHaptic();
-  const { theme, robloxUsernameRef } = useGlobalState();
+  const { theme, robloxUsernameRef, user } = useGlobalState();
   const { t } = useTranslation();
 
   // 🔐 Modular Auth instance
   const app = getApp();
   const auth = getAuth(app);
+
+  // Signs out an email/password user who has not verified yet. GlobelStats'
+  // backstop also signs such users out if they are still signed in 3 s later,
+  // which a slow email send can outlast, and RNFB's signOut() rejects with
+  // auth/no-current-user when nobody is signed in. Uncaught, that swapped the
+  // "check your inbox" alert for "Failed to sign in". (From Adopt Me.)
+  // Opened while Firebase already holds a session whose profile is still
+  // loading (a slow login after the 3 s splash cap): this player IS signed in,
+  // so show "loading your account" instead of the sign-in form, and close by
+  // itself once the profile lands. Decided when the drawer opens only, so a
+  // sign-in that starts inside the drawer is never affected. (From mm2values.)
+  const [restoring, setRestoring] = useState(false);
+  useEffect(() => {
+    setRestoring(visible && !!auth.currentUser && !user?.id);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [visible]);
+  useEffect(() => {
+    if (restoring && user?.id) {
+      setRestoring(false);
+      onClose?.();
+    }
+  }, [restoring, user?.id, onClose]);
+  useEffect(() => {
+    if (!restoring) return undefined;
+    // The session went away instead (e.g. unverified email): show the form.
+    return onAuthStateChanged(auth, (u) => { if (!u) setRestoring(false); });
+  }, [restoring, auth]);
+
+  const signOutUnverified = async () => {
+    if (!auth.currentUser) return;
+    try {
+      await signOut(auth);
+    } catch (e) {
+      if (e?.code !== 'auth/no-current-user') throw e;
+    }
+  };
 
   const isDarkMode = theme === 'dark';
 
@@ -113,7 +158,7 @@ const SignInDrawer = ({ visible, onClose, selectedTheme, message, screen }) => {
     } catch (error) {
       showErrorMessage(
         t('home.alert.error'),
-        error?.message || t('signin.error_reset_password')
+        readableError(error?.message, t('signin.error_reset_password'))
       );
     } finally {
       setIsLoading(false);
@@ -136,12 +181,11 @@ const SignInDrawer = ({ visible, onClose, selectedTheme, message, screen }) => {
 
       showSuccessMessage(t('home.alert.success'), t('signin.success_signin'));
       setTimeout(onClose, 200);
-      mixpanel.track(`Login with apple from ${screen}`);
       await requestPermission();
     } catch (error) {
       showErrorMessage(
         t('home.alert.error'),
-        error?.message || t('signin.error_signin_message')
+        readableError(error?.message, t('signin.error_signin_message'))
       );
     }
   }, [auth, t, triggerHapticFeedback, onClose, screen]);
@@ -169,8 +213,8 @@ const SignInDrawer = ({ visible, onClose, selectedTheme, message, screen }) => {
         const user = userCredential.user;
 
         if (!user.emailVerified) {
-          await user.sendEmailVerification();
-          await signOut(auth);
+          await sendEmailVerification(user);
+          await signOutUnverified();
 
           Alert.alert(
             '✅ Account Created',
@@ -184,8 +228,8 @@ const SignInDrawer = ({ visible, onClose, selectedTheme, message, screen }) => {
         const user = userCredential.user;
 
         if (!user.emailVerified) {
-          await user.sendEmailVerification();
-          await signOut(auth);
+          await sendEmailVerification(user);
+          await signOutUnverified();
 
           Alert.alert(
             '📩 Email Not Verified',
@@ -194,7 +238,6 @@ const SignInDrawer = ({ visible, onClose, selectedTheme, message, screen }) => {
           return;
         }
 
-        mixpanel.track(`Login with email from ${screen}`);
         Alert.alert(t('signin.alert_welcome_back'), t('signin.success_signin'));
         await requestPermission();
         setTimeout(onClose, 200);
@@ -239,7 +282,6 @@ const SignInDrawer = ({ visible, onClose, selectedTheme, message, screen }) => {
 
       showSuccessMessage(t('signin.alert_welcome_back'), t('signin.success_signin'));
       setTimeout(onClose, 200);
-      mixpanel.track(`Login with google from ${screen}`);
       await requestPermission();
     } catch (error) {
       // Every Google failure used to render the same "unexpected error", which
@@ -258,7 +300,8 @@ const SignInDrawer = ({ visible, onClose, selectedTheme, message, screen }) => {
         code === '2' || code === 2 || /play\s*services/i.test(msg);
       const networkish =
         /network|timeout|unreachable|failed to connect|ETIMEDOUT|ENOTFOUND/i.test(msg) ||
-        code === 'auth/network-request-failed';
+        code === 'auth/network-request-failed' ||
+        isServerPageError(msg);
 
       if (noPlayServices) {
         showErrorMessage(
@@ -277,13 +320,27 @@ const SignInDrawer = ({ visible, onClose, selectedTheme, message, screen }) => {
       } else {
         showErrorMessage(
           t('signin.error_google_signin', { defaultValue: 'Google Sign-In Error' }),
-          error?.message || t('signin.error_signin_message')
+          readableError(error?.message, t('signin.error_signin_message'))
         );
       }
     } finally {
       setIsLoading(false);
     }
   }, [auth, t, triggerHapticFeedback, onClose, screen]);
+
+  if (visible && restoring) {
+    return (
+      <Modal visible animationType="slide" transparent onRequestClose={onClose}>
+        <Pressable style={styles.modalOverlay} onPress={onClose} />
+        <View style={[styles.drawer, { backgroundColor: isDarkMode ? config.colors.surfaceDark : config.colors.surfaceLight, paddingBottom: insets.bottom }]}>
+          <View style={styles.restoringBox}>
+            <ActivityIndicator size="large" color={selectedTheme.colors.text} />
+            <Text style={[styles.text, styles.restoringText, { color: selectedTheme.colors.text }]}>{t('signin.restoring', { defaultValue: 'Loading your account…' })}</Text>
+          </View>
+        </View>
+      </Modal>
+    );
+  }
 
   return (
     <Modal visible={visible} animationType="slide" transparent onRequestClose={onClose}>
@@ -467,6 +524,15 @@ const SignInDrawer = ({ visible, onClose, selectedTheme, message, screen }) => {
 };
 
 const styles = StyleSheet.create({
+  restoringBox: {
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingVertical: 36,
+  },
+  restoringText: {
+    marginTop: SPACE.xl,
+    textAlign: 'center',
+  },
   modalOverlay: {
     flex: 1,
     backgroundColor: 'rgba(0,0,0,0.5)',

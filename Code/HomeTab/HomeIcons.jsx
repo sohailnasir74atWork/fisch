@@ -69,6 +69,18 @@ const drawings = {
     <Path d="m10 5 6 4 6-4 7 7-5 5-2-2v13H10V15l-2 2-5-5Z" />
     <Path d="m16 15 1 3 3 1-3 1-1 3-1-3-3-1 3-1Z" />
   </>,
+  settings: <>
+    <Circle cx="16" cy="16" r="8" fill="currentColor" fillOpacity={0.12} />
+    <Circle cx="16" cy="16" r="8" />
+    <Circle cx="16" cy="16" r="3" />
+    <Path d="M16 4v4m0 16v4M4 16h4m16 0h4M7.5 7.5l2.8 2.8m11.4 11.4 2.8 2.8M7.5 24.5l2.8-2.8m11.4-11.4 2.8-2.8" strokeWidth={3} />
+  </>,
+  calculator: <>
+    <Rect x="7" y="3" width="18" height="26" rx="3" fill="currentColor" fillOpacity={0.12} />
+    <Rect x="7" y="3" width="18" height="26" rx="3" />
+    <Rect x="10.5" y="6.5" width="11" height="5" rx="1" />
+    <Path d="M11 16h2m3 0h2m3 0h2M11 20h2m3 0h2m3 0h2M11 24h2m3 0h2m3 0h2" />
+  </>,
 };
 
 function HomeIcon({ name, size = 24, color = '#0E7C94' }) {

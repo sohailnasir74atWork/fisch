@@ -40,6 +40,8 @@ export const ChatStack = ({ selectedTheme, setChatFocused, modalVisibleChatinfo,
   const [groupsLoading, setGroupsLoading] = useState(false);
   const [groupUnreadCount, setGroupUnreadCount] = useState(0); // Total unread count for groups
   const prevGroupsRef = useRef(null); // ✅ Track previous groups to avoid unnecessary re-renders
+  // Whose groups prevGroupsRef describes. See the groups listener below.
+  const prevGroupsOwnerRef = useRef(null);
   // Mirror of bannedUsers read inside the RTDB listeners, so the listener effect
   // does NOT need bannedUsers in its deps (which would tear down + re-attach all
   // three child listeners — and re-read the node — on every banned-list change).
@@ -200,9 +202,21 @@ export const ChatStack = ({ selectedTheme, setChatFocused, modalVisibleChatinfo,
 
   // ✅ Load groups from group_meta_data
   useEffect(() => {
+    // prevGroupsRef is a "skip setGroups if nothing changed" cache. Every path
+    // that empties `groups` must empty it too: sign-out cleared the list but
+    // left the cache holding the old groups, so signing back in to the same
+    // account compared equal, setGroups was skipped, and the list stayed
+    // empty until something in a group changed.
     if (!user?.id || !appdatabase) {
+      prevGroupsRef.current = null;
+      prevGroupsOwnerRef.current = null;
       setGroups([]);
+      setGroupUnreadCount(0);
       return;
+    }
+    if (prevGroupsOwnerRef.current !== user.id) {
+      prevGroupsRef.current = null;
+      prevGroupsOwnerRef.current = user.id;
     }
 
     // Same as the unread listeners above: not held while backgrounded.
@@ -214,6 +228,7 @@ export const ChatStack = ({ selectedTheme, setChatFocused, modalVisibleChatinfo,
     const unsubGroups = onValue(userGroupsRef, (snapshot) => {
       try {
         if (!snapshot.exists()) {
+          prevGroupsRef.current = [];
           setGroups([]);
           setGroupUnreadCount(0);
           setGroupsLoading(false);
@@ -222,6 +237,7 @@ export const ChatStack = ({ selectedTheme, setChatFocused, modalVisibleChatinfo,
 
         const fetchedData = snapshot.val();
         if (!fetchedData || typeof fetchedData !== 'object') {
+          prevGroupsRef.current = [];
           setGroups([]);
           setGroupUnreadCount(0);
           setGroupsLoading(false);
@@ -242,6 +258,12 @@ export const ChatStack = ({ selectedTheme, setChatFocused, modalVisibleChatinfo,
             unreadCount: groupData.unreadCount || 0,
             memberCount: groupData.memberCount || 0,
             createdBy: groupData.createdBy || null, // Add creator info
+            // Both were on the row but dropped here. Without `description`
+            // the Edit sheet opened blank; without `muted` GroupsScreen had to
+            // read each group's flag separately and its switch drifted out of
+            // sync with the real value.
+            description: groupData.description || null,
+            muted: !!groupData.muted,
           };
         }).filter(Boolean);
 
@@ -257,7 +279,8 @@ export const ChatStack = ({ selectedTheme, setChatFocused, modalVisibleChatinfo,
               g.groupAvatar !== p.groupAvatar || g.lastMessage !== p.lastMessage ||
               g.lastMessageTimestamp !== p.lastMessageTimestamp ||
               g.unreadCount !== p.unreadCount || g.memberCount !== p.memberCount ||
-              g.createdBy !== p.createdBy;
+              g.createdBy !== p.createdBy || g.description !== p.description ||
+              g.muted !== p.muted;
           });
 
         if (hasChanged) {

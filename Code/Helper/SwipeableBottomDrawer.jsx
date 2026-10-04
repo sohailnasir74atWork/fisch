@@ -15,6 +15,7 @@
 import React, { useRef } from 'react';
 import { View, Animated, PanResponder, StyleSheet, Platform } from 'react-native';
 import { SPACE } from '../Design/tokens';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 const SWIPE_THRESHOLD = 80; // px needed to trigger close
 
@@ -27,6 +28,7 @@ const SwipeableBottomDrawer = ({
   pillColor,
   showPill = true,
 }) => {
+  const insets = useSafeAreaInsets();
   const translateY = useRef(new Animated.Value(0)).current;
 
   const panResponder = useRef(
@@ -89,6 +91,10 @@ const SwipeableBottomDrawer = ({
           transform: [{ translateY }],
         },
         style,
+        // Lift content above the Android nav bar / iOS home indicator (Adopt
+        // Me does the same). Applied last so it overrides a caller's fixed
+        // paddingBottom — the profile drawer passed 0 and sat under the bar.
+        { paddingBottom: insets.bottom },
       ]}
       {...panResponder.panHandlers}
     >

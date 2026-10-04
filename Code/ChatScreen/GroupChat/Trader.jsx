@@ -23,12 +23,12 @@ import { useIsFocused, useNavigation } from '@react-navigation/native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import ProfileBottomDrawer from './BottomDrawer';
 import leoProfanity from 'leo-profanity';
+import { containsProfanity, stripGameNames } from '../../Helper/ContentModeration';
 import ConditionalKeyboardWrapper from '../../Helper/keyboardAvoidingContainer';
 import { useHaptic } from '../../Helper/HepticFeedBack';
 import { useLocalState } from '../../LocalGlobelStats';
-import database, { onValue, ref, remove, get, push, onChildAdded, query as dbQuery, orderByKey, limitToLast, endAt } from '@react-native-firebase/database';
+import { serverTimestamp, onValue, ref, remove, get, push, onChildAdded, onChildRemoved, query as dbQuery, orderByKey, limitToLast, limitToFirst, startAt, endAt } from '@react-native-firebase/database';
 import { useTranslation } from 'react-i18next';
-import { mixpanel } from '../../AppHelper/MixPenel';
 import InterstitialAdManager from '../../Ads/IntAd';
 import BannerAdComponent from '../../Ads/bannerAds';
 import { logoutUser } from '../../Firebase/UserLogics';
@@ -57,7 +57,9 @@ const ChatScreen = ({ selectedTheme, bannedUsers, modalVisibleChatinfo, setChatF
   setModalVisibleChatinfo, unreadMessagesCount, fetchChats, unreadcount, setunreadcount, onlineUsersVisible, setOnlineUsersVisible }) => {
   const { user, theme, appdatabase, setUser, isAdmin, currentUserEmail, strikeInfo, isUserBlocked } = useGlobalState();
   const [messages, setMessages] = useState([]);
-  const [input, setInput] = useState('');
+  // The draft lives in MessageInput, not here: lifted up, every keystroke
+  // re-rendered this whole screen and, through fresh callback props, every
+  // message row. handleSendMessage receives the trimmed text as an argument.
   const [replyTo, setReplyTo] = useState(null);
   const [loading, setLoading] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
@@ -88,6 +90,7 @@ const ChatScreen = ({ selectedTheme, bannedUsers, modalVisibleChatinfo, setChatF
   const [pendingMessages, setPendingMessages] = useState([]);
   const [isAtBottom, setIsAtBottom] = useState(true);
   const isFocused = useIsFocused();
+
   const [petModalVisible, setPetModalVisible] = useState(false);
 const [selectedFruits, setSelectedFruits] = useState([]); 
 const [device, setDevice] = useState(null)
@@ -118,7 +121,11 @@ const [bannerHeight, setBannerHeight] = useState(0); // measured, 0 when no ad i
   useEffect(() => {
     if (isAtBottom && pendingMessages.length > 0) {
       // console.log("✅ User scrolled to bottom. Releasing held messages...");
-      setMessages((prev) => [...pendingMessages, ...prev]);
+      // A held message can also arrive via a refresh while it waits here.
+      setMessages((prev) => {
+        const seen = new Set(prev.map((msg) => msg?.id).filter(Boolean));
+        return [...pendingMessages.filter((msg) => !seen.has(msg?.id)), ...prev];
+      });
       setPendingMessages([]); // Clear the queue
     }
   }, [isAtBottom, pendingMessages]);
@@ -174,7 +181,6 @@ const startPrivateChat = useCallback(() => {
     if (navigation && typeof navigation.navigate === 'function') {
       navigation.navigate('PrivateChat', { selectedUser, selectedTheme });
     }
-    mixpanel.track("Inbox Chat");
   };
   callbackfunction();
 }, [selectedUser, selectedTheme, closeProfileDrawer]);
@@ -215,7 +221,7 @@ const startPrivateChat = useCallback(() => {
     setPendingMessages([]);
     setLastLoadedKey(null);
     setReplyTo(null);
-    setInput('');
+    // The draft is cleared by MessageInput itself, keyed on the channel id.
   }, [activeChannel.id, triggerHapticFeedback]);
 
   // Everything downstream already depends on chatRef — loadMessages, the
@@ -226,6 +232,20 @@ const startPrivateChat = useCallback(() => {
     [appdatabase, activeChannel.path],
   );
   const pinnedMessagesRef = useMemo(() => ref(appdatabase, 'pin_messages'), []);
+
+  // A page request that resolves after a channel switch belongs to the old
+  // room; compare against the live ref and drop it. The in-flight flag stops
+  // onEndReached (which fires repeatedly) from requesting the same page twice.
+  const currentChatRef = useRef(chatRef);
+  currentChatRef.current = chatRef;
+  const loadingMoreRef = useRef(false);
+  // Bumped by every reset. A load-more page that resolves after a reset
+  // (pull-to-refresh, gap-fill reload) would append rows from the old cursor
+  // under the fresh first page and leave a hole in the middle; drop it.
+  // A silent reset keeps the list mounted, so onEndReached can still fire
+  // while it runs, with the OLD cursor in its closure: refuse those too.
+  const resetGenRef = useRef(0);
+  const resetsInFlightRef = useRef(0);
 
   // const isAdmin = user?.admin || false;
   // const isOwner = user?.owner || false;
@@ -258,25 +278,56 @@ const startPrivateChat = useCallback(() => {
   }, []);
   
 
+  // opts.silent: reload in place without the full-screen spinner. Swapping
+  // the list for an ActivityIndicator unmounts it, so a pull-to-refresh or a
+  // gap-fill reload threw away the scroll position (Adopt Me d037f48).
   const loadMessages = useCallback(
-    async (reset = false) => {
+    async (reset = false, opts = null) => {
+      const silent = !!opts?.silent;
+      // Guard OUTSIDE the try: an early return inside it would run `finally`
+      // and clear the flag that the in-flight request still owns.
+      if (!reset) {
+        if (loadingMoreRef.current || resetsInFlightRef.current > 0) return;
+        loadingMoreRef.current = true;
+      } else {
+        resetsInFlightRef.current += 1;
+      }
+      const gen = reset ? ++resetGenRef.current : resetGenRef.current;
       try {
         if (reset) {
           // console.log('Resetting messages and loading the latest ones.');
-          setLoading(true);
+          if (!silent) setLoading(true);
           setLastLoadedKey(null); // Reset pagination key
         }
 
         // console.log(`Fetching messages. Reset: ${reset}, LastLoadedKey: ${lastLoadedKey}`);
 
+        const requestRef = chatRef;
+
         // ✅ Use INITIAL_PAGE_SIZE for first load, PAGE_SIZE for pagination
+        //
+        // endAt() is INCLUSIVE: a page ending at the cursor re-reads the cursor
+        // message, which is already on screen. That was the duplicate bug —
+        // every page appended one repeat, and in a short room (one message)
+        // the list never filled the screen, so onEndReached kept firing and
+        // the same message was appended again and again. Fetch one extra and
+        // drop the cursor key.
         const limitSize = reset ? INITIAL_PAGE_SIZE : PAGE_SIZE;
         const messageQuery = reset
           ? dbQuery(chatRef, orderByKey(), limitToLast(limitSize))
-          : dbQuery(chatRef, orderByKey(), endAt(lastLoadedKey), limitToLast(limitSize));
+          : dbQuery(chatRef, orderByKey(), endAt(lastLoadedKey), limitToLast(limitSize + 1));
 
         const snapshot = await get(messageQuery);
+        if (currentChatRef.current !== requestRef) return; // channel switched mid-request
+        if (resetGenRef.current !== gen) return; // a newer reset owns the list now
         const data = snapshot.val() || {};
+        if (!reset && lastLoadedKey) delete data[lastLoadedKey];
+
+        // The cursor comes from the RAW keys, before the banned-user filter:
+        // push keys sort chronologically, and a page whose oldest rows were
+        // all filtered out must still move the cursor past them.
+        const rawKeys = Object.keys(data).sort();
+        const oldestKey = rawKeys.length > 0 ? rawKeys[0] : null;
 
         // if (developmentMode) {
         //   const dataSize = JSON.stringify(data).length / 1024;
@@ -302,7 +353,7 @@ const startPrivateChat = useCallback(() => {
   
         // console.log('Parsed Messages:', parsedMessages);
 
-        if (parsedMessages.length === 0 && !reset) {
+        if (!oldestKey && !reset) {
           // console.log('No more messages to load.');
           setLastLoadedKey(null);
           return;
@@ -312,19 +363,30 @@ const startPrivateChat = useCallback(() => {
           setMessages(parsedMessages);
           // console.log('Resetting messages:', parsedMessages);
         } else {
-          setMessages((prev) => [...prev, ...parsedMessages]);
+          // Merge by id: the realtime listener or a refresh may already hold
+          // some of these rows.
+          setMessages((prev) => {
+            const seen = new Set(prev.map((msg) => msg?.id).filter(Boolean));
+            return [...prev, ...parsedMessages.filter((msg) => !seen.has(msg.id))];
+          });
           // console.log('Appending messages:', parsedMessages);
         }
 
-        if (parsedMessages.length > 0) {
-          // Use the last key from the newly fetched messages
-          setLastLoadedKey(parsedMessages[parsedMessages.length - 1].id);
-          // console.log('Updated LastLoadedKey:', parsedMessages[parsedMessages.length - 1].id);
-        }
+        // A page shorter than its limit reached the start of the room: there is
+        // nothing older, so stop paging instead of re-querying forever.
+        const reachedStart = rawKeys.length < limitSize;
+        setLastLoadedKey(reachedStart ? null : oldestKey);
       } catch (error) {
         // console.error('Error loading messages:', error);
       } finally {
-        if (reset) setLoading(false);
+        if (reset) {
+          resetsInFlightRef.current = Math.max(0, resetsInFlightRef.current - 1);
+          // Only the last reset standing hides the spinner: an older one that
+          // was superseded (channel switch) must not reveal a half-loaded room.
+          if (resetsInFlightRef.current === 0) setLoading(false);
+        } else {
+          loadingMoreRef.current = false;
+        }
       }
     },
     [chatRef, lastLoadedKey, validateMessage, bannedUsers, appdatabase]
@@ -369,26 +431,89 @@ const startPrivateChat = useCallback(() => {
       });
     });
   
+    // Unpins made elsewhere (another moderator) never left this screen.
+    const unsubUnpinned = onChildRemoved(pinnedMessagesRef, (snapshot) => {
+      if (!snapshot || !snapshot.key) return;
+      setPinnedMessages((prev) => prev.filter((msg) => msg.firebaseKey !== snapshot.key));
+    });
+
     return () => {
       unsubPinned();
+      unsubUnpinned();
     };
   }, []);
   
   useEffect(() => {
     const platform = Platform.OS; // "ios" or "android"
   
-    // console.log('Initial loading of messages.');
-    loadMessages(true); // Reset and load the latest messages
     if (setChatFocused && typeof setChatFocused === 'function') {
       setChatFocused(false);
     }
     setDevice(platform);
   }, [ setChatFocused]);
 
+  // Reset and load the latest messages — on mount AND on every channel
+  // switch. This used to run on mount only, so a switched-to room showed
+  // nothing but the one message the realtime listener delivers, with
+  // pagination dead (no cursor) until a pull-to-refresh.
+  useEffect(() => {
+    loadMessages(true);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [chatRef]);
+
   // const bannedUserIds = bannedUsers.map((user) => user.id); // Extract IDs from bannedUsers
+
+  // Messages posted while this screen was out of focus. The live listener
+  // below only ever delivers the newest message when it re-attaches, so
+  // everything else sent while the user was on another tab stayed missing
+  // until a pull-to-refresh. Mirrors Adopt Me's gap-fill: fetch one small
+  // page after the newest message on screen; a full page means the gap is
+  // bigger than a screenful, so reload the newest page instead.
+  const messagesRef = useRef(messages);
+  messagesRef.current = messages;
+  const hasBeenFocusedRef = useRef(false);
+
+  const gapFill = useCallback(async () => {
+    const GAP_LIMIT = 40;
+    const newestKey = (messagesRef.current || []).reduce(
+      (max, msg) => (msg?.id && (!max || msg.id > max) ? msg.id : max), null,
+    );
+    if (!newestKey || !chatRef) return;
+    try {
+      const requestRef = chatRef;
+      const snap = await get(dbQuery(chatRef, orderByKey(), startAt(newestKey), limitToFirst(GAP_LIMIT + 1)));
+      if (currentChatRef.current !== requestRef) return; // room switched meanwhile
+      const data = snap.val() || {};
+      delete data[newestKey];
+      const keys = Object.keys(data);
+      if (keys.length === 0) return;
+      if (keys.length >= GAP_LIMIT) {
+        // In place: the user is coming back to this tab, don't blank it.
+        loadMessages(true, { silent: true });
+        return;
+      }
+      const banned = Array.isArray(bannedUsersRef.current) ? bannedUsersRef.current : [];
+      const fresh = keys
+        .map((key) => validateMessage({ id: key, ...data[key] }))
+        .filter((msg) => msg?.senderId && !banned.includes(msg.senderId));
+      if (fresh.length === 0) return;
+      setMessages((prev) => {
+        const seen = new Set((prev || []).map((msg) => msg?.id).filter(Boolean));
+        const toAdd = fresh.filter((msg) => !seen.has(msg.id));
+        if (toAdd.length === 0) return prev;
+        return [...toAdd, ...prev].sort((a, b) => (b?.timestamp || 0) - (a?.timestamp || 0));
+      });
+    } catch (error) {
+      // Non-fatal: pull-to-refresh still recovers.
+    }
+  }, [chatRef, validateMessage, loadMessages]);
 
   useEffect(() => {
     if (!isFocused || !chatRef) return;
+
+    // The first focus is covered by the initial load; only returns need this.
+    if (hasBeenFocusedRef.current) gapFill();
+    hasBeenFocusedRef.current = true;
 
     const unsubChat = onChildAdded(dbQuery(chatRef, limitToLast(1)), (snapshot) => {
       if (!snapshot || !snapshot.key) return;
@@ -429,7 +554,12 @@ const startPrivateChat = useCallback(() => {
     };
     // isAtBottom + bannedUsers read via refs (above) so the listener attaches
     // once per focus, not on every scroll toggle / banned-list change.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [chatRef, validateMessage, isFocused]);
+
+  // A channel switch reloads from scratch; don't gap-fill the new room
+  // against the old room's newest key.
+  useEffect(() => { hasBeenFocusedRef.current = false; }, [chatRef]);
 
 
 
@@ -457,9 +587,12 @@ const startPrivateChat = useCallback(() => {
 
 
 
-  const handlePinMessage = async (message) => {
+  // MessagesList is memoised and its rows list these in renderMessage's deps,
+  // so each one must keep its identity between renders or every row repaints.
+  const handlePinMessage = useCallback(async (message) => {
     try {
-      const pinnedMessage = { ...message, pinnedAt: Date.now() };
+      // Tag the room: pins used to show in every language room at once.
+      const pinnedMessage = { ...message, pinnedAt: Date.now(), channel: activeChannel.id };
       const newRef = await push(pinnedMessagesRef, pinnedMessage);
   
       // Use the Firebase key for tracking the message
@@ -471,7 +604,38 @@ const startPrivateChat = useCallback(() => {
       console.error('Error pinning message:', error);
       Alert.alert(t('home.alert.error'), 'Could not pin the message. Please try again.');
     }
-  };
+  }, [activeChannel.id, pinnedMessagesRef, t]);
+
+  const handleReply = useCallback((message) => {
+    setReplyTo(message); // Pass selected message to MessageInput
+    triggerHapticFeedback('impactLight');
+  }, [triggerHapticFeedback]);
+
+  const handleCancelReply = useCallback(() => setReplyTo(null), []);
+
+  const handleDeleteMessage = useCallback(async (messageId) => {
+    try {
+      await remove(ref(
+        appdatabase,
+        // The id is prefixed with the node it came from, so strip
+        // whichever channel is active rather than assuming chat_new.
+        `${activeChannel.path}/${messageId.replace(`${activeChannel.path}-`, '')}`,
+      ));
+      // The live listener only reports additions, so the deleted
+      // message stayed on the moderator's own screen too.
+      setMessages((prev) => prev.filter((msg) => msg.id !== messageId));
+    } catch (error) {
+      Alert.alert(t('home.alert.error'), 'Could not delete the message.');
+    }
+  }, [appdatabase, activeChannel.path, t]);
+
+  const handleDeleteAllFromSender = useCallback(async (senderId) => {
+    // showAlert: this used to run silently, with no sign it worked.
+    const res = await handleDeleteLast300Messages(senderId, true);
+    if (res?.success !== false) {
+      setMessages((prev) => prev.filter((msg) => msg.senderId !== senderId));
+    }
+  }, []);
   
 
 
@@ -516,18 +680,24 @@ const startPrivateChat = useCallback(() => {
   // duplicated the read and compared against the device clock.
 
 
-  const handleRefresh = async () => {
+  const handleRefresh = useCallback(async () => {
     setRefreshing(true);
-    await loadMessages(true);
+    // RefreshControl already shows progress; don't also blank the list.
+    await loadMessages(true, { silent: true });
     setRefreshing(false);
     // fetchChats()
-  };
+  }, [loadMessages]);
 
   // expects to be called like:
 // await handleSendMessage(replyTo, trimmedInput, fruits);
 
+// Returns true when the message was written and false when it was refused, so
+// MessageInput only clears what the user typed on success. Every refusal used
+// to return undefined and the input wiped the text anyway.
 const handleSendMessage = async (replyToArg, trimmedInputArg, fruits, emojiUrl) => {
   const hasEmoji  = !!emojiUrl;
+  // Admins and full moderators skip the word and link filters, as in Adopt Me.
+  const canBypassModeration = !!isAdmin || (!!user?.isModerator && !user?.isBabyMod);
 
   // console.log(emojiUrl)
   const hasFruits = Array.isArray(fruits) && fruits.length > 0;
@@ -543,7 +713,7 @@ const handleSendMessage = async (replyToArg, trimmedInputArg, fruits, emojiUrl) 
       description: 'You must be logged in to send Messages',
       type: 'danger',
     });
-    return;
+    return false;
   }
 
   // ---- Strike / ban checks ----
@@ -556,7 +726,7 @@ const handleSendMessage = async (replyToArg, trimmedInputArg, fruits, emojiUrl) 
       description: t('chat.banned_message', { defaultValue: 'You are banned from sending messages.' }),
       type: 'danger',
     });
-    return;
+    return false;
   }
 
   if (strikeInfo) {
@@ -570,7 +740,7 @@ const handleSendMessage = async (replyToArg, trimmedInputArg, fruits, emojiUrl) 
         description: 'You are permanently banned from sending messages.',
         type: 'danger',
       });
-      return;
+      return false;
     }
 
     // Temporary ban (timestamp in ms)
@@ -587,41 +757,44 @@ const handleSendMessage = async (replyToArg, trimmedInputArg, fruits, emojiUrl) 
         type: 'warning',
         duration: 5000,
       });
-      return;
+      return false;
     }
   }
 
   // Use the argument, not external state
   const trimmedInput = (trimmedInputArg || '').trim();
 
-  // ✅ Validate fruits count - maximum 18 fruits allowed
+  // ✅ Validate item count - maximum 18 items allowed
   if (hasFruits && fruits.length > 18) {
-    Alert.alert(t('home.alert.error'), 'You can only send up to 18 pets in a message.');
-    return;
+    Alert.alert(t('home.alert.error'), 'You can only send up to 18 items in a message.');
+    return false;
   }
 
   // Disallow empty text + no fruits
   if (!trimmedInput && !hasFruits && !emojiUrl) {
     Alert.alert(t('home.alert.error'), 'Message cannot be empty.');
-    return;
+    return false;
   }
 
-  // Profanity check
-  if (trimmedInput && leoProfanity.check(trimmedInput)) {
+  // Profanity backstop. containsProfanity is the rebuilt filter (punctuation,
+  // leetspeak and spacing no longer defeat it); leo stays for the extra words
+  // this file adds to it. Both skip allowlisted item names ("Royal Escort").
+  if (trimmedInput && !canBypassModeration
+      && (containsProfanity(trimmedInput) || leoProfanity.check(stripGameNames(trimmedInput)))) {
     Alert.alert(t('home.alert.error'), t('misc.inappropriateLanguage'));
-    return;
+    return false;
   }
 
   // Length check
   if (trimmedInput.length > MAX_CHARACTERS) {
     Alert.alert(t('home.alert.error'), t('misc.messageTooLong'));
-    return;
+    return false;
   }
 
   // Cooldown check
   if (isCooldown) {
     Alert.alert(t('home.alert.error'), t('misc.sendingTooQuickly'));
-    return;
+    return false;
   }
 
   // ✅ Duplicate message check - prevent copy-paste spam (no Firebase cost, client-side only)
@@ -643,22 +816,22 @@ const handleSendMessage = async (replyToArg, trimmedInputArg, fruits, emojiUrl) 
         t('home.alert.error'),
         'You cannot send the same message twice. Please modify your message.',
       );
-      return;
+      return false;
     }
   }
 
-  // Link check (only for non-pro & non-admin)
+  // Link check (only for non-pro & non-staff)
   const containsLink = trimmedInput ? LINK_REGEX.test(trimmedInput) : false;
-  if (containsLink && !localState?.isPro && !isAdmin) {
+  if (containsLink && !localState?.isPro && !canBypassModeration) {
     Alert.alert(t('home.alert.error'), t('misc.proUsersOnlyLinks'));
-    return;
+    return false;
   }
 
   try {
     // ✅ Use chatRef instead of creating new ref
     if (!chatRef) {
       console.error('❌ Chat ref not available');
-      return;
+      return false;
     }
 
     // Push to Firebase Realtime Database
@@ -669,24 +842,37 @@ const handleSendMessage = async (replyToArg, trimmedInputArg, fruits, emojiUrl) 
 
     await push(chatRef, {
       text: trimmedInput || null, // allow fruits-only messages
-      timestamp: database.ServerValue.TIMESTAMP,
+      timestamp: serverTimestamp(),
       sender: user.displayName || 'Anonymous',
       senderId: user.id,
       avatar:
         user.avatar ||
         GAME.defaultAvatar,
+      // Enough context to preview an item-only or GIF-only message too;
+      // with only {id, text} those replies rendered "[Deleted message]".
       replyTo: replyToArg
-        ? { id: replyToArg.id, text: replyToArg.text }
+        ? {
+            id: replyToArg.id,
+            text: replyToArg.text || null,
+            sender: replyToArg.sender || null,
+            gif: replyToArg.gif || null,
+            hasFruits: Array.isArray(replyToArg.fruits) && replyToArg.fruits.length > 0,
+            fruitsCount: Array.isArray(replyToArg.fruits) ? replyToArg.fruits.length : 0,
+          }
         : null,
       reportCount: 0,
       containsLink,
       isPro: !!localState?.isPro,
       isAdmin: !!isAdmin,
+      // Stamped so Mod / JMD pills show on builds that read them from the
+      // message (every build before this one); newer builds also fall back
+      // to the profile cache.
+      isModerator: !!user?.isModerator,
+      isBabyMod: !!user?.isBabyMod,
       strikeCount: strikeInfo?.strikeCount ?? null,
       currentUserEmail,
       fruits: hasFruits ? fruits : [],
       gif: hasEmoji ? emojiUrl : null,
-      flage: user.flage ? user.flage : null,
       OS: Platform.OS, // ✅ Store platform (Android/iOS) - only visible to admins
       robloxUsername: user?.robloxUsername || null,
       robloxUsernameVerified: user?.robloxUsernameVerified || false,
@@ -698,19 +884,20 @@ const handleSendMessage = async (replyToArg, trimmedInputArg, fruits, emojiUrl) 
     // ✅ Store last sent message to prevent duplicates (session-based, no Firebase cost)
     lastSentMessageRef.current = currentMessage;
 
-    // Reset local input state
-    setInput('');
+    // MessageInput owns the draft and clears it when this returns true.
     setReplyTo(null);
 
     // Start cooldown
     setIsCooldown(true);
     setTimeout(() => setIsCooldown(false), MESSAGE_COOLDOWN);
+    return true;
   } catch (error) {
     console.error('Error sending message:', error);
     Alert.alert(
       t('home.alert.error'),
       'Could not send your message. Please try again.',
     );
+    return false;
   }
 };
 
@@ -759,7 +946,8 @@ const handleSendMessage = async (replyToArg, trimmedInputArg, fruits, emojiUrl) 
 
         <View style={styles.container}>
           <ChatHeaderContent
-            pinnedMessages={pinnedMessages}
+            // Untagged pins predate per-room pins and were made in English.
+            pinnedMessages={pinnedMessages.filter((p) => (p?.channel || 'en') === activeChannel.id)}
             onUnpinMessage={unpinSingleMessage}
             selectedTheme={selectedTheme}
             modalVisibleChatinfo={modalVisibleChatinfo}
@@ -780,18 +968,13 @@ const handleSendMessage = async (replyToArg, trimmedInputArg, fruits, emojiUrl) 
                 flatListRef={flatListRef}
                 isDarkMode={theme === 'dark'}
                 onPinMessage={handlePinMessage}
-                onDeleteMessage={(messageId) => remove(ref(
-                  appdatabase,
-                  // The id is prefixed with the node it came from, so strip
-                  // whichever channel is active rather than assuming chat_new.
-                  `${activeChannel.path}/${messageId.replace(`${activeChannel.path}-`, '')}`,
-                ))}
+                onDeleteMessage={handleDeleteMessage}
                 // isAdmin={isAdmin}
                 refreshing={refreshing}
                 onRefresh={handleRefresh}
-                onDeleteAllMessage={(senderId) => handleDeleteLast300Messages(senderId)}
+                onDeleteAllMessage={handleDeleteAllFromSender}
                 handleLoadMore={handleLoadMore}
-                onReply={(message) => { setReplyTo(message); triggerHapticFeedback('impactLight'); }} // Pass selected message to MessageInput
+                onReply={handleReply}
                 banUser={banUser}
                 // makeadmin={makeAdmin}
                 // onReport={onReport}
@@ -807,15 +990,26 @@ const handleSendMessage = async (replyToArg, trimmedInputArg, fruits, emojiUrl) 
                 
               />
             )}
+            {/* Banner between the list and the input, inside the keyboard
+                wrapper — Adopt Me's placement. It used to be absolutely
+                positioned at the screen bottom with a spacer, which on
+                resizing Androids put the ad between the text field and the
+                keyboard, right where the thumb lands. */}
+            {!localState.isPro && (
+              <View style={{ alignItems: 'center' }}>
+                <BannerAdComponent onHeightChange={setBannerHeight} />
+              </View>
+            )}
             <View style={{ backgroundColor: theme === 'dark' ? config.colors.backgroundDark : config.colors.backgroundLight }}>
               {user.id ? (
                 <MessageInput
-                  input={input}
-                  setInput={setInput}
+                  // A room switch clears the half-typed draft, as it did when
+                  // Trader owned the text.
+                  draftResetKey={activeChannel.id}
                   handleSendMessage={handleSendMessage}
                   selectedTheme={selectedTheme}
                   replyTo={replyTo} // Pass reply context to MessageInput
-                  onCancelReply={() => setReplyTo(null)} // Clear reply context
+                  onCancelReply={handleCancelReply} // Clear reply context
                   petModalVisible={petModalVisible}
                   setPetModalVisible={setPetModalVisible}
                   selectedFruits={selectedFruits}
@@ -848,12 +1042,6 @@ const handleSendMessage = async (replyToArg, trimmedInputArg, fruits, emojiUrl) 
     />
           </ConditionalKeyboardWrapper>
 
-          {/* Spacer: clears the absolutely-positioned banner so the input isn't
-              hidden behind it. Only while an ad is really on screen — with no
-              fill (or on Pro) the banner occupies nothing, and the tab bar is
-              docked in the layout flow, so anything reserved here is dead space
-              between the message input and the tab bar. */}
-          <View style={{ height: bannerHeight ? bannerBottomPos + bannerHeight : 0 }} />
 
           <SignInDrawer
             visible={isSigninDrawerVisible}
@@ -873,11 +1061,6 @@ const handleSendMessage = async (replyToArg, trimmedInputArg, fruits, emojiUrl) 
           bannedUsers={bannedUsers}
         />
       </GestureHandlerRootView>
-      {!localState.isPro && (
-        <View style={{ position: 'absolute', bottom: bannerBottomPos, left: 0, right: 0, alignItems: 'center', zIndex: 5 }}>
-          <BannerAdComponent onHeightChange={setBannerHeight} />
-        </View>
-      )}
     </>
   );
 };
