@@ -55,22 +55,23 @@ export const GAME = {
   //      Both used to print the literal text "${GAME.privacyPolicyUrl}".
   //   4. Code/Helper/Environment.js — `webSite` is an alias of this key.
   //
-  // privacyPolicyUrl is the owner's URL, set 2026-09-23. The page itself is
-  // not published yet (404 that day) — the owner will put it live before
-  // submission. A 404 policy link fails store review the same as a missing one.
+  // Fisch has no domain of its own; every legal page lives on the company
+  // site thesolanalabs.com (owner, 2026-10-04). All three returned 200 that
+  // day. Keep the trailing slash: without it the site answers with a 301.
   //
-  // termsUrl is still a PLACEHOLDER on fischvalues.app, a domain that is NOT
-  // REGISTERED (checked 2026-09-18). Replace it before any store submission.
+  // termsUrl is the company-wide Terms of Use, which covers every app the
+  // company publishes unless an app has its own terms.
   //
   // childSafetyUrl: there is no Fisch child-safety standards page yet, so it
   // opens the privacy policy (section 7, Children's privacy). It used to open
   // Adopt Me's page. Point it at a dedicated page once one is published.
-  privacyPolicyUrl: 'https://thesolanalabs.com/fisch/privacy',
-  childSafetyUrl: 'https://thesolanalabs.com/fisch/privacy',
-  termsUrl: 'https://fischvalues.app/terms',
+  privacyPolicyUrl: 'https://thesolanalabs.com/fisch/privacy/',
+  childSafetyUrl: 'https://thesolanalabs.com/fisch/privacy/',
+  termsUrl: 'https://thesolanalabs.com/terms-of-use/',
   // iOS uses Apple's standard EULA instead of termsUrl. App Review requires a
-  // working Terms/EULA link beside any subscription (guideline 3.1.2), and
-  // termsUrl above is still dead. Read it through termsUrlFor(), never directly.
+  // working Terms/EULA link beside any subscription (guideline 3.1.2), and it
+  // must match the EULA set in App Store Connect. Read it through
+  // termsUrlFor(), never directly.
   iosTermsUrl: 'https://www.apple.com/legal/internet-services/itunes/dev/stdeula/',
   store: {
     android: 'https://play.google.com/store/apps/details?id=com.fischvaluescalc',
