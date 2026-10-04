@@ -37,6 +37,11 @@ try {
 const APP_START_AT = Date.now();
 const COLD_START_BUDGET_MS = 4000;
 const K_LAUNCHED_BEFORE = 'appOpenLaunchedBefore';
+// At most one cold-start ad per this gap, like Adopt Me / Blox. Without it a
+// player reopening the app several times a day got a launch ad every time
+// (reviewed 2026-10-04; MM2 dropped launch ads over exactly that complaint).
+const COLD_START_MIN_GAP_MS = 4 * 60 * 60 * 1000;
+const K_LAST_COLD_AD = 'appOpenLastColdStartAt';
 let launchedBefore = false;
 try {
   // isAppReady is written to storage on every earlier launch, so installs
@@ -73,6 +78,7 @@ class AppOpenAdManager {
   static isShowing = false;
   static hasStarted = false;
   static showOnFirstLoad = false;
+  static coldStartPending = false;
   static wasBackgrounded = false;
   static backgroundedAt = 0;
   static retryCount = 0;
@@ -106,7 +112,9 @@ class AppOpenAdManager {
 
     // One ad on cold start via the same guarded path (Pro / cap / expiry all
     // respected) — but not on the first-ever launch. See the rules above.
-    this.showOnFirstLoad = launchedBefore;
+    let lastCold = 0;
+    try { lastCold = Number(storage?.getString(K_LAST_COLD_AD)) || 0; } catch (_) {}
+    this.showOnFirstLoad = launchedBefore && Date.now() - lastCold >= COLD_START_MIN_GAP_MS;
 
     ensureAdsInitialized()
       .then(() => this._createAndLoad())
@@ -154,7 +162,11 @@ class AppOpenAdManager {
       if (this.showOnFirstLoad) {
         this.showOnFirstLoad = false;
         // Too late: the player is already using the app.
-        if (Date.now() <= APP_START_AT + COLD_START_BUDGET_MS) this.showAdIfAvailable();
+        if (Date.now() <= APP_START_AT + COLD_START_BUDGET_MS) {
+          this.coldStartPending = true;
+          this.showAdIfAvailable();
+          if (!this.isShowing) this.coldStartPending = false;
+        }
       }
     });
 
@@ -168,6 +180,10 @@ class AppOpenAdManager {
     // a legitimately-open ad isn't force-reset out from under the user.
     const onOpened = this.ad.addAdEventListener(AdEventType.OPENED, () => {
       markFullScreenAdShown('app_open');
+      if (this.coldStartPending) {
+        this.coldStartPending = false;
+        try { storage?.set(K_LAST_COLD_AD, String(Date.now())); } catch (_) {}
+      }
       this._clearShowWatchdog();
     });
 
