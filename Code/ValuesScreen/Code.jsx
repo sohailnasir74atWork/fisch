@@ -21,6 +21,7 @@ import { getThemeColors } from '../Helper/themeColors';
 import { SIZE } from '../Design/tokens';
 import { SPACE } from '../Design/tokens';
 import { FONT } from '../Design/tokens';
+import { IOS_LIMITED } from '../config/iosLimited';
 
 const CodesDrawer = ({ isVisible, toggleModal, codes }) => {
   const insets = useSafeAreaInsets();
@@ -57,7 +58,9 @@ const CodesDrawer = ({ isVisible, toggleModal, codes }) => {
         )}
       </View>
       <View style={styles.rewardContainer}>
-        <Text style={styles.rewardText}>{t('value.reward')}: {item.reward}</Text>
+        <Text style={styles.rewardText}>
+          {IOS_LIMITED ? t('value.ingame_reward', { defaultValue: 'In-game reward' }) : t('value.reward')}: {item.reward}
+        </Text>
         <TouchableOpacity
           onPress={() => copyToClipboard(item.code)}
           style={styles.copyButton}
@@ -88,6 +91,22 @@ const CodesDrawer = ({ isVisible, toggleModal, codes }) => {
           renderItem={renderCodeItem}
           contentContainerStyle={styles.listContainer}
           showsVerticalScrollIndicator={false}
+          // App Review (3.1.1, 2026-10-14) read "Codes + Reward" as codes that
+          // unlock paid content in this app. Say plainly that they are the
+          // game's own codes, redeemed in Roblox. iOS is English-only.
+          ListHeaderComponent={IOS_LIMITED ? (
+            <View style={styles.header}>
+              <Text style={styles.headerText}>
+                {t('value.game_codes_title', { defaultValue: 'Fisch Game Codes' })}
+              </Text>
+              <Text style={styles.headerNote}>
+                {t('value.game_codes_note', {
+                  defaultValue:
+                    'These are official codes released by the developers of the Fisch game on Roblox. Enter them inside the Fisch game in Roblox to get in-game rewards. They are not redeemed in this app and do not unlock anything in this app.',
+                })}
+              </Text>
+            </View>
+          ) : null}
         />
           
       </View>
@@ -111,11 +130,22 @@ export const getStyles = (isDarkMode, c = getThemeColors(isDarkMode)) =>
       width: '100%',
       maxHeight: '60%',
     },
+    header: {
+      paddingBottom: SPACE.lg,
+      borderBottomWidth: 1,
+      borderBottomColor: c.border,
+    },
     headerText: {
       fontSize: SIZE.heading,
       fontFamily: FONT.bold,
       marginBottom: SPACE.lg,
       textAlign: 'center',
+      color: c.text,
+    },
+    headerNote: {
+      fontSize: SIZE.body,
+      textAlign: 'center',
+      color: c.textSecondary,
     },
     listContainer: {
       paddingBottom: SPACE.xxxl,

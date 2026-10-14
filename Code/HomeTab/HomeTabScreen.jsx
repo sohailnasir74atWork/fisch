@@ -442,7 +442,7 @@ const HomeTabScreen = ({ selectedTheme }) => {
             { icon: 'friends', accent: 'lagoon', label: t('home.friends') || 'Friends', onPress: () => guard(() => nav.navigate('SocialDashboard'), 'Sign in'), hideOnIosLimited: true },
             { icon: 'star', accent: 'amber', label: t('home.daily_stars'), onPress: () => guard(() => setShowDailyStars(true), 'Sign in'), hideOnIosLimited: true },
             { icon: 'trophy', accent: 'rose', label: t('home.top_rated'), onPress: () => nav.navigate('Leaderboard'), hideOnIosLimited: true },
-            { icon: 'gift', accent: 'kelp', label: t('home.codes', { defaultValue: 'Codes' }), onPress: () => setShowCodes(true) },
+            { icon: 'gift', accent: 'kelp', label: IOS_LIMITED ? t('home.game_codes', { defaultValue: 'Game Codes' }) : t('home.codes', { defaultValue: 'Codes' }), onPress: () => setShowCodes(true) },
             { icon: 'shield', accent: 'violet', label: t('home.our_team', { defaultValue: 'Our Team' }), onPress: () => nav.navigate('ModsScreen'), hideOnIosLimited: true },
             { icon: 'settings', accent: 'lagoon', label: t('tabs.settings'), onPress: () => nav.navigate('Setting'), iosLimitedOnly: true },
           ].filter((p) => (IOS_LIMITED ? !p.hideOnIosLimited : !p.iosLimitedOnly)).map((p) => {

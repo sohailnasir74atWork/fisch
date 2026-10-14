@@ -197,7 +197,8 @@
     "log_trade": "Log Trade",
     "trade_logged": "Trade Logged!",
     "trade_logged_message": "Saved to your Trade Journal.",
-    "our_team": "Our Team"
+    "our_team": "Our Team",
+    "game_codes": "Game Codes"
   },
   "value": {
     "title": "Value Screen",
@@ -225,7 +226,10 @@
     "hd_wallpaper": "HD Wallpaper",
     "news": "News",
     "admin": "Admin",
-    "reward": "Reward"
+    "reward": "Reward",
+    "ingame_reward": "In-game reward",
+    "game_codes_title": "Fisch Game Codes",
+    "game_codes_note": "These are official codes released by the developers of the Fisch game on Roblox. Enter them inside the Fisch game in Roblox to get in-game rewards. They are not redeemed in this app and do not unlock anything in this app."
   },
   "stock": {
     "description": "Disclaimer: Stock updates may sometimes be delayed as data is updated manually. We appreciate your patience and recommend checking back periodically for the latest updates.",
