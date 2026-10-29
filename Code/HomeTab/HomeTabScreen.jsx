@@ -435,14 +435,17 @@ const HomeTabScreen = ({ selectedTheme }) => {
         <View style={$.pillRow}>
           {[
             // hideOnIosLimited: pills the iOS limited build leaves out — the
-            // social ones, and Daily Stars because it is sign-in gated.
+            // social ones, Daily Stars because it is sign-in gated, and Codes:
+            // App Review rejected the game-codes list twice under 3.1.1 (codes
+            // "to be used in other apps or third-party platforms"), even
+            // relabelled — never show it on iOS.
             // iosLimitedOnly: Settings, whose entry point elsewhere is the
             // header avatar — the iOS header has no buttons at all.
             // See Code/config/iosLimited.js.
             { icon: 'friends', accent: 'lagoon', label: t('home.friends') || 'Friends', onPress: () => guard(() => nav.navigate('SocialDashboard'), 'Sign in'), hideOnIosLimited: true },
             { icon: 'star', accent: 'amber', label: t('home.daily_stars'), onPress: () => guard(() => setShowDailyStars(true), 'Sign in'), hideOnIosLimited: true },
             { icon: 'trophy', accent: 'rose', label: t('home.top_rated'), onPress: () => nav.navigate('Leaderboard'), hideOnIosLimited: true },
-            { icon: 'gift', accent: 'kelp', label: IOS_LIMITED ? t('home.game_codes', { defaultValue: 'Game Codes' }) : t('home.codes', { defaultValue: 'Codes' }), onPress: () => setShowCodes(true) },
+            { icon: 'gift', accent: 'kelp', label: t('home.codes', { defaultValue: 'Codes' }), onPress: () => setShowCodes(true), hideOnIosLimited: true },
             { icon: 'shield', accent: 'violet', label: t('home.our_team', { defaultValue: 'Our Team' }), onPress: () => nav.navigate('ModsScreen'), hideOnIosLimited: true },
             { icon: 'settings', accent: 'lagoon', label: t('tabs.settings'), onPress: () => nav.navigate('Setting'), iosLimitedOnly: true },
           ].filter((p) => (IOS_LIMITED ? !p.hideOnIosLimited : !p.iosLimitedOnly)).map((p) => {
@@ -543,12 +546,15 @@ const HomeTabScreen = ({ selectedTheme }) => {
       )}
 
       {/* Codes open here rather than on the Values tab. CodesDrawer is a
-          self-contained Modal, so it needs nothing from that screen. */}
+          self-contained Modal, so it needs nothing from that screen.
+          Not on iOS (App Review 3.1.1, see the pill list above). */}
+      {!IOS_LIMITED && (
       <CodesDrawer
         isVisible={showCodes}
         toggleModal={() => setShowCodes(v => !v)}
         codes={codesData}
       />
+      )}
 
       <Modal visible={showLangPicker} animationType="fade" transparent onRequestClose={() => setShowLangPicker(false)}>
         <TouchableOpacity style={$.langOverlay} activeOpacity={1} onPress={() => setShowLangPicker(false)}>

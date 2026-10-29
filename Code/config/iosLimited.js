@@ -15,7 +15,9 @@
  *   HomeTabScreen.jsx – the custom header band (App.js gives Home the plain
  *                       native stack header instead, title only), Friends,
  *                       Top Rated, Our Team, the status feed, Win / My
- *                       Cosmetics; adds the Calculator card and a Settings pill
+ *                       Cosmetics, the game Codes pill + drawer (App Review
+ *                       3.1.1, rejected twice); adds the Calculator card and
+ *                       a Settings pill
  *   Setting route     – IosSettings.jsx (Remove Ads, Restore, theme, support,
  *                       legal; no language picker) instead of the full Setting.jsx
  *   OfferWall.jsx     – sells Remove Ads only; CTA reads "Continue"
